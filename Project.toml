@@ -1,0 +1,29 @@
+name = "Stat_Econ"
+uuid = "093f57c3-1d46-4339-95b0-7420ea60c4f3"
+authors = ["Elvis Teodoro Casco Alfaro <ecasco1@gmail.com>"]
+version = "0.1.0"
+
+[deps]
+DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+FixedEffectModels = "9d5cd8c9-2029-5cab-9928-427838db53e3"
+GLM = "38e38edf-8417-5370-95a0-9cbb8c7f171a"
+PrecompileTools = "aea7be01-6a6a-4083-8856-8a6e6704d82a"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+ReadStatTables = "52522f7a-9570-4e34-8ac6-c005c74d4b84"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+StatsModels = "3eaba693-59b7-5ba5-a881-562e759f1c8d"
+
+[compat]
+DataFrames = "1"
+FixedEffectModels = "1"
+GLM = "1"
+PrecompileTools = "1"
+ReadStatTables = "0.3"
+StatsModels = "0.7"
+julia = "1.10"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
