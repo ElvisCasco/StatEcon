@@ -1,4 +1,4 @@
-# (deps provided by the Stat_Econ module)
+# (deps provided by the StatEcon module)
 
 # Gaussian kernel-density estimate, dependency-free (Statistics only).
 # Mimics Stata's `kdensity` closely enough for overlap visualisation and is

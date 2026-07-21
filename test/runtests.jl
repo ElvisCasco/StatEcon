@@ -1,4 +1,4 @@
-using Stat_Econ
+using StatEcon
 using DataFrames, FixedEffectModels, Statistics, Test
 
 # Deterministic little panel: y depends on x, grouped by g, with a 0/1 flag t.
@@ -10,7 +10,7 @@ df = DataFrame(
     t = repeat([0, 1], 6),
 )
 
-@testset "Stat_Econ" begin
+@testset "StatEcon" begin
 
     @testset "stata_regress returns a usable model" begin
         m = redirect_stdout(devnull) do

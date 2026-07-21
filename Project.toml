@@ -1,4 +1,4 @@
-name = "Stat_Econ"
+name = "StatEcon"
 uuid = "093f57c3-1d46-4339-95b0-7420ea60c4f3"
 authors = ["Elvis Teodoro Casco Alfaro <ecasco1@gmail.com>"]
 version = "0.1.0"

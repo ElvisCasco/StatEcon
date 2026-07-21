@@ -1,4 +1,4 @@
-# (deps provided by the Stat_Econ module)
+# (deps provided by the StatEcon module)
 
 # One-way tabulation that mimics Stata's `tabulate varname`.
 #

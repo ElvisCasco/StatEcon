@@ -1,4 +1,4 @@
-# (deps provided by the Stat_Econ module)
+# (deps provided by the StatEcon module)
 
 # Reproduces Stata's `psmatch2 treat covars, outcome(y) logit ate`.
 #

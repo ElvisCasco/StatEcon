@@ -1,4 +1,4 @@
-# (deps provided by the Stat_Econ module)
+# (deps provided by the StatEcon module)
 
 # Reproduces Stata's `regress y x, vce(robust)` output for a fitted
 # FixedEffectModels model (also works for a GLM lm via its coeftable).

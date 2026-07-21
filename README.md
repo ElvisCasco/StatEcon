@@ -1,4 +1,4 @@
-# Stat_Econ
+# StatEcon
 
 Julia equivalents of common **Stata** commands, printing output in Stata's own format.
 
@@ -9,12 +9,12 @@ Julia's econometrics stack (`FixedEffectModels`, `GLM`), but the tables look lik
 
 ```julia
 import Pkg
-Pkg.add(url = "https://github.com/ElvisCasco/Stat_Econ")
+Pkg.add(url = "https://github.com/ElvisCasco/StatEcon")
 ```
 
 ## Commands
 
-| Stata | `Stat_Econ` |
+| Stata | `StatEcon` |
 | --- | --- |
 | `regress y x, vce(robust)` | `stata_regress(df, y = :y, x = [:x], vce = :robust)` |
 | `xtreg y x, fe vce(cluster id)` | `stata_regress(df, y = :y, x = [:x], absorb = :id, vce = :cluster, cluster = :id)` |
@@ -27,11 +27,11 @@ Pkg.add(url = "https://github.com/ElvisCasco/Stat_Econ")
 ## Example
 
 ```julia
-using Stat_Econ, DataFrames, ReadStatTables
+using StatEcon, DataFrames, ReadStatTables
 
 df = DataFrame(ReadStatTables.readstat("wagepan_did.dta"))
 
-Stat_Econ.stata_regress(df, y = :D_lwage, x = [:train], vce = :robust)
+StatEcon.stata_regress(df, y = :D_lwage, x = [:train], vce = :robust)
 ```
 
 ```
@@ -69,7 +69,7 @@ interactions as `c.a#c.b`. The intercept is shown as `_cons`, last.
 It returns the fitted model, so `residuals`, `predict` and `coef` still work:
 
 ```julia
-ols = Stat_Econ.stata_regress(df, y = :y, x = [:x], vce = :robust);
+ols = StatEcon.stata_regress(df, y = :y, x = [:x], vce = :robust);
 df.uh = FixedEffectModels.residuals(ols, df)
 ```
 

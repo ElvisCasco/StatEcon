@@ -1,5 +1,5 @@
 """
-    Stat_Econ
+    StatEcon
 
 Julia equivalents of common Stata commands, with Stata-style printed output:
 
@@ -10,9 +10,9 @@ Julia equivalents of common Stata commands, with Stata-style printed output:
   - `teffects_ipw`    -> `teffects ipw (y) (treat covars)`
   - `kdensity`        -> `kdensity var` (Gaussian KDE, Silverman bandwidth)
 
-Calls are normally written module-qualified, e.g. `Stat_Econ.stata_regress(...)`.
+Calls are normally written module-qualified, e.g. `StatEcon.stata_regress(...)`.
 """
-module Stat_Econ
+module StatEcon
 
 using DataFrames, ReadStatTables, GLM, FixedEffectModels, StatsModels, Statistics, Printf
 using PrecompileTools
