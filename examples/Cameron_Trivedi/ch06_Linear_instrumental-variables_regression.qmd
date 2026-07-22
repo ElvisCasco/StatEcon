@@ -1,0 +1,1131 @@
+---
+title: "Cameron & Trivedi -- Ch. 6: Linear IV regression (via StatEcon)"
+Authors:
+- Colin Cameron
+- Pravin Trivedi
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+# Julia setup
+
+```{julia}
+using StatEcon
+const DATA = first(filter(d -> isdir(d) && (isfile(joinpath(d, "auto.dta")) || isdir(joinpath(d, "musr"))), ["../../data", "data", raw"C:/EC/GitHub/StatEcon/data"]))
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+```
+# 6 Linear instrumental-variables regression
+
+## 6.1 Introduction
+
+## 6.2 IV estimation
+
+### 6.2.1 Basic IV theory
+
+### 6.2.2 Model setup
+
+### 6.2.3 IV estimators: IV, 2SLS, and GMM
+
+### 6.2.4 Instrument validity and relevance
+
+### 6.2.5 Robust standard-error estimates
+
+## 6.3 IV example
+
+### 6.3.1 The reg() function for IV in FixedEffectModels.jl
+
+### 6.3.2 Medical expenditures with one endogenous regressor
+
+```{julia}
+#=
+clear all
+* Read data, define global x2list, and summarize data
+use musr/mus06data.dta
+global x2list totchr age female blhisp linc 
+summarize ldrugexp hi_empunion $x2list
+=#
+# Read data
+df6 = DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus06data.dta"))
+x2list = [:totchr, :age, :female, :blhisp, :linc]
+DataFrames.describe(df6[:, vcat([:ldrugexp, :hi_empunion], x2list)])
+```
+
+```{julia}
+stata_summarize(df6[:, vcat([:ldrugexp, :hi_empunion], x2list)])
+```
+
+### 6.3.3 Available instruments
+
+```{julia}
+#=
+* Following not included in book
+summarize
+=#
+# Quick overview of all variables
+stata_summarize(df6)
+```
+
+```{julia}
+#=
+* Summarize available instruments 
+summarize ssiratio lowincome multlc firmsz if linc!=.
+=#
+# Summarize available instruments where linc is non-missing
+df6_iv = dropmissing(df6, [:linc])
+stata_summarize(df6_iv[:, [:ssiratio, :lowincome, :multlc, :firmsz]])
+```
+
+### 6.3.4 IV estimation of an exactly identified model
+
+```{julia}
+#=
+* IV estimation of a just-identified model with single endog regressor
+ivregress 2sls ldrugexp (hi_empunion = ssiratio) $x2list, vce(robust) first
+=#
+# 2SLS with single endogenous regressor; hi_empunion instrumented by ssiratio
+iv_just = FixedEffectModels.reg(df6,
+    @formula(ldrugexp ~ totchr + age + female + blhisp + linc +
+                       (hi_empunion ~ ssiratio)),
+    Vcov.robust())
+```
+
+```{julia}
+#* IV estimation of a just-identified model with single endog regressor
+#ivregress 2sls ldrugexp (hi_empunion = ssiratio) $x2list, vce(robust) first
+stata_ivregress_2sls(df6, :ldrugexp, :hi_empunion => :ssiratio, x2list;
+               robust=true, first=true);
+```
+
+### 6.3.5 IV estimation of an overidentified model
+
+```{julia}
+#=
+* Compare 5 estimators and variance estimates for overidentified models
+global ivmodel "ldrugexp (hi_empunion = ssiratio multlc) $x2list"
+quietly ivregress 2sls $ivmodel, vce(robust)
+estimates store TwoSLS
+quietly ivregress gmm  $ivmodel, wmatrix(robust) 
+estimates store GMM_het
+quietly ivregress gmm  $ivmodel, wmatrix(robust) igmm
+estimates store GMM_igmm
+quietly ivregress gmm  $ivmodel, wmatrix(cluster age) 
+estimates store GMM_clu
+quietly ivregress 2sls  $ivmodel
+estimates store TwoSLS_def
+estimates table TwoSLS GMM_het GMM_igmm GMM_clu TwoSLS_def, b(%9.5f) se  
+=#
+# 2SLS with two instruments (ssiratio + multlc) — overidentified
+iv_over = FixedEffectModels.reg(df6,
+    @formula(ldrugexp ~ totchr + age + female + blhisp + linc +
+                       (hi_empunion ~ ssiratio + multlc)),
+    Vcov.robust())
+```
+
+```{julia}
+# Cluster-robust 2SLS
+iv_clu = FixedEffectModels.reg(df6,
+    @formula(ldrugexp ~ totchr + age + female + blhisp + linc +
+                       (hi_empunion ~ ssiratio + multlc)),
+    Vcov.cluster(:age))
+```
+
+```{julia}
+# 2SLS with default (homoskedastic) SE
+iv_def = FixedEffectModels.reg(df6,
+    @formula(ldrugexp ~ totchr + age + female + blhisp + linc +
+                       (hi_empunion ~ ssiratio + multlc)))
+
+println("\n— Comparison of 2SLS coefficient on hi_empunion —")
+for (name, m) in [("2SLS robust", iv_over), ("2SLS cluster(age)", iv_clu),
+                   ("2SLS default", iv_def)]
+    nm = StatsBase.coefnames(m)
+    i  = findfirst(==("hi_empunion"), nm)
+    @printf("%-20s coef=%9.5f  se=%9.5f\n",
+            name, StatsBase.coef(m)[i], sqrt(StatsBase.vcov(m)[i, i]))
+end
+```
+
+```{julia}
+# ivmodel:  ldrugexp (hi_empunion = ssiratio multlc) totchr age female blhisp linc
+#
+#  1) 2SLS, vce(robust)
+#  2) GMM, wmatrix(robust)      -- one-step efficient GMM under heteroskedasticity
+#  3) GMM, wmatrix(robust) igmm -- iterated GMM
+#  4) GMM, wmatrix(cluster age) -- one-step GMM with cluster-robust weight (cluster on age)
+#  5) 2SLS default (classical SE)
+
+df6g = dropmissing(df6, vcat([:ldrugexp, :hi_empunion, :ssiratio, :multlc], x2list))
+n    = DataFrames.nrow(df6g)
+
+y     = Float64.(df6g.ldrugexp)
+endog = Float64.(df6g.hi_empunion)
+Xexog = Matrix{Float64}(df6g[:, x2list])
+Zinst = Matrix{Float64}(df6g[:, [:ssiratio, :multlc]])
+X     = hcat(ones(n), endog, Xexog)                   # regressors
+Z     = hcat(ones(n), Xexog, Zinst)                   # instruments (exog + excl.)
+xnames = ["_cons", "hi_empunion", string.(x2list)...]
+
+# ---- GMM building blocks -----------------------------------------------------
+function gmm_point(y, X, Z, W)
+    XZ = X' * Z
+    (XZ * W * XZ') \ (XZ * W * (Z' * y))
+end
+function sandwich_Ω(Z, u; cluster=nothing)
+    m = size(Z, 2); Ω = zeros(m, m); n_ = length(u)
+    if cluster === nothing
+        for i in 1:n_; zi = @view Z[i, :]; Ω .+= (u[i]^2) .* (zi * zi'); end
+    else
+        for g in unique(cluster)
+            sel = cluster .== g
+            zu  = Z[sel, :]' * u[sel]
+            Ω  .+= zu * zu'
+        end
+    end
+    return Ω
+end
+gmm_vcov(X, Z, W, Ω) = (A = X'*Z * W * Z'*X; inv(A) * (X'*Z * W * Ω * W * Z'*X) * inv(A))
+
+# ---- (1) 2SLS with robust SE -------------------------------------------------
+W_2sls        = inv(Z' * Z)
+β_2sls_robust = gmm_point(y, X, Z, W_2sls)
+u_            = y .- X * β_2sls_robust
+V_2sls_robust = gmm_vcov(X, Z, W_2sls, sandwich_Ω(Z, u_))
+
+# ---- (2) One-step efficient GMM with robust W --------------------------------
+Ω̂_rob     = sandwich_Ω(Z, u_)                        # Ω̂ from 2SLS residuals
+W_rob     = inv(Ω̂_rob)
+β_gmm_het = gmm_point(y, X, Z, W_rob)
+V_gmm_het = gmm_vcov(X, Z, W_rob, sandwich_Ω(Z, y .- X * β_gmm_het))
+
+# ---- (3) Iterated GMM --------------------------------------------------------
+β_it, u_it = β_gmm_het, y .- X * β_gmm_het
+for _ in 1:100
+    W_new = inv(sandwich_Ω(Z, u_it))
+    β_new = gmm_point(y, X, Z, W_new)
+    u_new = y .- X * β_new
+    LinearAlgebra.norm(β_new - β_it) < 1e-9 && (β_it = β_new; u_it = u_new; break)
+    β_it, u_it = β_new, u_new
+end
+V_gmm_igmm = gmm_vcov(X, Z, inv(sandwich_Ω(Z, u_it)), sandwich_Ω(Z, u_it))
+
+# ---- (4) GMM with cluster-robust W (cluster on age) --------------------------
+cluster_age = Vector(df6g.age)
+Ω̂_clu       = sandwich_Ω(Z, u_; cluster=cluster_age)
+W_clu       = inv(Ω̂_clu)
+β_gmm_clu   = gmm_point(y, X, Z, W_clu)
+V_gmm_clu   = gmm_vcov(X, Z, W_clu,
+                       sandwich_Ω(Z, y .- X * β_gmm_clu; cluster=cluster_age))
+
+# ---- (5) 2SLS with classical (default) SE -----------------------------------
+β_2sls_def = β_2sls_robust                             # same point estimate
+σ²         = sum(abs2, u_) / (n - size(X,2))
+V_2sls_def = σ² .* inv(X'*Z * W_2sls * Z'*X)
+
+# ---- Comparison table --------------------------------------------------------
+_se(V) = sqrt.(max.(LinearAlgebra.diag(V), 0.0))
+est_table = DataFrames.DataFrame(
+    variable = xnames,
+    TwoSLS_rob_b  = β_2sls_robust, TwoSLS_rob_se  = _se(V_2sls_robust),
+    GMM_het_b     = β_gmm_het,     GMM_het_se     = _se(V_gmm_het),
+    GMM_igmm_b    = β_it,          GMM_igmm_se    = _se(V_gmm_igmm),
+    GMM_clu_b     = β_gmm_clu,     GMM_clu_se     = _se(V_gmm_clu),
+    TwoSLS_def_b  = β_2sls_def,    TwoSLS_def_se  = _se(V_2sls_def),
+)
+println("estimates table TwoSLS GMM_het GMM_igmm GMM_clu TwoSLS_def, b se")
+show(stdout, "text/plain", est_table); println()
+```
+
+```{julia}
+#=
+* Compare 5 estimators and variance estimates for overidentified models
+global ivmodel "ldrugexp (hi_empunion = ssiratio multlc) $x2list"
+quietly ivregress 2sls $ivmodel, vce(robust)
+estimates store TwoSLS
+quietly ivregress gmm  $ivmodel, wmatrix(robust)
+estimates store GMM_het
+quietly ivregress gmm  $ivmodel, wmatrix(robust) igmm
+estimates store GMM_igmm
+quietly ivregress gmm  $ivmodel, wmatrix(cluster age)
+estimates store GMM_clu
+quietly ivregress 2sls  $ivmodel
+estimates store TwoSLS_def
+estimates table TwoSLS GMM_het GMM_igmm GMM_clu TwoSLS_def, b(%9.5f) se
+=#
+TwoSLS     = stata_ivregress_gmm(df6, :ldrugexp, :hi_empunion, [:ssiratio, :multlc], x2list;
+                    estimator=:twosls, wmatrix=:robust)
+GMM_het    = stata_ivregress_gmm(df6, :ldrugexp, :hi_empunion, [:ssiratio, :multlc], x2list;
+                    estimator=:gmm,  wmatrix=:robust)
+GMM_igmm   = stata_ivregress_gmm(df6, :ldrugexp, :hi_empunion, [:ssiratio, :multlc], x2list;
+                    estimator=:gmm,  wmatrix=:robust, iterate=true)
+GMM_clu    = stata_ivregress_gmm(df6, :ldrugexp, :hi_empunion, [:ssiratio, :multlc], x2list;
+                    estimator=:gmm,  wmatrix=:cluster, cluster=:age)
+TwoSLS_def = stata_ivregress_gmm(df6, :ldrugexp, :hi_empunion, [:ssiratio, :multlc], x2list;
+                    estimator=:twosls, wmatrix=:classical)
+
+stata_estimates_table(
+    [TwoSLS, GMM_het, GMM_igmm, GMM_clu, TwoSLS_def],
+    ["TwoSLS", "GMM_het", "GMM_igmm", "GMM_clu", "TwoSLS_def"];
+    vars_order = ["hi_empunion", "totchr", "age", "female", "blhisp", "linc", "_cons"])
+```
+
+
+### 6.3.6 Testing for regressor endogeneity
+
+```{julia}
+#=
+* Obtain OLS estimates to compare with preceding IV estimates
+regress ldrugexp hi_empunion $x2list, vce(robust) 
+=#
+# OLS for comparison
+ols_iv = FixedEffectModels.reg(df6,
+    @formula(ldrugexp ~ hi_empunion + totchr + age + female + blhisp + linc),
+    Vcov.robust())
+```
+
+```{julia}
+#=
+* Robust Durbin-Wu-Hausman test of endogeneity implemented by estat endogenous
+ivregress 2sls ldrugexp (hi_empunion = ssiratio) $x2list, vce(robust)
+estat endogenous
+=#
+#* Obtain OLS estimates to compare with preceding IV estimates
+#regress ldrugexp hi_empunion $x2list, vce(robust)
+stata_regress(df6, :ldrugexp, vcat(:hi_empunion, x2list);
+              vcov = Vcov.robust());
+```
+
+```{julia}
+#=
+* Robust Durbin-Wu-Hausman test of endogeneity implemented manually
+quietly regress hi_empunion ssiratio $x2list
+quietly predict v1hat, resid
+quietly regress ldrugexp hi_empunion v1hat $x2list, vce(robust)
+test v1hat
+=#
+# Durbin–Wu–Hausman: include first-stage residuals in second-stage regression
+# and test their significance.
+df6c = dropmissing(df6, [:ldrugexp, :hi_empunion, :ssiratio, :totchr, :age,
+                          :female, :blhisp, :linc])
+m_first = FixedEffectModels.reg(df6c, @formula(hi_empunion ~ ssiratio + totchr + age + female + blhisp + linc))
+df6c.v1hat = df6c.hi_empunion .- FixedEffectModels.predict(m_first, df6c)
+m_dwh = FixedEffectModels.reg(df6c, @formula(ldrugexp ~ hi_empunion + v1hat + totchr + age +
+                                       female + blhisp + linc), Vcov.robust())
+nm = StatsBase.coefnames(m_dwh)
+i  = findfirst(==("v1hat"), nm)
+t  = StatsBase.coef(m_dwh)[i] / sqrt(StatsBase.vcov(m_dwh)[i, i])
+@printf("DWH t = %.3f, p = %.4f\n",
+        t, 2 * (1 - cdf(Normal(), abs(t))))
+```
+
+```{julia}
+#* Robust Durbin-Wu-Hausman test of endogeneity implemented by estat endogenous
+#ivregress 2sls ldrugexp (hi_empunion = ssiratio) $x2list, vce(robust)
+#estat endogenous
+estat_endogenous(df6, :ldrugexp, :hi_empunion, :ssiratio, x2list;
+                 robust=true);
+```
+
+```{julia}
+# --- (1) OLS for comparison with IV ---
+# regress ldrugexp hi_empunion $x2list, vce(robust)
+df6h = dropmissing(df6, vcat([:ldrugexp, :hi_empunion, :ssiratio], x2list))
+ols_cmp = FixedEffectModels.reg(df6h,
+    @formula(ldrugexp ~ hi_empunion + totchr + age + female + blhisp + linc),
+    Vcov.robust())
+println("OLS (robust SE):"); println(ols_cmp)
+```
+
+```{julia}
+# --- (2) 2SLS with vce(robust), then estat endogenous ---
+# ivregress 2sls ldrugexp (hi_empunion = ssiratio) $x2list, vce(robust)
+iv_cmp = FixedEffectModels.reg(df6h,
+    @formula(ldrugexp ~ totchr + age + female + blhisp + linc +
+                       (hi_empunion ~ ssiratio)),
+    Vcov.robust())
+println("2SLS (robust SE):"); println(iv_cmp)
+
+# estat endogenous — Wooldridge robust DWH test:
+# run first-stage, get residuals v̂, regress y on [hi_empunion, v̂, $x2list] with
+# robust SE, and use the robust Wald t on v̂ as the endogeneity statistic.
+fs_cmp       = FixedEffectModels.reg(df6h,
+    @formula(hi_empunion ~ ssiratio + totchr + age + female + blhisp + linc))
+df6h.v1hat   = df6h.hi_empunion .- FixedEffectModels.predict(fs_cmp, df6h)
+aux_cmp      = FixedEffectModels.reg(df6h,
+    @formula(ldrugexp ~ hi_empunion + v1hat + totchr + age + female + blhisp + linc),
+    Vcov.robust())
+stata_test(aux_cmp, ["v1hat"]);
+```
+
+```{julia}
+# --- (3) Manual Durbin-Wu-Hausman, step by step (matches the cell above) ---
+# quietly regress hi_empunion ssiratio $x2list        → fs_cmp
+# quietly predict v1hat, resid                         → df6h.v1hat
+# quietly regress ldrugexp hi_empunion v1hat $x2list, vce(robust) → aux_cmp
+# test v1hat                                           → stata_test(aux_cmp, ["v1hat"])
+cf = StatsBase.coeftable(aux_cmp)
+println("Auxiliary regression (robust SE) — row for v1hat:")
+println(cf)
+```
+
+```{julia}
+#* Robust Durbin-Wu-Hausman test of endogeneity implemented manually
+#quietly regress hi_empunion ssiratio $x2list
+#quietly predict v1hat, resid
+#quietly regress ldrugexp hi_empunion v1hat $x2list, vce(robust)
+#test v1hat
+df6c = dropmissing(df6, [:ldrugexp, :hi_empunion, :ssiratio,
+                         :totchr, :age, :female, :blhisp, :linc])
+# Step 1-2: first stage + residuals
+m_first = FixedEffectModels.reg(df6c,
+    @formula(hi_empunion ~ ssiratio + totchr + age + female + blhisp + linc))
+df6c.v1hat = df6c.hi_empunion .- FixedEffectModels.predict(m_first, df6c)
+# Step 3: augmented regression with robust SE
+m_aux = FixedEffectModels.reg(df6c,
+    @formula(ldrugexp ~ hi_empunion + v1hat + totchr + age + female + blhisp + linc),
+    Vcov.robust())
+# Step 4: F-test on v1hat coefficient
+β   = StatsBase.coef(m_aux)
+V   = StatsBase.vcov(m_aux)
+i   = findfirst(==("v1hat"), StatsBase.coefnames(m_aux))
+F   = β[i]^2 / V[i, i]
+df2 = Int(StatsBase.dof_residual(m_aux))
+pF  = 1 - Distributions.cdf(Distributions.FDist(1, df2), F)
+
+println("( 1)  v1hat = 0\n")
+Printf.@printf("       F(%3d, %d) = %7.2f\n", 1, df2, F)
+Printf.@printf("            Prob > F = %9.4f\n", pF)
+```
+
+### 6.3.7 Tests of overidentifying restrictions
+
+```{julia}
+#=
+* Test of overidentifying restrictions following ivregress gmm
+quietly ivregress gmm ldrugexp (hi_empunion = ssiratio multlc) ///
+  $x2list, wmatrix(robust) 
+estat overid
+=#
+# Sargan/Hansen J test: regress 2SLS residuals on instruments + exogenous,
+# then J = N·R²
+function sargan_test(model, df, instruments, exog_vars, dep)
+    df_clean = dropmissing(df, vcat([dep], instruments, exog_vars))
+    uhat = df_clean[!, dep] .- FixedEffectModels.predict(model, df_clean)
+    df_clean.uhat = uhat
+    fmla = term(:uhat) ~ sum(term.(vcat(instruments, exog_vars)))
+    aux = FixedEffectModels.reg(df_clean, fmla)
+    J = StatsBase.nobs(aux) * StatsBase.r2(aux)
+    df_J = length(instruments) - 1   # endogenous regressors
+    return J, df_J, 1 - cdf(Chisq(df_J), J)
+end
+J, df_J, p = sargan_test(iv_over, df6, [:ssiratio, :multlc],
+                         [:totchr, :age, :female, :blhisp, :linc], :ldrugexp)
+@printf("Sargan J = %.4f, df = %d, p = %.4f\n", J, df_J, p)
+```
+
+```{julia}
+#=
+* Test of overidentifying restrictions following ivregress gmm
+ivregress gmm ldrugexp (hi_empunion = ssiratio lowincome multlc firmsz) ///
+  $x2list, wmatrix(robust) 
+estat overid
+=#
+# Same test with all four instruments
+iv_4 = FixedEffectModels.reg(df6,
+    @formula(ldrugexp ~ totchr + age + female + blhisp + linc +
+                       (hi_empunion ~ ssiratio + lowincome + multlc + firmsz)),
+    Vcov.robust())
+J, df_J, p = sargan_test(iv_4, df6,
+    [:ssiratio, :lowincome, :multlc, :firmsz],
+    [:totchr, :age, :female, :blhisp, :linc], :ldrugexp)
+@printf("Sargan J (4 instruments) = %.4f, df = %d, p = %.4f\n", J, df_J, p)
+```
+
+
+```{julia}
+# estat overid after `ivregress gmm ..., wmatrix(robust)`
+# Hansen's J = (Z'û)' Ω̂⁻¹ (Z'û)
+#  where û come from the two-step efficient GMM estimator with Ω̂ = Σ zᵢzᵢ'ûᵢ²
+# Under the null of valid instruments, J ~ χ²(#instruments − #endogenous).
+
+"""Two-step efficient GMM + Hansen J, for linear IV with heteroskedastic robust W."""
+function gmm_overid(df, yvar::Symbol, endog_vars, exog_vars, inst_vars)
+    needed = unique(vcat([yvar], endog_vars, exog_vars, inst_vars))
+    d = dropmissing(df, needed)
+    n = DataFrames.nrow(d)
+    y = Float64.(d[!, yvar])
+    X_endog = Matrix{Float64}(d[:, endog_vars])
+    X_exog  = Matrix{Float64}(d[:, exog_vars])
+    Z_inst  = Matrix{Float64}(d[:, inst_vars])
+    X = hcat(ones(n), X_endog, X_exog)
+    Z = hcat(ones(n), X_exog,  Z_inst)
+
+    # Step 1: 2SLS for initial residuals
+    W0 = LinearAlgebra.inv(Z' * Z)
+    β0 = (X'Z * W0 * Z'X) \ (X'Z * W0 * Z'y)
+    u0 = y .- X * β0
+
+    # Step 2: build heteroskedasticity-robust Ω̂ and refit
+    Ω = sandwich_Ω(Z, u0)                  # Σ zᵢzᵢ' ûᵢ²
+    W = LinearAlgebra.inv(Ω)
+    β = (X'Z * W * Z'X) \ (X'Z * W * Z'y)
+    u = y .- X * β
+
+    # Hansen J at the efficient estimator
+    g = Z' * u
+    J = g' * W * g
+    df_J = size(Z, 2) - size(X, 2)          # #instruments − #regressors = #overid restrictions
+    p    = 1 - Distributions.cdf(Distributions.Chisq(max(df_J, 1)), J)
+    return (; J, df = df_J, p, β, n)
+end
+
+# --- Model A: 2 instruments (ssiratio, multlc)  →  1 overid restriction ---
+resA = gmm_overid(df6, :ldrugexp, [:hi_empunion], x2list, [:ssiratio, :multlc])
+Printf.@printf("\nestat overid  [instruments: ssiratio, multlc]\n")
+Printf.@printf("  Hansen J  = %.4f\n", resA.J)
+Printf.@printf("  df        = %d\n",   resA.df)
+Printf.@printf("  Prob > χ² = %.4f\n", resA.p)
+
+# --- Model B: 4 instruments (ssiratio, lowincome, multlc, firmsz)  →  3 overid restrictions ---
+resB = gmm_overid(df6, :ldrugexp, [:hi_empunion], x2list,
+                  [:ssiratio, :lowincome, :multlc, :firmsz])
+Printf.@printf("\nestat overid  [instruments: ssiratio, lowincome, multlc, firmsz]\n")
+Printf.@printf("  Hansen J  = %.4f\n", resB.J)
+Printf.@printf("  df        = %d\n",   resB.df)
+Printf.@printf("  Prob > χ² = %.4f\n", resB.p)
+```
+
+```{julia}
+#* Test of overidentifying restrictions following ivregress gmm
+#quietly ivregress gmm ldrugexp (hi_empunion = ssiratio multlc) ///
+#  $x2list, wmatrix(robust) 
+#estat overid
+estat_overid(df6, :ldrugexp, :hi_empunion, [:ssiratio, :multlc], x2list)
+```
+
+```{julia}
+#* Test of overidentifying restrictions following ivregress gmm
+#ivregress gmm ldrugexp (hi_empunion = ssiratio lowincome multlc firmsz) ///
+#  $x2list, wmatrix(robust) 
+#estat overid
+estat_overid(df6, :ldrugexp, :hi_empunion, [:ssiratio, :lowincome, :multlc, :firmsz], x2list)
+```
+
+### 6.3.8 IV estimation with a binary endogenous regressor
+
+```{julia}
+#=
+* Regression with a dummy variable regressor
+treatreg ldrugexp $x2list, treat(hi_empunion = ssiratio $x2list)
+=#
+# Stata's treatreg fits a Heckman-style treatment-effects model.
+# In Julia we approximate it with 2SLS or with a manual two-step probit + OLS.
+println("treatreg-style estimation: see Sec 16.6 (Heckman) for the manual two-step.")
+```
+
+```{julia}
+# treatreg ldrugexp $x2list, treat(hi_empunion = ssiratio $x2list)
+#
+# Heckman two-step estimator for endogenous binary treatment:
+#   outcome:   ldrugexp = Xβ + δ·hi_empunion + ε
+#   treatment: hi_empunion = 1[Zγ + u > 0],   (ε, u) bivariate normal
+#
+# 1) Probit of hi_empunion on Z = [ssiratio, x2list]
+# 2) Compute the treatment-model inverse Mills ratio
+#        λᵢ = φ(Zγ̂)/Φ(Zγ̂)      if hi_empunion=1
+#        λᵢ = −φ(Zγ̂)/(1−Φ(Zγ̂)) if hi_empunion=0
+# 3) OLS: ldrugexp ~ Xβ + δ·hi_empunion + σ_ερ·λ + error
+#    coef on λ equals σ_ερ; t-test on it is the endogenous-treatment test.
+
+df6t = dropmissing(df6, vcat([:ldrugexp, :hi_empunion, :ssiratio], x2list))
+Nobs = DataFrames.nrow(df6t)
+
+# --- Step 1: Probit selection / treatment equation
+probit_fit = GLM.glm(
+    GLM.@formula(hi_empunion ~ ssiratio + totchr + age + female + blhisp + linc),
+    df6t, GLM.Binomial(), GLM.ProbitLink())
+γ̂  = GLM.coef(probit_fit)
+Z_ = hcat(ones(Nobs), Float64.(df6t.ssiratio), Matrix{Float64}(df6t[:, x2list]))
+Zγ = Z_ * γ̂
+
+# --- Step 2: inverse Mills ratio
+Ndist = Distributions.Normal()
+φ = Distributions.pdf.(Ndist, Zγ)
+Φ = Distributions.cdf.(Ndist, Zγ)
+df6t.lambda = [df6t.hi_empunion[i] == 1 ? φ[i]/Φ[i] : -φ[i]/(1 - Φ[i])  for i in 1:Nobs]
+
+# --- Step 3: augmented OLS outcome equation
+treatreg_fit = FixedEffectModels.reg(df6t,
+    @formula(ldrugexp ~ hi_empunion + totchr + age + female + blhisp + linc + lambda))
+println("Heckman treatment-regression (two-step)")
+println(treatreg_fit)
+
+# Report the treatment effect and the endogeneity-of-treatment test (coef on λ)
+cn   = StatsBase.coefnames(treatreg_fit)
+i_D  = findfirst(==("hi_empunion"), cn)
+i_λ  = findfirst(==("lambda"),      cn)
+β    = StatsBase.coef(treatreg_fit);  Vc = StatsBase.vcov(treatreg_fit)
+Printf.@printf("\nTreatment effect  δ̂ = %.6f   (naive SE = %.6f)\n",
+               β[i_D], sqrt(Vc[i_D, i_D]))
+Printf.@printf("σ_ε · ρ̂ (coef on λ) = %.6f   t = %.3f\n",
+               β[i_λ], β[i_λ]/sqrt(Vc[i_λ, i_λ]))
+```
+
+```{julia}
+#* Regression with a dummy variable regressor
+#treatreg ldrugexp $x2list, treat(hi_empunion = ssiratio $x2list)
+stata_treatreg(df6, :ldrugexp, x2list,
+         :hi_empunion, vcat(:ssiratio, x2list));
+```
+
+## 6.4 Weak instruments
+
+### 6.4.1 Finite-sample properties of IV estimators
+
+### 6.4.2 Weak instruments
+
+#### Diagnostics for weak instruments
+
+```{julia}
+#=
+* Correlations of endogenous regressor with instruments
+correlate hi_empunion ssiratio lowincome multlc firmsz if linc!=.
+=#
+#* Correlations of endogenous regressor with instruments
+#correlate hi_empunion ssiratio lowincome multlc firmsz if linc!=.
+stata_correlate(df6, [:hi_empunion, :ssiratio, :lowincome, :multlc, :firmsz];
+          filter_missing = [:linc]);
+```
+
+```{julia}
+#* Correlations of endogenous regressor with instruments
+#correlate hi_empunion ssiratio lowincome multlc firmsz if linc!=.
+stata_correlate(df6, [:hi_empunion, :ssiratio, :lowincome, :multlc, :firmsz];
+          filter_missing = [:linc]);
+```
+
+#### Formal tests for weak instruments
+
+### 6.4.3 First-stage F-statistics
+
+### 6.4.4 Just-identified model
+
+```{julia}
+#=
+* Weak instrument tests - just-identified model
+quietly ivregress 2sls ldrugexp (hi_empunion = ssiratio) $x2list, vce(robust)
+estat firststage, forcenonrobust all  
+=#
+# First-stage F: regress endogenous on instrument(s) + exogenous
+df6c = dropmissing(df6, [:hi_empunion, :ssiratio, :totchr, :age, :female, :blhisp, :linc])
+fs1 = FixedEffectModels.reg(df6c, @formula(hi_empunion ~ ssiratio + totchr + age + female + blhisp + linc),
+          Vcov.robust())
+nm = StatsBase.coefnames(fs1)
+i  = findfirst(==("ssiratio"), nm)
+F1 = (StatsBase.coef(fs1)[i] / sqrt(StatsBase.vcov(fs1)[i, i]))^2     # squared t = F(1, ·)
+@printf("First-stage F(1) on ssiratio = %.3f\n", F1)
+```
+
+```{julia}
+# ivregress 2sls ldrugexp (hi_empunion = ssiratio) $x2list, vce(robust)
+# estat firststage, forcenonrobust all
+#
+# For a just-identified model with one endogenous regressor and one excluded
+# instrument, `estat firststage, all` reports:
+#  - Partial R² and Adjusted partial R² (instrument contribution to first stage)
+#  - First-stage F statistic on the excluded instrument(s)
+#  - Minimum-eigenvalue statistic (Cragg–Donald) — for 1 endog / 1 IV this
+#    coincides with the first-stage F.
+#  - Stock–Yogo 10/15/20/25% critical values (just-identified: 16.38 for 10%)
+
+df6fs = dropmissing(df6, vcat([:hi_empunion, :ssiratio], x2list))
+N_fs  = DataFrames.nrow(df6fs)
+
+# --- First-stage regression ---
+fs_just = FixedEffectModels.reg(df6fs,
+    @formula(hi_empunion ~ ssiratio + totchr + age + female + blhisp + linc))
+# --- Restricted first stage (exog only, no ssiratio) for partial-R² ---
+fs_restr = FixedEffectModels.reg(df6fs,
+    @formula(hi_empunion ~ totchr + age + female + blhisp + linc))
+
+# --- Partial R² = (R²_full − R²_restricted) / (1 − R²_restricted) ---
+R2_full   = StatsBase.r2(fs_just)
+R2_restr  = StatsBase.r2(fs_restr)
+partialR2 = (R2_full - R2_restr) / (1 - R2_restr)
+
+# --- Adjusted partial R²: same logic on adjusted R² ---
+R2adj_full  = StatsBase.adjr2(fs_just)
+R2adj_restr = StatsBase.adjr2(fs_restr)
+partialR2_adj = (R2adj_full - R2adj_restr) / (1 - R2adj_restr)
+
+# --- First-stage F on the excluded instrument (= squared t on ssiratio) ---
+nm  = StatsBase.coefnames(fs_just)
+i_z = findfirst(==("ssiratio"), nm)
+F_stat = (StatsBase.coef(fs_just)[i_z] / sqrt(StatsBase.vcov(fs_just)[i_z, i_z]))^2
+df_num = 1                                    # one excluded instrument
+df_den = StatsBase.dof_residual(fs_just)
+p_F    = 1 - Distributions.cdf(Distributions.FDist(df_num, df_den), F_stat)
+
+# --- Cragg–Donald statistic: for 1 endog / 1 IV this equals F_stat ---
+CD = F_stat
+
+println("First-stage diagnostics — just-identified IV (hi_empunion = ssiratio)")
+println(DataFrames.DataFrame(
+        statistic  = ["R²_full (first stage)",
+                      "R²_restricted (no excl. IV)",
+                      "Partial R²",
+                      "Adjusted partial R²",
+                      "F( $(df_num), $(Int(df_den)) )  on ssiratio",
+                      "Prob > F",
+                      "Minimum eigenvalue (Cragg–Donald)"],
+        value      = [R2_full, R2_restr, partialR2, partialR2_adj,
+                      F_stat, p_F, CD]))
+
+# --- Stock–Yogo (2005) critical values — 2SLS bias, 1 endog / 1 IV ---
+println("\nStock–Yogo weak-ID critical values for just-identified 2SLS (bias test):")
+sy = DataFrames.DataFrame(
+    relative_bias = ["5%", "10%", "20%", "30%"],
+    critical_F    = [16.38, 8.96, 6.66, 5.53])
+show(stdout, "text/plain", sy); println()
+F_stat > 16.38 ? println("\n→ F > 16.38: instrument is NOT weak at the 5% bias threshold.") :
+F_stat > 10    ? println("\n→ 10 < F ≤ 16.38: instrument probably adequate but borderline.") :
+                 println("\n→ F ≤ 10: instrument is WEAK; 2SLS estimates may be badly biased.")
+```
+
+```{julia}
+#* Weak instrument tests - just-identified model
+#quietly ivregress 2sls ldrugexp (hi_empunion = ssiratio) $x2list, vce(robust)
+#estat firststage, forcenonrobust all
+estat_firststage(df6, :ldrugexp, :hi_empunion, :ssiratio, x2list;
+                 all=true);
+```
+
+### 6.4.5 Overidentified model
+
+```{julia}
+#=
+* Weak instrument tests - two or more overidentifying restrictions
+quietly ivregress gmm ldrugexp (hi_empunion = ssiratio lowincome multlc firmsz) ///
+   $x2list, vce(robust)
+estat firststage, forcenonrobust
+=#
+# Wald test of joint significance of all instruments in the first stage
+fs4 = FixedEffectModels.reg(df6c, @formula(hi_empunion ~ ssiratio + lowincome + multlc + firmsz +
+                                       totchr + age + female + blhisp + linc))
+nm = StatsBase.coefnames(fs4)
+idx = [findfirst(==(n), nm) for n in ("ssiratio","lowincome","multlc","firmsz")]
+βt = StatsBase.coef(fs4)[idx]; Vt = StatsBase.vcov(fs4)[idx, idx]
+F4 = try
+    (βt' * LinearAlgebra.inv(Vt) * βt) / 4
+catch
+    NaN
+end
+@printf("First-stage F(4) on instruments = %.3f\n", F4)
+```
+
+
+```{julia}
+#* Weak instrument tests - two or more overidentifying restrictions
+#quietly ivregress gmm ldrugexp (hi_empunion = ssiratio lowincome multlc firmsz) ///
+#   $x2list, vce(robust)
+#estat firststage, forcenonrobust
+estat_firststage(df6, :ldrugexp, :hi_empunion,
+                 [:ssiratio, :lowincome, :multlc, :firmsz], x2list);
+```
+
+### 6.4.6 More than one endogenous regressor
+
+### 6.4.7 Sensitivity to choice of instruments
+
+```{julia}
+#=
+* Compare 4 just-identified model estimates with different instruments
+quietly regress ldrugexp hi_empunion $x2list, vce(robust)
+estimates store OLS0
+quietly ivregress 2sls ldrugexp (hi_empunion=ssiratio) $x2list, vce(robust)
+estimates store IV_INST1
+quietly estat firststage, forcenonrobust
+scalar me1 = r(mineig)
+quietly ivregress 2sls ldrugexp (hi_empunion=lowincome) $x2list, vce(robust)
+estimates store IV_INST2
+quietly estat firststage, forcenonrobust
+scalar me2 = r(mineig)
+quietly ivregress 2sls ldrugexp (hi_empunion=multlc) $x2list, vce(robust) 
+estimates store IV_INST3
+quietly estat firststage, forcenonrobust
+scalar me3 = r(mineig)
+quietly ivregress 2sls ldrugexp (hi_empunion=firmsz) $x2list, vce(robust)
+estimates store IV_INST4
+quietly estat firststage, forcenonrobust
+scalar me4 = r(mineig)
+estimates table OLS0 IV_INST1 IV_INST2 IV_INST3 IV_INST4, b(%8.4f) se  
+display "Minimum eigenvalues are:     " me1 _s(2) me2 _s(2) me3 _s(2) me4
+=#
+# Compare four just-identified IV estimates with different instruments
+ols_compare = FixedEffectModels.reg(df6, @formula(ldrugexp ~ hi_empunion + totchr + age + female + blhisp + linc),
+                  Vcov.robust())
+
+iv_models = Dict()
+for inst in (:ssiratio, :lowincome, :multlc, :firmsz)
+    fmla = @eval @formula(ldrugexp ~ totchr + age + female + blhisp + linc +
+                                     (hi_empunion ~ $inst))
+    iv_models[inst] = FixedEffectModels.reg(df6, fmla, Vcov.robust())
+end
+
+# First-stage F for each instrument
+println("\n— First-stage F-stats —")
+for inst in (:ssiratio, :lowincome, :multlc, :firmsz)
+    df6c = dropmissing(df6, [:hi_empunion, inst, :totchr, :age, :female, :blhisp, :linc])
+    fmla = term(:hi_empunion) ~ term(inst) + term(:totchr) + term(:age) +
+                                 term(:female) + term(:blhisp) + term(:linc)
+    fs = FixedEffectModels.reg(df6c, fmla)
+    nm = StatsBase.coefnames(fs)
+    i  = findfirst(==(string(inst)), nm)
+    F  = (StatsBase.coef(fs)[i] / sqrt(StatsBase.vcov(fs)[i, i]))^2
+    β_iv = StatsBase.coef(iv_models[inst])[findfirst(==("hi_empunion"), StatsBase.coefnames(iv_models[inst]))]
+    @printf("%-12s  IV β=%8.4f   first-stage F=%8.3f\n", inst, β_iv, F)
+end
+```
+
+```{julia}
+#* Compare 4 just-identified model estimates with different instruments
+#quietly regress ldrugexp hi_empunion $x2list, vce(robust)
+#estimates store OLS0
+#quietly ivregress 2sls ldrugexp (hi_empunion=ssiratio) $x2list, vce(robust)
+#estimates store IV_INST1
+#quietly estat firststage, forcenonrobust
+#scalar me1 = r(mineig)
+#quietly ivregress 2sls ldrugexp (hi_empunion=lowincome) $x2list, vce(robust)
+#estimates store IV_INST2
+#quietly estat firststage, forcenonrobust
+#scalar me2 = r(mineig)
+#quietly ivregress 2sls ldrugexp (hi_empunion=multlc) $x2list, vce(robust)
+#estimates store IV_INST3
+#quietly estat firststage, forcenonrobust
+#scalar me3 = r(mineig)
+#quietly ivregress 2sls ldrugexp (hi_empunion=firmsz) $x2list, vce(robust)
+#estimates store IV_INST4
+#quietly estat firststage, forcenonrobust
+#scalar me4 = r(mineig)
+#estimates table OLS0 IV_INST1 IV_INST2 IV_INST3 IV_INST4, b(%8.4f) se
+#display "Minimum eigenvalues are:     " me1 _s(2) me2 _s(2) me3 _s(2) me4
+_wrap_fem(m) = (;
+    β         = StatsBase.coef(m),
+    V         = StatsBase.vcov(m),
+    se        = sqrt.(max.(LinearAlgebra.diag(StatsBase.vcov(m)), 0.0)),
+    coefnames = replace.(string.(StatsBase.coefnames(m)), "(Intercept)" => "_cons"),
+    n         = Int(StatsBase.nobs(m)),
+)
+# Classical first-stage F on the single excluded instrument = Stata's mineig.
+_mineig(df, endog, inst, exog) = begin
+    d = dropmissing(df, unique(vcat(Symbol(endog), Symbol(inst), exog)))
+    f = term(Symbol(endog)) ~ sum(term.(vcat(exog, Symbol(inst))))
+    m = FixedEffectModels.reg(d, f)
+    nm = string.(StatsBase.coefnames(m))
+    i  = findfirst(==(string(inst)), nm)
+    (StatsBase.coef(m)[i] / sqrt(StatsBase.vcov(m)[i, i]))^2
+end
+
+OLS0 = _wrap_fem(FixedEffectModels.reg(df6,
+        @formula(ldrugexp ~ hi_empunion + totchr + age + female + blhisp + linc),
+        Vcov.robust()))
+IV_INST1 = stata_ivregress_gmm(df6, :ldrugexp, :hi_empunion, :ssiratio,  x2list;
+                  estimator=:twosls, wmatrix=:robust)
+IV_INST2 = stata_ivregress_gmm(df6, :ldrugexp, :hi_empunion, :lowincome, x2list;
+                  estimator=:twosls, wmatrix=:robust)
+IV_INST3 = stata_ivregress_gmm(df6, :ldrugexp, :hi_empunion, :multlc,    x2list;
+                  estimator=:twosls, wmatrix=:robust)
+IV_INST4 = stata_ivregress_gmm(df6, :ldrugexp, :hi_empunion, :firmsz,    x2list;
+                  estimator=:twosls, wmatrix=:robust)
+
+me1 = _mineig(df6, :hi_empunion, :ssiratio,  x2list)
+me2 = _mineig(df6, :hi_empunion, :lowincome, x2list)
+me3 = _mineig(df6, :hi_empunion, :multlc,    x2list)
+me4 = _mineig(df6, :hi_empunion, :firmsz,    x2list)
+
+stata_estimates_table(
+    [OLS0, IV_INST1, IV_INST2, IV_INST3, IV_INST4],
+    ["OLS0", "IV_INST1", "IV_INST2", "IV_INST3", "IV_INST4"];
+    vars_order = ["hi_empunion", "totchr", "age", "female", "blhisp", "linc", "_cons"],
+    fmt        = "%8.4f")
+
+println("                                                         Legend: b/se")
+println()
+Printf.@printf("Minimum eigenvalues are:     %.8g  %.8g  %.8g  %.8g\n",
+               me1, me2, me3, me4)
+```
+
+
+## 6.5 Better inference with weak instruments
+
+### 6.5.1 Conditional tests and confidence intervals
+
+```{julia}
+#=
+* Conditional test and confidence intervals when weak instruments 
+*condivreg ldrugexp (hi_empunion = ssiratio) $x2list, lm ar 2sls test(0)
+=#
+# Anderson–Rubin (AR) test, weak-instrument robust:
+# regress y - β₀·x₁ on instruments (β₀ = 0 here)
+df6c = dropmissing(df6, [:ldrugexp, :ssiratio, :totchr, :age, :female, :blhisp, :linc])
+df6c.y_ar = df6c.ldrugexp                # β₀ = 0
+m_ar = FixedEffectModels.reg(df6c, @formula(y_ar ~ ssiratio + totchr + age + female + blhisp + linc))
+nm = StatsBase.coefnames(m_ar)
+i_ssi = findfirst(==("ssiratio"), nm)
+β = StatsBase.coef(m_ar)[i_ssi]; se = sqrt(StatsBase.vcov(m_ar)[i_ssi, i_ssi])
+F_ar = (β / se)^2
+@printf("AR F(1) = %.3f, p = %.4f\n",
+        F_ar, 1 - cdf(FDist(1, dof_residual(m_ar)), F_ar))
+```
+
+```{julia}
+#=
+* Use ivregress with weak instrument diagnostics
+ivregress 2sls ldrugexp (hi_empunion = ssiratio) $x2list
+estat firststage
+*estat overid
+=#
+# Default 2SLS with first-stage diagnostics (already shown above)
+reg(df6,
+    @formula(ldrugexp ~ totchr + age + female + blhisp + linc +
+                       (hi_empunion ~ ssiratio)))
+```
+
+```{julia}
+#* Conditional test and confidence intervals when weak instruments
+#*condivreg ldrugexp (hi_empunion = ssiratio) $x2list, lm ar 2sls test(0)
+#* Use ivregress with weak instrument diagnostics
+#ivregress 2sls ldrugexp (hi_empunion = ssiratio) $x2list
+#estat firststage
+#*estat overid
+stata_ivregress_2sls(df6, :ldrugexp, :hi_empunion => :ssiratio, x2list;
+               robust=false, first=false)
+estat_firststage(df6, :ldrugexp, :hi_empunion, :ssiratio, x2list;
+                 robust=false);
+```
+
+### 6.5.2 LIML estimator
+
+### 6.5.3 Jackknife IV estimator
+
+### 6.5.4 Comparison of 2SLS, LIML, JIVE, and GMM
+
+```{julia}
+#=
+*ssc install st0108
+*ssc install ivreg2
+*ssc install ranktest
+* Variants of IV Estimators: 2SLS, LIML, JIVE, GMM_het, GMM-het using IVREG2
+global ivmodel "ldrugexp (hi_empunion = ssiratio lowincome multlc firmsz) $x2list"
+quietly ivregress 2sls $ivmodel, vce(robust)
+estimates store TWOSLS
+quietly ivregress liml $ivmodel, vce(robust)
+estimates store LIML
+quietly jive $ivmodel, robust
+estimates store JIVE
+quietly ivregress gmm $ivmodel, wmatrix(robust) 
+estimates store GMM_het
+quietly ivreg2 $ivmodel, gmm2s robust
+estimates store IVREG2
+estimates table TWOSLS LIML JIVE GMM_het IVREG2, b(%7.4f) se 
+=#
+# ivregress 2sls / liml comparison (4 instruments, 1 endogenous)
+df6iv = dropmissing(df6, vcat([:ldrugexp, :hi_empunion, :ssiratio,
+       :lowincome, :multlc, :firmsz], x2list))
+n = nrow(df6iv)
+
+# 2SLS
+twosls = FixedEffectModels.reg(df6iv,
+    @formula(ldrugexp ~ totchr + age + female + blhisp + linc +
+                       (hi_empunion ~ ssiratio + lowincome + multlc + firmsz)),
+    Vcov.robust())
+
+# LIML — manual implementation via smallest-eigenvalue approach
+# y = Xβ + u, X = [X_endog, X_exog], Z = [X_exog, Z_excl]
+# k-class: β̂_k = (X'(I - kM_Z)X)⁻¹ X'(I - kM_Z)y, LIML uses k = λ_min
+y_l  = Float64.(df6iv.ldrugexp)
+X_l  = hcat(Float64.(df6iv.hi_empunion), Float64.(df6iv.totchr), Float64.(df6iv.age),
+            Float64.(df6iv.female), Float64.(df6iv.blhisp), Float64.(df6iv.linc), ones(n))
+Z_l  = hcat(Float64.(df6iv.ssiratio), Float64.(df6iv.lowincome), Float64.(df6iv.multlc),
+            Float64.(df6iv.firmsz), Float64.(df6iv.totchr), Float64.(df6iv.age),
+            Float64.(df6iv.female), Float64.(df6iv.blhisp), Float64.(df6iv.linc), ones(n))
+P_Z  = Z_l * ((Z_l'Z_l) \ Z_l')
+M_Z  = LinearAlgebra.I(n) - P_Z
+# Smallest eigenvalue of (y X_endog)' M_Z (y X_endog) / (y X_endog)' M_exog (y X_endog)
+Y1 = hcat(y_l, Float64.(df6iv.hi_empunion))
+X_exog_only = hcat(Float64.(df6iv.totchr), Float64.(df6iv.age),
+                   Float64.(df6iv.female), Float64.(df6iv.blhisp),
+                   Float64.(df6iv.linc), ones(n))
+P_exog = X_exog_only * ((X_exog_only'X_exog_only) \ X_exog_only')
+M_exog = LinearAlgebra.I(n) - P_exog
+A = Y1' * M_Z * Y1;  B_mat = Y1' * M_exog * Y1
+λ_min = minimum(LinearAlgebra.eigvals(LinearAlgebra.Symmetric(B_mat) \
+                                       LinearAlgebra.Symmetric(A)))
+# k-class estimator with k = λ_min
+β_liml = ((X_l' * (LinearAlgebra.I(n) - λ_min*M_Z) * X_l) \
+          (X_l' * (LinearAlgebra.I(n) - λ_min*M_Z) * y_l))
+
+cn_iv = ["hi_empunion", "totchr", "age", "female", "blhisp", "linc", "_cons"]
+
+# JIVE — Jackknife IV estimator (Angrist, Imbens & Krueger 1999)
+# Uses leave-one-out first-stage fitted values to avoid finite-sample bias
+# x̂ᵢ_JIVE = (n·P_Z[i,:] * x - x̂ᵢ) / (n·h_ii - 1) , h_ii = diag(P_Z)
+x_endog = Float64.(df6iv.hi_empunion)
+x_hat   = P_Z * x_endog         # standard first-stage fitted values
+h_diag  = [P_Z[i,i] for i in 1:n]
+# Leave-one-out fitted values
+x_hat_jive = (n .* (P_Z * x_endog) .- x_hat) ./ (n .* h_diag .- 1.0)
+# Second stage: regress y on x̂_JIVE and exog
+X_jive = hcat(x_hat_jive, X_exog_only)
+β_jive = X_jive \ y_l
+
+# GMM with robust weight matrix (two-step efficient GMM)
+# Step 1: 2SLS residuals
+β_2sls = StatsBase.coef(twosls)
+u_2sls = y_l .- X_l * β_2sls
+# Step 2: optimal weight S = (1/n) Σ z_i z_i' û²
+Zu = Z_l .* u_2sls
+S  = (Zu' * Zu) / n
+Sinv = LinearAlgebra.inv(S)
+# GMM estimator: β = (X'Z S⁻¹ Z'X)⁻¹ X'Z S⁻¹ Z'y
+XZ = X_l' * Z_l
+β_gmm = (XZ * Sinv * XZ') \ (XZ * Sinv * (Z_l' * y_l))
+
+println("Comparison: 2SLS vs LIML vs JIVE vs GMM (4 instruments)")
+println(DataFrames.DataFrame(variable=cn_iv,
+        b_2SLS = β_2sls,
+        b_LIML = β_liml,
+        b_JIVE = vcat(β_jive[1], β_jive[2:end]),
+        b_GMM  = β_gmm))
+```
+
+```{julia}
+#=
+*ssc install st0108
+*ssc install ivreg2
+*ssc install ranktest
+* Variants of IV Estimators: 2SLS, LIML, JIVE, GMM_het, GMM-het using IVREG2
+global ivmodel "ldrugexp (hi_empunion = ssiratio lowincome multlc firmsz) $x2list"
+quietly ivregress 2sls $ivmodel, vce(robust)
+estimates store TWOSLS
+quietly ivregress liml $ivmodel, vce(robust)
+estimates store LIML
+quietly jive $ivmodel, robust
+estimates store JIVE
+quietly ivregress gmm $ivmodel, wmatrix(robust)
+estimates store GMM_het
+quietly ivreg2 $ivmodel, gmm2s robust
+estimates store IVREG2
+estimates table TWOSLS LIML JIVE GMM_het IVREG2, b(%7.4f) se
+=#
+ivlist = [:ssiratio, :lowincome, :multlc, :firmsz]
+
+TWOSLS  = stata_ivregress_gmm(df6, :ldrugexp, :hi_empunion, ivlist, x2list;
+                 estimator=:twosls, wmatrix=:robust)
+LIML    = stata_liml(df6, :ldrugexp, :hi_empunion, ivlist, x2list; robust=true)
+JIVE    = stata_jive(df6, :ldrugexp, :hi_empunion, ivlist, x2list; robust=true)
+GMM_het = stata_ivregress_gmm(df6, :ldrugexp, :hi_empunion, ivlist, x2list;
+                 estimator=:gmm,   wmatrix=:robust)
+IVREG2  = stata_ivregress_gmm(df6, :ldrugexp, :hi_empunion, ivlist, x2list;
+                 estimator=:gmm,   wmatrix=:robust)   # same β as GMM_het
+
+stata_estimates_table(
+    [TWOSLS, LIML, JIVE, GMM_het, IVREG2],
+    ["TWOSLS", "LIML", "JIVE", "GMM_het", "IVREG2"];
+    vars_order = ["hi_empunion", "totchr", "age", "female", "blhisp", "linc", "_cons"],
+    fmt        = "%7.4f")
+```
+
+## 6.6 3SLS systems estimation
+
+```{julia}
+#=
+* 3SLS estimation requires errors to be homoskedastic
+stata_reg3 (ldrugexp hi_empunion totchr age female blhisp linc) ///
+  (hi_empunion ldrugexp totchr female blhisp ssiratio)
+=#
+# 3SLS estimation
+# stata_reg3 (ldrugexp hi_empunion totchr age female blhisp linc)
+#      (hi_empunion ldrugexp totchr female blhisp ssiratio)
+df6_3 = dropmissing(df6, [:ldrugexp, :hi_empunion, :totchr, :age, :female,
+                           :blhisp, :linc, :ssiratio])
+n3 = nrow(df6_3)
+
+# Eq 1: ldrugexp  = f(hi_empunion, totchr, age, female, blhisp, linc)
+# Eq 2: hi_empunion = f(ldrugexp, totchr, female, blhisp, ssiratio)
+# Full instrument set Z = union of all exogenous vars across both equations
+Z3 = hcat(ones(n3), Float64.(df6_3.totchr), Float64.(df6_3.age),
+          Float64.(df6_3.female), Float64.(df6_3.blhisp),
+          Float64.(df6_3.linc), Float64.(df6_3.ssiratio))
+P3 = Z3 * ((Z3'Z3) \ Z3')   # projection onto instrument space
+
+# Regressors for each equation (including endogenous)
+X3_1 = hcat(ones(n3), Float64.(df6_3.hi_empunion), Float64.(df6_3.totchr),
+            Float64.(df6_3.age), Float64.(df6_3.female),
+            Float64.(df6_3.blhisp), Float64.(df6_3.linc))
+X3_2 = hcat(ones(n3), Float64.(df6_3.ldrugexp), Float64.(df6_3.totchr),
+            Float64.(df6_3.female), Float64.(df6_3.blhisp),
+            Float64.(df6_3.ssiratio))
+y3_1 = Float64.(df6_3.ldrugexp)
+y3_2 = Float64.(df6_3.hi_empunion)
+
+cn3_1 = ["_cons", "hi_empunion", "totchr", "age", "female", "blhisp", "linc"]
+cn3_2 = ["_cons", "ldrugexp", "totchr", "female", "blhisp", "ssiratio"]
+
+# Step 1: 2SLS on each equation → get residuals for Σ̂
+X3_1h = P3 * X3_1;  β3_1 = (X3_1h'X3_1) \ (X3_1h'y3_1)
+X3_2h = P3 * X3_2;  β3_2 = (X3_2h'X3_2) \ (X3_2h'y3_2)
+e3_1 = y3_1 - X3_1 * β3_1;  e3_2 = y3_2 - X3_2 * β3_2
+
+# Step 2: cross-equation residual covariance
+Σ3 = [e3_1'e3_1 e3_1'e3_2; e3_2'e3_1 e3_2'e3_2] ./ n3
+Σ3inv = LinearAlgebra.inv(Σ3)
+
+# Step 3: FGLS on projected system  (Σ⁻¹ ⊗ P_Z)
+k1 = size(X3_1, 2); k2 = size(X3_2, 2)
+XWX = [Σ3inv[1,1]*(X3_1h'X3_1)      Σ3inv[1,2]*(X3_1h'X3_2);
+       Σ3inv[2,1]*(X3_2h'X3_1)      Σ3inv[2,2]*(X3_2h'X3_2)]
+XWY = [Σ3inv[1,1]*(X3_1h'y3_1) + Σ3inv[1,2]*(X3_1h'y3_2);
+       Σ3inv[2,1]*(X3_2h'y3_1) + Σ3inv[2,2]*(X3_2h'y3_2)]
+β_3sls = XWX \ XWY
+V_3sls = LinearAlgebra.inv(XWX)
+se_3sls = sqrt.(max.(LinearAlgebra.diag(V_3sls), 0.0))
+z_3sls  = β_3sls ./ se_3sls
+
+println("=== 3SLS Equation 1: ldrugexp ===")
+println(DataFrame(variable=cn3_1, Coef=β_3sls[1:k1], SE=se_3sls[1:k1], z=z_3sls[1:k1]))
+println("\n=== 3SLS Equation 2: hi_empunion ===")
+println(DataFrame(variable=cn3_2, Coef=β_3sls[k1+1:end], SE=se_3sls[k1+1:end], z=z_3sls[k1+1:end]))
+```
+
+```{julia}
+#* 3SLS estimation requires errors to be #homoskedastic
+#stata_reg3 (ldrugexp hi_empunion totchr age female blhisp linc) ///
+#  (hi_empunion ldrugexp totchr female blhisp ssiratio)
+stata_reg3(df6,
+     :ldrugexp    => [:hi_empunion, :totchr, :age, :female, :blhisp, :linc],
+     :hi_empunion => [:ldrugexp,    :totchr, :female, :blhisp, :ssiratio]);
+```
+
+## 6.7 Stata resources
+
+## 6.8 Exercises

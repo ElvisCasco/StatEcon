@@ -1,0 +1,1071 @@
+---
+title: "Cameron & Trivedi -- Ch. 12: Testing methods (via StatEcon)"
+Authors:
+- Colin Cameron
+- Pravin Trivedi
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+[Microeconometrics with R](https://ycroissant.github.io/micsr_book/)
+
+[UCLA](https://stats.oarc.ucla.edu/stata/modules/)
+
+[Github](https://github.com/thousandoaks?tab=repositories)
+
+# Julia setup
+
+```{julia}
+using StatEcon
+const DATA = first(filter(d -> isdir(d) && (isfile(joinpath(d, "auto.dta")) || isdir(joinpath(d, "musr"))), ["../../data", "data", raw"C:/EC/GitHub/StatEcon/data"]))
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+using SpecialFunctions            # digamma for the by-hand LM score test
+using KernelDensity               # kdensity for the chi-vs-F density plot
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+
+_rawval(x) = hasproperty(x, :value) ? x.value : x  # unwrap ReadStatTables.LabeledValue
+```
+
+The testing estimators/commands used in this chapter now live in `StatEcon`:
+the canonical negative-binomial estimator `stata_nbreg` (`src/stata_nbreg.jl`),
+the likelihood-ratio test `stata_lrtest`, the nonlinear Wald test
+`stata_testnl` (ForwardDiff Jacobian), and the Monte-Carlo `stata_power`. The
+count/postestimation helpers `stata_poisson`, `stata_summarize`,
+`stata_regress`, `stata_lincom`, `stata_nlcom`, `stata_correlate` are also
+called directly. The chapter-specific data loader `setup_mus10`, the
+by-hand robust-Wald tester `_c12_test`, and the size-simulation loop
+`_one_rep_size` are kept inline as pedagogical scaffolding.
+
+```{julia}
+# setup_mus10 — chapter-specific loader kept inline (pedagogical).
+#
+# Loads mus10data (filtered to year02==1) if `df10` is omitted, drops missings
+# on `vars`, fits Poisson via StatEcon.stata_poisson, and returns a NamedTuple
+# with both Stata-display order (β, V, X — slopes first, _cons last) and GLM
+# order (model, V_robust = fit.V_glm). Any chapter chunk can call
+# `s = setup_mus10()` without first running the data-load chunk.
+function setup_mus10(df10=nothing;
+                    vars=nothing, formula=nothing,
+                    vce::Symbol=:robust, quiet::Bool=true)
+    if df10 === nothing
+        df10 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus10data.dta"))
+        for c in DataFrames.names(df10)
+            col = df10[!, c]
+            T   = eltype(col)
+            if T <: Union{Missing, Float64}
+                continue
+            elseif T <: Union{Missing, Float32, Int}
+                df10[!, c] = convert.(Union{Missing, Float64}, col)
+            else
+                df10[!, c] = [ismissing(x) ? missing : Float64(_rawval(x))
+                              for x in col]
+            end
+        end
+        df10 = DataFrames.filter(r -> r.year02 == 1, df10)
+    end
+    cols = vars === nothing ?
+        [:docvis, :private, :chronic, :female, :income, :age] : vars
+    fml  = formula === nothing ?
+        GLM.@formula(docvis ~ private + chronic + female + income) : formula
+    df10c = DataFrames.dropmissing(df10[:, cols])
+    fit = stata_poisson(df10c, fml; vce = vce, quiet = quiet)
+    return (; df = df10c, fit,
+              model = fit.model, V_robust = fit.V_glm,
+              β = fit.β, V = fit.V, X = fit.X,
+              n = fit.n, k = fit.k, coefnames = fit.coefnames,
+              coefnames_glm = fit.coefnames_glm)
+end
+```
+
+```{julia}
+# _c12_test — by-hand robust Wald tester kept inline (pedagogical).
+#
+# StatEcon's exported `stata_test` is an OLS-oriented F-form joint Wald that
+# uses the model's default VCE. Stata's `test` after an ML command (`poisson`,
+# `nbreg`, …) reports a χ²-form Wald that (i) accepts a user-supplied robust V,
+# (ii) supports arbitrary linear restrictions, and (iii) has an `mtest` option.
+# We reproduce that here — it is exactly the manual Wald computation the book
+# lays out in §12.3.2. `restrictions` is a Vector of `Vector(name=>weight)=>rhs`
+# pairs; pass `V = s.V_robust` for the robust VCE.
+function _c12_test(model=nothing, vars=nothing; values=nothing,
+                   depvar::AbstractString="docvis",
+                   V=nothing, restrictions=nothing, mtest::Bool=false,
+                   β=nothing, coefnames=nothing)
+    β     = β === nothing ? StatsBase.coef(model) : collect(β)
+    Vmat  = V === nothing ? Matrix(StatsBase.vcov(model)) : Matrix(V)
+    names = coefnames === nothing ? string.(StatsBase.coefnames(model)) :
+                                    string.(coefnames)
+    p_idx(v) = (i = findfirst(==(string(v)), names);
+                i === nothing && error("'$(v)' not in coefnames=$(names)"); i)
+
+    if restrictions !== nothing
+        q = length(restrictions); k = length(β)
+        R = zeros(q, k); r = zeros(q); labels = String[]
+        for (row, restr) in enumerate(restrictions)
+            coefs, rhs = restr.first, restr.second
+            term_strs = String[]
+            for (idx, (vname, c)) in enumerate(collect(coefs))
+                R[row, p_idx(vname)] = float(c)
+                cf = float(c); abs_c = abs(cf)
+                core = abs_c == 1.0 ? "[$depvar]$vname" :
+                       Printf.@sprintf("%g*[%s]%s", abs_c, depvar, vname)
+                sign_op = cf < 0 ? "-" : "+"
+                push!(term_strs,
+                    idx == 1 ? (cf < 0 ? "- $core" : core) : "$sign_op $core")
+            end
+            r[row] = float(rhs)
+            push!(labels,
+                join(term_strs, " ") * " = " * Printf.@sprintf("%g", r[row]))
+        end
+    else
+        vs   = vars isa AbstractVector ? string.(vars) : [string(vars)]
+        vals = values === nothing ? zeros(length(vs)) : collect(values)
+        q = length(vs); k = length(β)
+        R = zeros(q, k); r = vals; labels = String[]
+        for (row, v) in enumerate(vs)
+            R[row, p_idx(v)] = 1.0
+            prefix = isempty(depvar) ? "" : "[$depvar]"
+            push!(labels, "$prefix$v = " * Printf.@sprintf("%g", vals[row]))
+        end
+    end
+
+    Rβ_r = R * β .- r
+    chi2 = (Rβ_r' * (LinearAlgebra.Symmetric(R * Vmat * R') \ Rβ_r))::Float64
+    df   = size(R, 1)
+    pval = Distributions.ccdf(Distributions.Chisq(df), chi2)
+    println()
+    for (k_, lab) in enumerate(labels)
+        Printf.@printf(" ( %d)  %s\n", k_, lab)
+    end
+    if mtest
+        chi2_each = [let row = R[i:i, :]; rb = row * β .- r[i:i];
+                        (rb' * (LinearAlgebra.Symmetric(row * Vmat * row') \ rb))::Float64
+                     end for i in 1:df]
+        p_each = [Distributions.ccdf(Distributions.Chisq(1), c) for c in chi2_each]
+        println()
+        println("-"^38)
+        Printf.@printf("%6s |  %10s  %5s  %9s\n", "", "chi2", "df", "p > chi2")
+        println("-"^7, "+", "-"^30)
+        for i in 1:df
+            Printf.@printf("   (%d) |  %10.2f  %5d  %9.4f*\n", i, chi2_each[i], 1, p_each[i])
+        end
+        println("-"^7, "+", "-"^30)
+        Printf.@printf("%6s |  %10.2f  %5d  %9.4f\n", "All", chi2, df, pval)
+        println("-"^38)
+        println("* Unadjusted p-values")
+    else
+        Printf.@printf("\n           chi2(%3d) = %7.2f\n", df, chi2)
+        Printf.@printf("         Prob > chi2 = %9.4f\n", pval)
+    end
+    return (; chi2, df, p = pval)
+end
+```
+
+# 12 Testing methods
+
+## 12.1 Introduction
+
+## 12.2 Critical values and p-values
+
+### 12.2.1 Standard normal compared with Student's t
+
+### 12.2.2 Chi-squared compared with F
+
+### 12.2.3 Plotting densities
+
+```{julia}
+#=
+* Create many draws from chi(5) and 5*F(5,30) distributions
+set seed 10101
+quietly set obs 10000
+generate chi5 = rchi2(5)           // result xc ~ chisquared(10)
+generate xfn = rchi2(5)/5          // result numerator of F(5,30)
+generate xfd = rchi2(30)/30        // result denominator of F(5,30)
+generate f5_30 = xfn/xfd           // result xf ~ F(5,30)
+generate five_x_f5_30 = 5*f5_30
+summarize chi5 five_x_f5_30
+=#
+
+Random.seed!(10101)
+n = 10_000
+
+chi5 = rand(Chisq(5), n)
+xfn = rand(Chisq(5), n) ./ 5
+xfd = rand(Chisq(30), n) ./ 30
+f5_30 = xfn ./ xfd
+five_x_f5_30 = 5 .* f5_30
+
+sim = DataFrames.DataFrame(
+    chi5 = chi5,
+    five_x_f5_30 = five_x_f5_30,
+)
+stata_summarize(sim, [:chi5, :five_x_f5_30])
+```
+
+```{julia}
+#=
+* Plot the densities for these two distributions using kdensity
+label var chi5 "chi(5)"
+label var five_x_f5_30 "5*F(5,30)"
+kdensity chi5, bw(1.0) generate (kx1 kd1) n(500)
+kdensity five_x_f5_30, bw(1.0) generate (kx2 kd2) n(500)
+quietly drop if (chi5 > 25  |  five_x_f5_30 > 25)
+graph twoway (line kd1 kx1) if kx1 < 25, name(chi)
+graph twoway (line kd2 kx2) if kx2 < 25, name(F)
+graph twoway (line kd1 kx1) (line kd2 kx2, clstyle(p3)) if kx1 < 25,  ///
+  scale(1.2) plotregion(style(none))     ///
+  title("Chisquared(5) and 5*F(5,30) Densities")                ///
+  xtitle("y", size(medlarge)) xscale(titlegap(*5))              ///
+  ytitle("Density f(y)", size(medlarge)) yscale(titlegap(*5))   ///
+  legend(pos(1) ring(0) col(1)) legend(size(small))             ///
+  legend(label(1 "Chi(5)") label(2 "5*F(5,30)"))
+quietly graph export musr/mus12fandchi5.eps, replace
+=#
+
+# Kernel densities with Stata-like settings: bw(1.0), n(500)
+kd1 = KernelDensity.kde(chi5, bandwidth = 1.0, npoints = 500)
+kd2 = KernelDensity.kde(five_x_f5_30, bandwidth = 1.0, npoints = 500)
+
+# Restrict plotted support to x < 25 (matching graph if kx < 25)
+keep1 = kd1.x .< 25
+keep2 = kd2.x .< 25
+
+# Combined graph (line kd1 kx1) (line kd2 kx2)
+fig = CairoMakie.Figure(size = (840, 520))
+ax = CairoMakie.Axis(fig[1, 1],
+    xlabel = "y",
+    ylabel = "Density f(y)",
+    title = "Chisquared(5) and 5*F(5,30) Densities",
+)
+CairoMakie.lines!(ax, kd1.x[keep1], kd1.density[keep1], linewidth = 2.4,
+                  color = :steelblue, label = "Chi(5)")
+CairoMakie.lines!(ax, kd2.x[keep2], kd2.density[keep2], linewidth = 2.4,
+                  color = :darkorange, label = "5*F(5,30)")
+CairoMakie.axislegend(ax, position = :lt)
+
+# Export like: graph export musr/mus12fandchi5.eps, replace
+mkpath("musr")
+CairoMakie.save("musr/mus12fandchi5.eps", fig)
+
+fig
+```
+
+### 12.2.4 Computing p-values and critical values
+
+```{julia}
+#=
+* p-values for t(30), F(1,30), Z, and chi(1) at y = 2
+scalar y = 2
+scalar p_t30 = 2*ttail(30,y)
+scalar p_f1and30 = Ftail(1,30,y^2)
+scalar p_z = 2*(1-normal(y))
+scalar p_chi1 = chi2tail(1,y^2)
+display "p-values" "  t(30) =" %7.4f p_t30 "  F(1,30)=" %7.4f  ///
+       p_f1and30 "  z =" %7.4f p_z "  chi(1)=" %7.4f p_chi1
+=#
+# Two-sided p-values from each distribution at y = 2.
+# Stata        Julia
+# ttail(d, y)   1 − cdf(TDist(d), y)
+# Ftail(d1,d2,y²) 1 − cdf(FDist(d1,d2), y²)
+# 1 − normal(y) 1 − cdf(Normal(), y)
+# chi2tail(d,y²)  1 − cdf(Chisq(d), y²)
+# (For y=2, t(30) and F(1,30) match because F(1,n) ≡ t(n)²; z and χ²(1)
+# match for the same reason.)
+y = 2.0
+p_t30     = 2 * (1 - Distributions.cdf(Distributions.TDist(30), y))
+p_f1and30 = 1 - Distributions.cdf(Distributions.FDist(1, 30), y^2)
+p_z       = 2 * (1 - Distributions.cdf(Distributions.Normal(),  y))
+p_chi1    = 1 - Distributions.cdf(Distributions.Chisq(1), y^2)
+@printf("p-values  t(30) =%7.4f  F(1,30)=%7.4f  z =%7.4f  chi(1)=%7.4f\n",
+        p_t30, p_f1and30, p_z, p_chi1)
+```
+
+```{julia}
+#=
+* Critical values for t(30), F(1,30), Z, and chi(1) at level 0.05
+scalar alpha = 0.05
+scalar c_t30 = invttail(30,alpha/2)
+scalar c_f1and30 = invFtail(1,30,alpha)
+scalar c_z = -invnormal(alpha/2)
+scalar c_chi1 = invchi2(1,1-alpha)
+display "critical values" "  t(30) =" %7.3f c_t30 "  F(1,30)=" %7.3f  ///
+       c_f1and30 "  z =" %7.3f c_z "  chi(1)=" %7.3f c_chi1
+=#
+# Critical values at α = 0.05
+α = 0.05
+c_t30  = Distributions.quantile(Distributions.TDist(30), 1 - α/2)
+c_f130 = Distributions.quantile(Distributions.FDist(1, 30), 1 - α)
+c_z    = Distributions.quantile(Distributions.Normal(),  1 - α/2)
+c_chi1 = Distributions.quantile(Distributions.Chisq(1), 1 - α)
+@printf("crit. vals: t(30)=%.3f  F(1,30)=%.3f  z=%.3f  χ²(1)=%.3f\n",
+        c_t30, c_f130, c_z, c_chi1)
+```
+
+### 12.2.5 Which distributions does Stata use?
+
+## 12.3 Wald tests and confidence intervals
+
+### 12.3.1 Wald test of linear hypotheses
+
+### 12.3.2 Wald tests in Julia
+
+```{julia}
+# Stata's `poisson` (as opposed to `ml maximize`) prints the "Poisson
+# regression" header with Pseudo R² — that's the default `header_style =
+# :poisson` in `stata_poisson`. `setup_mus10` auto-loads `mus10data.dta`,
+# filters `year02==1`, drops missings on `vars`, and fits Poisson with
+# `vce(robust)`. We pass the chapter-12 5-variable set explicitly so n matches
+# Stata's expected 4,412.
+s = setup_mus10(;
+    vars  = [:docvis, :private, :chronic, :female, :income],
+    quiet = false)
+
+# Convenience aliases used by the downstream chapter-12 chunks (Wald F,
+# nonlinear delta, lincom, nlcom, asymmetric CIs, …). Everything is in
+# GLM column order so `coefnames(s.model)` lookups are valid.
+β          = GLM.coef(s.model)
+V          = s.V_robust
+cn         = GLM.coefnames(s.model)
+i_f        = findfirst(==("female"),  cn)
+i_p        = findfirst(==("private"), cn)
+i_c        = findfirst(==("chronic"), cn)
+i_inc      = findfirst(==("income"),  cn)
+slope_idx  = setdiff(1:length(β), [findfirst(==("(Intercept)"), cn)]);
+```
+
+#### Test single coefficient
+
+```{julia}
+#=
+* Test a single coefficient equal 0
+test female
+=#
+_c12_test(s.model, "female"; V = s.V_robust);
+```
+
+#### Test several hypotheses
+
+```{julia}
+#=
+// Variations not included in book
+test female
+test female = 0
+test [docvis]female = 0
+test _b[female] = 0
+=#
+# Stata accepts four equivalent syntaxes for "test β_female = 0":
+#   test female                — short form, defaults to "= 0"
+#   test female = 0            — explicit RHS
+#   test [docvis]female = 0    — equation-prefixed name
+#   test _b[female] = 0        — coefficient-vector reference
+# All four resolve to the same chi² test, so we just print the Stata command
+# line as a header before each call.
+for stata_cmd in (". test female",
+                  ". test female = 0",
+                  ". test [docvis]female = 0",
+                  ". test _b[female] = 0")
+    println(stata_cmd)
+    _c12_test(s.model, "female"; V = s.V_robust)
+    println()
+end
+```
+
+```{julia}
+#=
+* Test two hypotheses jointly using test
+test (female) (private + chronic = 1)
+=#
+# Joint Wald: H0: β_female = 0  AND  β_private + β_chronic = 1.
+# `restrictions` accepts a vector of `Vector(coef => weight) => RHS` pairs;
+# `_c12_test` builds R (q×k) and r (q-vector), computes
+#   χ² = (Rβ − r)' (R V R')⁻¹ (Rβ − r),  df = q,
+# and prints the equation list in Stata's "[depvar]name + [depvar]name = c"
+# format. Use a Vector (not a Dict) for the LHS so the printed term order
+# matches what you wrote.
+_c12_test(s.model;
+    V = s.V_robust,
+    restrictions = [
+        ["female"  => 1.0]                    => 0.0,
+        ["private" => 1.0, "chronic" => 1.0]  => 1.0,
+    ]);
+```
+
+```{julia}
+#=
+* Test each hypothesis in isolation as well as jointly
+test (female) (private + chronic = 1), mtest
+=#
+# Stata `mtest` option: report each hypothesis tested in isolation alongside
+# the joint test. Each row's chi² is computed via the same Wald formula but
+# using just that row of R; df = 1 per row. Unadjusted p-values (the default).
+_c12_test(s.model;
+    V = s.V_robust,
+    restrictions = [
+        ["female"  => 1.0]                    => 0.0,
+        ["private" => 1.0, "chronic" => 1.0]  => 1.0,
+    ],
+    mtest = true);
+```
+
+```{julia}
+#=
+// Following not included in book
+test ([docvis]female = 0) ([docvis]private + [docvis]chronic = 1)
+test (_b[female] = 0) (_b[private] + _b[chronic] = 1)
+=#
+# Both variants below resolve to the same restrictions as the prior chunk —
+# Stata accepts the equation-prefixed `[depvar]varname` syntax and the
+# `_b[varname]` coefficient-vector form interchangeably with bare names.
+for stata_cmd in (". test ([docvis]female = 0) ([docvis]private + [docvis]chronic = 1)",
+                  ". test (_b[female] = 0) (_b[private] + _b[chronic] = 1)")
+    println(stata_cmd)
+    _c12_test(s.model;
+        V = s.V_robust,
+        restrictions = [
+            ["female"  => 1.0]                    => 0.0,
+            ["private" => 1.0, "chronic" => 1.0]  => 1.0,
+        ])
+    println()
+end
+```
+
+```{julia}
+#=
+* Wald test of overall significance
+test private chronic female income
+=#
+_c12_test(s.model, ["private", "chronic", "female", "income"]; V = s.V_robust)
+
+# Cross-check with StatEcon's exported `stata_test` (F-form joint Wald using
+# the model's default OIM VCE — the robust χ²-form above is what matches
+# Stata's `test` after `poisson, vce(robust)`).
+stata_test(s.model, ["private", "chronic", "female", "income"]);
+```
+
+#### Test calculated from retrieved coefficients and VCE
+
+```{julia}
+#=
+* Manually compute overall test of significance using the formula for W
+quietly poisson docvis private chronic female income, vce(robust)
+matrix b = e(b)'
+matrix V = e(V)
+matrix R = (1,0,0,0,0 \ 0,1,0,0,0 \ 0,0,1,0,0 \ 0,0,0,1,0 )
+matrix r = (0 \ 0 \ 0 \ 0)
+matrix W = (R*b-r)'*invsym(R*V*R')*(R*b-r)
+scalar Wald = W[1,1]
+scalar h = rowsof(R)
+display "Wald test statistic: " Wald "  with p-value: " chi2tail(h,Wald)
+=#
+# Direct matrix Wald computation (no helper). Stata builds an explicit
+# 4×5 selector R that picks the four slopes (skipping `_cons`), the null
+# vector r, and computes W = (Rβ − r)' (R V R')⁻¹ (Rβ − r). The robust V is
+# already on `s.V_robust` (GLM order, with `_cons` first). We use `slope_idx`
+# so the test matches Stata regardless of where `_cons` lands in coefnames.
+β  = GLM.coef(s.model)
+V  = s.V_robust
+R  = zeros(length(slope_idx), length(β))
+for (k, i) in enumerate(slope_idx); R[k, i] = 1.0; end
+r  = zeros(length(slope_idx))
+W  = (R * β - r)' * LinearAlgebra.inv(LinearAlgebra.Symmetric(R * V * R')) *
+     (R * β - r)
+h  = size(R, 1)
+# `ccdf` (= 1 − cdf) is computed directly so the tail probability survives
+# even when cdf ≈ 1.0 underflows; for W ≈ 594.7, the χ²(4) tail is ≈ 2e-131.
+p  = Distributions.ccdf(Distributions.Chisq(h), W)
+@printf("Wald test statistic: %.5f  with p-value: %.2e\n", W, p)
+```
+
+### 12.3.3 One-sided Wald tests
+
+### 12.3.4 Wald test of nonlinear hypotheses (delta method)
+
+### 12.3.5 Nonlinear Wald via the delta method
+
+```{julia}
+# `stata_testnl` handles the delta-method linearisation (ForwardDiff Jacobian)
+# and Stata-format printing. Pass the closure `β -> β[i_f]/β[i_p] − 1` for
+# H0: β_female/β_private = 1, plus the robust V and the hypothesis string.
+stata_testnl(β -> β[i_f] / β[i_p] - 1, β, V;
+             label = "_b[female]/_b[private] = 1");
+```
+
+```{julia}
+# Stata `test female = private` rearranges the equation as
+# `-private + female = 0` (regressor-list order, with the second variable
+# moved to RHS getting a `-` sign). The same restriction in `_c12_test`
+# uses `["private" => -1.0, "female" => 1.0] => 0.0`. The chi² is exactly
+# the same as testing `female - private = 0`, but Stata's display orders
+# the terms in regressor-list order.
+_c12_test(s.model;
+    V = s.V_robust,
+    restrictions = [
+        ["private" => -1.0, "female" => 1.0] => 0.0,
+    ]);
+```
+
+### 12.3.6 Wald confidence intervals
+
+### 12.3.7 Linear combinations (lincom equivalent)
+
+```{julia}
+# CI for β_private + β_chronic - 1
+β_p = β[i_p]; β_c = β[i_c]
+lc = β_p + β_c - 1
+se_lc = sqrt(V[i_p, i_p] + V[i_c, i_c] + 2 * V[i_p, i_c])
+@printf("lincom = %.6f  se=%.6f  95%% CI = [%.4f, %.4f]\n",
+        lc, se_lc, lc - 1.96 * se_lc, lc + 1.96 * se_lc)
+```
+
+```{julia}
+# `stata_lincom` takes a weight vector w (one entry per coefficient, in GLM
+# order) plus an additive constant `c` for shifts like `- 1`. Estimate is
+# L = w'β + c with SE = √(w'Vw); z, p, and the 95% CI follow directly.
+w        = zeros(length(β))
+w[i_p]   = 1.0
+w[i_c]   = 1.0
+stata_lincom(w, β, V; c = -1.0, depvar = "docvis");
+```
+
+### 12.3.8 Nonlinear combinations (nlcom equivalent — delta method)
+
+```{julia}
+# CI for β_female / β_private - 1
+β_f = β[i_f]
+g_val = β_f / β_p - 1
+∇g = zeros(length(β))
+∇g[i_f] = 1 / β_p
+∇g[i_p] = -β_f / β_p^2
+se_g = sqrt(∇g' * V * ∇g)
+@printf("nlcom = %.6f  se=%.6f  95%% CI = [%.4f, %.4f]\n",
+        g_val, se_g, g_val - 1.96 * se_g, g_val + 1.96 * se_g)
+```
+
+```{julia}
+# `stata_nlcom` takes the nonlinear function as a closure over β and computes
+# the delta-method SE via finite differences. Output matches Stata's `nlcom`
+# table (Coefficient / Std. err. / z / p / 95% CI).
+stata_nlcom(β -> β[i_f] / β[i_p] - 1, β, V;
+            name = "_nl_1", depvar = "docvis");
+```
+
+### 12.3.9 Asymmetric confidence intervals
+
+```{julia}
+#=
+* CI for exp(b) using lincom option eform
+lincom private, eform
+=#
+# CI for exp(β_private) (incidence rate ratio): use lincom + exponentiate
+β_p_val = β[i_p]; se_p_val = sqrt(V[i_p, i_p])
+lo, hi = β_p_val - 1.96 * se_p_val, β_p_val + 1.96 * se_p_val
+@printf("exp(β_private) = %.4f  95%% CI = [%.4f, %.4f]\n",
+        exp(β_p_val), exp(lo), exp(hi))
+```
+
+```{julia}
+#=
+* CI for exp(b) using lincom followed by exponentiate
+lincom private
+=#
+# `stata_lincom` with `eform = true` reports exp(L) instead of L, the
+# delta-method SE = exp(L)·SE(L), and an asymmetric CI = [exp(L − z·SE(L)),
+# exp(L + z·SE(L))] (i.e. the symmetric CI on the log scale, exponentiated).
+# z and p stay on the LINEAR scale — the test is still H0: β_private = 0,
+# equivalent to H0: exp(β_private) = 1.
+w        = zeros(length(β))
+w[i_p]   = 1.0
+stata_lincom(w, β, V; eform = true, depvar = "docvis");
+```
+
+```{julia}
+#=
+* CI for exp(b) using nlcom
+nlcom exp(_b[private])
+=#
+# Same as above (lincom-then-exponentiate uses the symmetric CI on the log scale)
+@printf("β_private = %.4f  95%% CI = [%.4f, %.4f]\n",
+        β_p_val, lo, hi)
+```
+
+```{julia}
+# Plain `lincom private` (no `, eform`) reports β_private and its CI on the
+# LINEAR scale; users then exponentiate the endpoints by hand to get the
+# eform CI. Numerically equivalent to the previous chunk's eform output:
+#   exp(.7986653) = 2.2226, exp(.5850262) = 1.7950, exp(1.012304) = 2.7519.
+w        = zeros(length(β))
+w[i_p]   = 1.0
+stata_lincom(w, β, V; depvar = "docvis");
+```
+
+```{julia}
+# CI via delta method on exp(β_private): se = exp(β) * se(β)
+expβ = exp(β_p_val); se_expβ = expβ * se_p_val
+@printf("exp(β_private) (delta) = %.4f  se=%.4f  CI=[%.4f, %.4f]\n",
+        expβ, se_expβ, expβ - 1.96 * se_expβ, expβ + 1.96 * se_expβ)
+```
+
+```{julia}
+# `nlcom exp(_b[private])` builds a SYMMETRIC CI on the eform scale via the
+# delta method: SE = |exp(β)|·SE(β); CI = exp(β) ± z·SE. Compare with the
+# previous `lincom private, eform` chunk, which exponentiates a symmetric
+# CI from the LINEAR scale and is therefore asymmetric on the eform scale.
+# Same point estimate (2.2226), same SE (.2423), but the CI endpoints differ.
+stata_nlcom(β -> exp(β[i_p]), β, V;
+            name = "_nl_1", depvar = "docvis");
+```
+
+## 12.4 Likelihood-ratio tests
+
+### 12.4.1 Likelihood-ratio tests
+
+```{julia}
+#=
+* LR tests output if estimate by ML with default estimate of VCE
+nbreg docvis private chronic female income,  nolog
+=#
+# `stata_nbreg` fits NB2 jointly in (β, lnα) by maximising the NB
+# log-likelihood via Optim, takes the inverse Hessian as the OIM vcov, and
+# prints the full Stata-style table including /lnalpha, alpha, and the LR test
+# `chibar2(01)` of α = 0 (NB → Poisson, half-mixture p). Self-contained — uses
+# `setup_mus10`'s data subset (5-var dropmissing).
+stata_nbreg(setup_mus10(;
+    vars = [:docvis, :private, :chronic, :female, :income], quiet = true).df,
+    GLM.@formula(docvis ~ private + chronic + female + income));
+```
+
+### 12.4.2 LR tests
+
+```{julia}
+# `testnl exp([lnalpha]_cons) = 0` is a delta-method Wald test that the NB
+# dispersion α (= exp(lnα)) is zero — i.e. the data is Poisson. Stata uses
+# this as an alternative to the LR `chibar2(01)` test reported in §12.4.1.
+#
+# Refit the NB model (quiet = true), pull out lnα and its standard error, and
+# feed to `stata_testnl` with a 1-element parameter vector (lnα alone) and a
+# 1×1 vcov.
+nb_fit = stata_nbreg(setup_mus10(;
+    vars = [:docvis, :private, :chronic, :female, :income], quiet = true).df,
+    GLM.@formula(docvis ~ private + chronic + female + income); quiet = true)
+
+stata_testnl(p -> exp(p[1]), [nb_fit.lnalpha],
+             reshape([nb_fit.se_lnalpha^2], 1, 1);
+             label = "exp([lnalpha]_cons) = 0");
+```
+
+```{julia}
+# LR test of nested NB models. Stata's `estimates store` lets you save two
+# fits and compare; in Julia we just hold them in two NamedTuples and pass
+# `.ll` to `stata_lrtest`. The unrestricted model has 4 slopes (private,
+# chronic, female, income); the restricted model drops 2 (private, chronic),
+# so df = 2.
+df_nb = setup_mus10(;
+    vars = [:docvis, :private, :chronic, :female, :income], quiet = true).df
+nb_unr = stata_nbreg(df_nb,
+    GLM.@formula(docvis ~ private + chronic + female + income); quiet = true)
+nb_res = stata_nbreg(df_nb,
+    GLM.@formula(docvis ~ female + income); quiet = true)
+
+stata_lrtest(nb_unr.ll, nb_res.ll, 2);
+```
+
+```{julia}
+# Stata accepts the two stored estimates in either order — `lrtest unrestrict
+# restrict` and `lrtest restrict unrestrict` produce identical output. Our
+# `stata_lrtest` takes the log-likelihoods directly, so we pass them in the
+# same order regardless of the Stata argument order. The `nb_unr`/`nb_res`
+# fits from the previous chunk are reused.
+stata_lrtest(nb_unr.ll, nb_res.ll, 2);
+```
+
+```{julia}
+# Wald test of the same nested hypothesis (chronic = 0, private = 0) on the
+# NB fit. `nb_unr.model` carries the NB β / V / coefnames (GLM order), so
+# `_c12_test` can look up "chronic" and "private" directly. Stata prints the
+# variables in the order typed: "test chronic private".
+_c12_test(nb_unr.model, ["chronic", "private"];
+          β = nb_unr.β_glm, V = nb_unr.V_glm, coefnames = nb_unr.coefnames_glm);
+```
+
+```{julia}
+# Manual LR test of NB vs Poisson (i.e. H0: α = 0). The Stata code uses
+# `chi2tail(1, lr)` which assumes a χ²(1) null distribution — note this is
+# theoretically incorrect because α = 0 is on the parameter boundary. The
+# proper test uses the half-mixture `chibar2(01)` distribution (reported by
+# `nbreg` and via `nb_unr.p_chibar`); the two p-values differ by a factor of
+# 2. `nb_unr` already stores both `ll` (NB) and `ll_pois` (Poisson), so we
+# just compute the LR and pass it to `Distributions.ccdf(Chisq(1), ⋅)`.
+ll_unr = nb_unr.ll
+ll_res = nb_unr.ll_pois
+lr     = -2 * (ll_res - ll_unr)
+p      = Distributions.ccdf(Distributions.Chisq(1), lr)
+@printf("LR = %.5f with p = %.3e\n", lr, p)
+```
+
+```{julia}
+# Same NB-vs-Poisson LR test as the manual chunk, but routed through the
+# `stata_lrtest` helper for the standard Stata output block. Dividing the
+# returned p by 2 gives the half-mixture (`chibar2(01)`) corrected p-value
+# for the boundary parameter α = 0.
+res = stata_lrtest(nb_unr.ll, nb_unr.ll_pois, 1)
+@printf("Corrected p-value for LR-test = %.10f\n", res.p / 2)
+```
+
+## 12.5 Lagrange multiplier (score) test
+
+### 12.5.1 LM tests
+
+### 12.5.2 LM via fitted-model derivatives
+
+### 12.5.3 LM test by auxiliary regression
+
+```{julia}
+#=
+* Perform LM test that b_private=0, b_chronic=0 using auxiliary regression
+use musr/mus10data.dta, clear
+quietly keep if year02==1
+generate one = 1
+constraint define 1 private = 0
+constraint define 2 chronic = 0
+quietly nbreg docvis female income private chronic, constraints(1 2)
+predict eqscore ascore, scores
+generate s1restb = eqscore*one
+generate s2restb = eqscore*female
+generate s3restb = eqscore*income
+generate s4restb = eqscore*private
+generate s5restb = eqscore*chronic
+generate salpha = ascore*one
+quietly regress one s1restb s2restb s3restb s4restb s5restb salpha, noconstant
+scalar lm = e(N)*e(r2)
+display "LM = N x uncentered Rsq = " lm " and p = " chi2tail(2,lm)
+=#
+# LM (score) test of H0: β_private = 0, β_chronic = 0 in NB regression
+# of docvis on female + income + private + chronic.
+#
+# Method (Stata's auxiliary-regression form):
+# 1. Fit the restricted NB model (`docvis ~ female + income`); get β̃ and α̃.
+# 2. Compute per-obs scores at the restricted estimates:
+#       eqscore_i = (y_i − μ̃_i) / (1 + α̃·μ̃_i),  μ̃_i = exp(x̃_i'β̃)
+#       ascore_i  = (1/α̃)·[ψ(1/α̃) − ψ(y_i + 1/α̃) + ln(1 + α̃μ̃_i)] + eqscore_i
+# 3. Build the score matrix S with one column per parameter
+#    (β_cons, β_female, β_income, β_private, β_chronic, lnα).
+# 4. Regress 1 on S without an intercept; LM = N · R² (uncentered) on χ²(2)
+#    (df = number of constraints = 2).
+
+s_lm = setup_mus10(;
+    vars = [:docvis, :female, :income, :private, :chronic], quiet = true)
+df_lm = s_lm.df
+y     = Float64.(df_lm.docvis)
+
+# Restricted NB fit
+nb_r  = stata_nbreg(df_lm, GLM.@formula(docvis ~ female + income); quiet = true)
+i_c   = findfirst(==("(Intercept)"), nb_r.coefnames_glm)
+i_f   = findfirst(==("female"),      nb_r.coefnames_glm)
+i_i   = findfirst(==("income"),      nb_r.coefnames_glm)
+β̃     = nb_r.β_glm
+α̃     = nb_r.alpha
+μ̃     = exp.(β̃[i_c] .+ β̃[i_f] .* df_lm.female .+ β̃[i_i] .* df_lm.income)
+
+eqscore = (y .- μ̃) ./ (1 .+ α̃ .* μ̃)
+ascore  = (1/α̃) .* (SpecialFunctions.digamma(1/α̃) .-
+                    SpecialFunctions.digamma.(y .+ 1/α̃) .+
+                    log.(1 .+ α̃ .* μ̃)) .+ eqscore
+
+# Score matrix S — one column per restricted-model parameter PLUS the two
+# constrained-to-zero coefficients (private, chronic) and α.
+S = hcat(eqscore .* 1.0,
+         eqscore .* df_lm.female,
+         eqscore .* df_lm.income,
+         eqscore .* df_lm.private,
+         eqscore .* df_lm.chronic,
+         ascore)
+
+# Auxiliary regression: 1 ~ S, no constant.  R² (uncentered) for OLS:
+#   R² = β̂' (S'S) β̂ / Σy²,   with y_i ≡ 1, so Σy² = N → LM = N·R² = β̂' S'S β̂.
+N      = length(y)
+one_v  = Base.ones(N)                 # local name avoids shadowing Base.ones
+β̂_aux  = (S' * S) \ (S' * one_v)
+ŷ_aux  = S * β̂_aux
+LM     = sum(abs2, ŷ_aux)              # ≡ N · uncentered R²
+p_lm  = Distributions.ccdf(Distributions.Chisq(2), LM)
+
+@printf("LM = N x uncentered Rsq = %.5f and p = %.3e\n", LM, p_lm)
+```
+
+## 12.6 Test size and power
+
+### 12.6.1 Simulation DGP: OLS with χ² errors
+
+### 12.6.2 Test size
+
+```{julia}
+#=
+// Following not included in book
+* Generate one sample from DGP with b2 = 0 and estimate by OLS
+clear
+set seed 10101
+quietly set obs 25
+gen x = 12 + rnormal(0,2)
+quietly generate y = 10 + 0.06*x + rnormal(0,0.3)
+export delimited "12_6_2.csv", replace
+summarize x y
+regress y x, noheader
+=#
+# One sample from a small-N DGP: x ~ N(12, 2), y = 10 + 0.06·x + N(0, 0.3),
+# n = 25. Stata exports the realization to `12_6_2.csv` (matching the
+# textbook's MT64 sequence). If that file is present under `$(DATA)/musr` we
+# read it; otherwise we fall back to a Julia realization (Xoshiro256++ ≠ MT64,
+# so x/y differ from the book but the workflow is identical).
+csv_dgp = joinpath(DATA, "musr", "12_6_2.csv")
+if isfile(csv_dgp)
+    df_dgp = CSV.read(csv_dgp, DataFrames.DataFrame)
+else
+    Random.seed!(10101)
+    df_dgp = DataFrames.DataFrame(x = 12 .+ 2 .* randn(25))
+    df_dgp.y = 10 .+ 0.06 .* df_dgp.x .+ 0.3 .* randn(25)
+end
+
+stata_summarize(df_dgp, [:x, :y])
+stata_regress(df_dgp, :y, [:x]);
+```
+
+```{julia}
+#=
+* Do 1000 simulations where each gets p-value of test of b2=2
+set seed 10101
+postfile sim pvalues using pvalues, replace
+forvalues i = 1/1000 {
+  drop _all
+  quietly set obs 150
+  quietly generate double x = rchi2(1)
+  quietly generate y = 1 + 2*x + rchi2(1)-1
+  quietly regress y x
+  quietly test x = 2
+  scalar p = r(p)         // p-value for test this simulation
+  post sim (p)
+}
+postclose sim
+=#
+# Monte-Carlo test-size check. Each rep generates n = 150 obs from the DGP
+#     x ~ χ²(1),   y = 1 + 2·x + (χ²(1) − 1)   [mean-zero error]
+# fits OLS, and records the two-sided t-test p-value for H0: β_x = 2 (the DGP
+# truth). Under H0 the empirical CDF of these p-values should be ≈ Uniform(0,1);
+# the §12.6.2 "Test size" table just counts the share below 0.05 (≈5%).
+#
+# `_one_rep_size` bypasses `stata_regress` inside the loop (it always prints)
+# and uses `FixedEffectModels.reg` directly, then builds the t-statistic and
+# p-value manually. The p-values are saved to `pvalues_12_6_2.csv` so the
+# downstream chunks can read them back without rerunning the 1000-rep loop.
+function _one_rep_size(n::Int = 150, β2_null::Float64 = 2.0)
+    x   = rand(Distributions.Chisq(1), n)
+    y   = 1 .+ 2 .* x .+ (rand(Distributions.Chisq(1), n) .- 1)
+    df  = DataFrames.DataFrame(x = x, y = y)
+    m   = FixedEffectModels.reg(df, GLM.@formula(y ~ x))
+    β   = StatsBase.coef(m)
+    V   = StatsBase.vcov(m)
+    i_x = findfirst(==("x"), string.(StatsBase.coefnames(m)))
+    t   = (β[i_x] - β2_null) / sqrt(V[i_x, i_x])
+    dofr = StatsBase.dof_residual(m)
+    return 2 * (1 - Distributions.cdf(Distributions.TDist(dofr), abs(t)))
+end
+
+Random.seed!(10101)
+print("running 1000 reps... ")
+t0 = time()
+pvalues = [_one_rep_size() for _ in 1:1000]
+@printf("done in %.2fs\n", time() - t0)
+
+df_sim = DataFrames.DataFrame(pvalues = pvalues)
+CSV.write("pvalues_12_6_2.csv", df_sim)
+@printf("Saved %d p-values to pvalues_12_6_2.csv\n", DataFrames.nrow(df_sim));
+```
+
+```{julia}
+#=
+* Summarize the p-value from each of the 1000 tests
+use pvalues, clear
+summarize pvalues
+=#
+df_sim = CSV.read("pvalues_12_6_2.csv", DataFrames.DataFrame)
+stata_summarize(df_sim, :pvalues)
+```
+
+```{julia}
+#=
+* Determine size of test at level 0.05
+count if pvalues < .05
+display "Test size from 1000 simulations = " r(N)/1000
+=#
+# Empirical test size at the 5% nominal level: share of the 1000 simulated
+# p-values that fall below 0.05. Under H0 (β_x = 2 is the DGP truth) and a
+# correctly-sized test this should be ≈ 0.05.
+n_rej = count(<(0.05), df_sim.pvalues)
+@printf("Test size from %d simulations = %.4f\n",
+        DataFrames.nrow(df_sim), n_rej / DataFrames.nrow(df_sim))
+```
+
+### 12.6.3 Test power
+
+```{julia}
+#=
+* Program to compute power of test given specified H0 and Ha values of b2
+program power, rclass
+   version 10.1
+   args numsims numobs b2H0 b2Ha nominalsize
+                                        // Setup before iteration loops
+   drop _all
+   set seed 10101
+   postfile sim pvalues using power, replace
+                                        // Simulation loop
+   forvalues i = 1/`numsims' {
+     drop _all
+     quietly set obs `numobs'
+     quietly generate double x = rchi2(1)
+     quietly generate y = 1 + `b2Ha'*x + rchi2(1)-1
+     quietly regress y x
+     quietly test x = `b2H0'
+     scalar p = r(p)
+     post sim (p)
+   }
+   postclose sim
+   use power, clear
+                                         // Determine the size or power
+   quietly count if pvalues < `nominalsize'
+   return scalar power=r(N)/`numsims'
+end
+=#
+# `stata_power` is the Julia analogue of the Stata `program power, rclass`:
+# pass `(numsims, numobs, b2_null, b2_alt, nominal)` and it returns the
+# empirical share of p-values below `nominal` from `numsims` reps of the χ²(1)
+# DGP. When `b2_null == b2_alt` it returns empirical TEST SIZE; otherwise
+# empirical TEST POWER.
+@doc stata_power
+```
+
+```{julia}
+#=
+* Size = power of test of b2H0=2 when b2Ha=2, S=1000, N=150, alpha=0.05
+power 1000 150 2.00 2.00 0.05
+display r(power) " is the test power"
+=#
+# Size = power of test of b2H0=2 when b2Ha=2, S=1000, N=150, alpha=0.05
+stata_power(1000, 150, 2.00, 2.00, 0.05)
+```
+
+```{julia}
+#=
+* Power of test of b2H0=2 when b2Ha=2.2, S=1000, N=150, alpha=0.05
+power 1000 150 2.00 2.20 0.05
+display r(power) " is the test power"
+=#
+power = stata_power(1000, 150, 2.00, 2.20, 0.05)
+@printf("Power of test of b2H0=%.2f when b2Ha=%.2f, S=%d, N=%d, alpha=%.2f is %.4f\n",
+        2.00, 2.20, 1000, 150, 0.05, power)
+```
+
+```{julia}
+#=
+* Power of test of H0:b2=2 against Ha:b2=1.6,1.625, ..., 2.4
+postfile simofsims b2Ha power using musr/simresults, replace
+forvalues i = 0/33 {
+  drop _all
+  scalar b2Ha = 1.6 + 0.025*`i'
+  power 1000 150 2.00 b2Ha 0.05
+  post simofsims (b2Ha) (r(power))
+}
+postclose simofsims
+use musr/simresults, clear
+summarize
+=#
+# Power curve: H0: β_x = 2 against alternatives β_alt ∈ {1.6, 1.625, …, 2.4}
+# (34 values, 1000 reps each; n = 150, α = 0.05). Stata's `postfile … forvalues
+# … post … postclose` is just `(b2Ha, power)` rows; in Julia we collect those
+# into a DataFrame, write to `musr/simresults.csv`, and call `stata_summarize`.
+mkpath("musr")
+b2Ha_grid = collect(1.6:0.025:2.4)
+print("running 34 × 1000 reps... ")
+t0 = time()
+power_grid = [stata_power(1000, 150, 2.00, b, 0.05) for b in b2Ha_grid]
+@printf("done in %.2fs\n", time() - t0)
+
+df_pow = DataFrames.DataFrame(b2Ha = b2Ha_grid, power = power_grid)
+CSV.write("musr/simresults.csv", df_pow)
+stata_summarize(df_pow, [:b2Ha, :power]);
+```
+
+```{julia}
+#=
+* Plot the power curve
+twoway (connected power b2Ha), scale(1.2) plotregion(style(none))
+quietly graph export musr/mus12power.eps, replace
+=#
+# Plot the power curve from `df_pow` (defined in the previous chunk).
+# Stata's `twoway connected` becomes a CairoMakie line+scatter overlay.
+fig_pow = CairoMakie.Figure(size = (700, 450))
+ax_pow  = CairoMakie.Axis(fig_pow[1, 1],
+    xlabel = "b2Ha (alternative)",
+    ylabel = "power",
+    title  = "Power of test of H0: β_x = 2",
+)
+CairoMakie.lines!(ax_pow, df_pow.b2Ha, df_pow.power,
+                  color = :steelblue, linewidth = 2)
+CairoMakie.scatter!(ax_pow, df_pow.b2Ha, df_pow.power,
+                    color = :steelblue, markersize = 7)
+CairoMakie.hlines!(ax_pow, [0.05]; linestyle = :dash, color = :gray,
+                   linewidth = 1.2)
+
+mkpath("musr")
+CairoMakie.save("musr/mus12power.eps", fig_pow)
+fig_pow
+```
+
+### 12.6.4 Asymptotic test power
+
+```{julia}
+#=
+* Power of chi(1) test when noncentrality parameter lambda = 5.67
+display 1-nchi2(1,5.67,3.84)
+=#
+lambda = 5.67
+alpha  = 0.05
+crit   = Distributions.quantile(Distributions.Chisq(1), 1 - alpha)
+power   = 1 - Distributions.cdf(Distributions.NoncentralChisq(1, lambda), crit)
+@printf("Power of chi(1) test when noncentrality parameter lambda = %.2f is %.4f\n", lambda, power)
+```
+
+## 12.7 Specification tests
+
+### 12.7.1 Moment-based tests
+
+### 12.7.2 Information matrix test
+
+### 12.7.3 Chi-squared goodness-of-fit test
+
+### 12.7.4 Overidentifying restrictions test
+
+### 12.7.5 Hausman test
+
+### 12.7.6 Other tests
+
+## 12.8 Stata resources
+
+## 12.9 Exercises

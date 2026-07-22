@@ -24,6 +24,24 @@ Pkg.add(url = "https://github.com/ElvisCasco/StatEcon")
 | `teffects ipw (y) (t x)` | `teffects_ipw(df, :t, [:x]; outcome = :y)` |
 | `kdensity var` | `kdensity(df.var)` |
 
+Beyond the linear-model core above, `StatEcon` now covers the nonlinear and
+panel toolkit used throughout Cameron & Trivedi, *Microeconometrics Using Stata*:
+
+* **Count / GLM** — `stata_poisson`, `stata_glm`, `stata_nbreg`, `stata_gnbreg`, `stata_ztnb`, `stata_zinb`, `stata_fmm_poisson`, `stata_fmm_nbreg`, `stata_poisson_gmm`
+* **Binary / limited dependent** — `stata_probit`, `stata_logit`, `stata_hetprob`, `stata_ivprobit`, `stata_tobit`, `stata_heckman`
+* **Multinomial / discrete choice** — `stata_mlogit`, `stata_mprobit`, `stata_ologit`, `stata_biprobit`, `stata_nlogit`, `stata_asclogit`, `stata_clogit`, `stata_asmprobit`, `stata_mixlogit`
+* **Panel** — `stata_xtreg_*`, `stata_xtivreg`, `stata_hausman_taylor`, `stata_arellano_bond`, `stata_xtdpdsys`, `stata_xtmixed`, `stata_xtlogit_*`, `stata_xtpoisson_*`, `stata_xtnbreg_*`, `stata_xttobit_re`
+* **Testing / post-estimation** — `stata_test`, `stata_lrtest`, `stata_testnl`, `stata_nlcom`, `stata_lincom`, `stata_margins_*`, `stata_mfx`, `stata_estat_*`
+
+Each command lives in its own `src/<command>.jl` file and prints Stata-format output.
+
+## Examples
+
+`examples/Cameron_Trivedi/` reproduces **all 18 chapters** of Cameron & Trivedi,
+*Microeconometrics Using Stata*, as Quarto notebooks (`ch01…ch18`) that call
+`StatEcon` instead of defining estimators inline. Data resolves automatically
+whether the notebook is rendered with Quarto or run interactively.
+
 ## Example
 
 ```julia

@@ -1,0 +1,964 @@
+---
+title: "Cameron & Trivedi -- Ch. 10: Nonlinear regression methods (via StatEcon)"
+Authors:
+- Colin Cameron
+- Pravin Trivedi
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+# Julia setup
+
+```{julia}
+using StatEcon
+const DATA = first(filter(d -> isdir(d) && (isfile(joinpath(d, "auto.dta")) || isdir(joinpath(d, "musr"))), ["../../data", "data", raw"C:/EC/GitHub/StatEcon/data"]))
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+
+_rawval(x) = hasproperty(x, :value) ? x.value : x  # unwrap ReadStatTables.LabeledValue
+```
+
+The canonical count-data / nonlinear estimators used in this chapter
+(`stata_poisson`, `stata_glm`, `stata_gmm_poisson`, `stata_nlcom`,
+`stata_lincom`, `stata_estat_ic`, `stata_mfx`, `stata_margins_dydx`,
+`stata_margins_at`, `stata_robust_se_glm`) now live in `StatEcon`
+(`src/statecon_ch10.jl`) and are called directly below. The chapter-specific
+data-loading helper `setup_mus10` and the small display helper
+`_print_vce_row` are kept inline as pedagogical scaffolding.
+
+```{julia}
+# setup_mus10 — chapter-specific loader kept inline (pedagogical).
+#
+# Loads mus10data (filtered to year02==1) if `df10` is omitted, drops missings
+# on `vars`, fits Poisson via StatEcon.stata_poisson, and returns a NamedTuple
+# with both Stata-display order (β, V, X — slopes first, _cons last) and GLM
+# order (model, V_robust = fit.V_glm). Any chapter chunk can call
+# `s = setup_mus10()` without first running the data-load chunk.
+function setup_mus10(df10=nothing;
+                    vars=nothing, formula=nothing,
+                    vce::Symbol=:robust, quiet::Bool=true)
+    if df10 === nothing
+        df10 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus10data.dta"))
+        for c in DataFrames.names(df10)
+            col = df10[!, c]
+            T   = eltype(col)
+            if T <: Union{Missing, Float64}
+                continue
+            elseif T <: Union{Missing, Float32, Int}
+                df10[!, c] = convert.(Union{Missing, Float64}, col)
+            else
+                df10[!, c] = [ismissing(x) ? missing : Float64(_rawval(x))
+                              for x in col]
+            end
+        end
+        df10 = DataFrames.filter(r -> r.year02 == 1, df10)
+    end
+    cols = vars === nothing ?
+        [:docvis, :private, :chronic, :female, :income, :age] : vars
+    fml  = formula === nothing ?
+        GLM.@formula(docvis ~ private + chronic + female + income) : formula
+    df10c = DataFrames.dropmissing(df10[:, cols])
+    fit = stata_poisson(df10c, fml; vce = vce, quiet = quiet)
+    return (; df = df10c, fit,
+              model = fit.model, V_robust = fit.V_glm,
+              β = fit.β, V = fit.V, X = fit.X,
+              n = fit.n, k = fit.k, coefnames = fit.coefnames,
+              coefnames_glm = fit.coefnames_glm)
+end
+```
+
+# 10 Nonlinear regression methods
+
+## 10.1 Introduction
+
+## 10.2 Nonlinear example: Doctor visits
+
+### 10.2.1 Data description
+
+```{julia}
+#=
+* Read in dataset, select one year of data, and describe key variables
+use musr/mus10data.dta, clear
+keep if year02==1
+describe docvis private chronic female income
+=#
+# Read MEPS doctor visits data and keep year 2002
+df10 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus10data.dta"))
+for c in names(df10)
+    if eltype(df10[!, c]) <: Union{Missing, Float32} || eltype(df10[!, c]) === Float32
+        df10[!, c] = convert.(Union{Missing, Float64}, df10[!, c])
+    end
+end
+df10 = filter(r -> r.year02 == 1, df10)
+DataFrames.describe(df10[:, [:docvis, :private, :chronic, :female, :income]])
+```
+
+```{julia}
+#=
+* Summary of key variables
+summarize docvis private chronic female income
+=#
+# Summary statistics
+stata_summarize(df10[:, [:docvis, :private, :chronic, :female, :income]])
+```
+
+### 10.2.2 Poisson model description
+
+## 10.3 Nonlinear regression methods
+
+### 10.3.1 MLE
+
+### 10.3.2 GLM.jl Poisson
+
+```{julia}
+# poisson docvis private chronic female income, vce(robust)
+m_pois10 = stata_poisson(df10,
+    @formula(docvis ~ private + chronic + female + income);
+    vce = :robust);
+```
+
+```{julia}
+# Robust (HC1) sandwich SE computed manually — StatEcon.stata_robust_se_glm
+# reproduces the manual computation from the book. It is equivalent to what
+# `stata_poisson(...; vce = :robust)` applies internally.
+df10c = DataFrames.dropmissing(df10[:, [:docvis, :private, :chronic, :female, :income]])
+pois10 = GLM.glm(GLM.@formula(docvis ~ private + chronic + female + income),
+                 df10c, Distributions.Poisson(), GLM.LogLink())
+se_rob = stata_robust_se_glm(pois10)
+β = GLM.coef(pois10); cn = GLM.coefnames(pois10)
+println("\n— Poisson with robust SE —")
+for i in eachindex(β)
+    @printf("%-12s coef=%10.6f  rob.se=%10.6f  z=%7.2f\n",
+            cn[i], β[i], se_rob[i], β[i]/se_rob[i])
+end
+```
+
+### 10.3.3 Postestimation commands
+
+### 10.3.4 NLS
+
+### 10.3.5 The Optim.jl NLS approach
+
+### 10.3.6 GLM
+
+### 10.3.7 The glm command
+
+```{julia}
+#=
+* Generalized linear models regression for poisson (command glm)
+glm docvis private chronic female income,  ///
+  family(poisson) link(log) vce(robust) nolog
+=#
+# glm docvis private chronic female income, family(poisson) link(log) vce(robust)
+m_glm10 = stata_glm(df10,
+    @formula(docvis ~ private + chronic + female + income);
+    family = :poisson,
+    link   = :log,
+    vce    = :robust);
+```
+
+```{julia}
+#=
+* Command gmm for GMM estimation (nonlinear IV) for Poisson model
+gmm (docvis - exp({xb:private chronic female income}+{b0})),   ///
+ instruments(firmsize chronic female income) onestep nolog
+=#
+# Nonlinear IV: E[(docvis - exp(x'β + b0)) · z] = 0 with z = (firmsize,
+# chronic, female, income, _cons). Just-identified (5 params = 5 instruments).
+m_gmm10 = stata_gmm_poisson(df10, :docvis,
+    [:private, :chronic, :female, :income],     # regressors in linear index
+    [:firmsize, :chronic, :female, :income];    # instruments
+    mean_fn = :exp,
+    onestep = true);
+```
+
+### 10.3.8 Other estimators
+
+## 10.4 Different estimates of the VCE
+
+### 10.4.1 General framework
+
+### 10.4.2 Standard error options
+
+### 10.4.3 Application
+
+```{julia}
+# Different VCE estimates after Poisson regression
+# (Stata: poisson docvis private chronic female income, vce(...))
+#
+# This whole section (§10.4 — §10.6) shares one fitted Poisson from
+# `setup_mus10` (which returns β / V / X in Stata-display order — slopes
+# first, _cons last — with the n/(n-1) robust correction).
+
+s10            = setup_mus10(df10; quiet = false)   # also prints reg table
+df10c_v, β_v   = s10.df, s10.β
+V_rob, X_v     = s10.V,  s10.X
+n_v,    k_v    = s10.n,  s10.k
+y_v            = Float64.(df10c_v.docvis)
+μ_v             = exp.(X_v * β_v)
+u_v             = y_v .- μ_v
+
+# OIM: V = (X' diag(μ) X)⁻¹
+V_oim = LinearAlgebra.inv(X_v' * LinearAlgebra.Diagonal(μ_v) * X_v)
+# OPG: V = (X' diag(u²) X)⁻¹  (outer-product of gradients)
+M_opg = X_v' * LinearAlgebra.Diagonal(u_v.^2) * X_v
+V_opg = LinearAlgebra.inv(M_opg)
+# Cluster on age (Stata small-sample correction (G/(G-1)) · ((n-1)/(n-k)))
+ages_v = Float64.(df10c_v.age)
+S_clu  = zeros(k_v, k_v)
+for g in unique(ages_v)
+    idx = findall(ages_v .== g)
+    s_g = X_v[idx, :]' * u_v[idx]
+    S_clu .+= s_g * s_g'
+end
+G_v      = length(unique(ages_v))
+dof_corr = (G_v / (G_v - 1)) * ((n_v - 1) / (n_v - k_v))
+V_clu    = V_oim * S_clu * V_oim * dof_corr
+# Bootstrap, reps = 400 (Julia's RNG differs from Stata, so this column will
+# not match Stata's vce(boot) numbers exactly even with the same seed).
+Random.seed!(10101)
+B_v = 400
+βb  = zeros(B_v, k_v)
+for b in 1:B_v
+    idx  = StatsBase.sample(1:n_v, n_v; replace = true)
+    sub  = df10c_v[idx, :]
+    m_b  = GLM.glm(GLM.@formula(docvis ~ private + chronic + female + income),
+                   sub, Distributions.Poisson(), GLM.LogLink())
+    βb[b, :] = vcat(GLM.coef(m_b)[2:end], GLM.coef(m_b)[1])
+end
+V_boot = StatsBase.cov(βb)
+
+ses = (
+    VCE_oim  = sqrt.(LinearAlgebra.diag(V_oim)),
+    VCE_opg  = sqrt.(LinearAlgebra.diag(V_opg)),
+    VCE_rob  = sqrt.(LinearAlgebra.diag(V_rob)),
+    VCE_clu  = sqrt.(LinearAlgebra.diag(V_clu)),
+    VCE_boot = sqrt.(LinearAlgebra.diag(V_boot)),
+)
+
+varnames_v = ["private", "chronic", "female", "income", "_cons"]
+colhead_v  = ["VCE_oim", "VCE_opg", "VCE_rob", "VCE_clu", "VCE_boot"]
+
+# _print_vce_row — small display helper kept inline (pedagogical).
+function _print_vce_row(label, vals)
+    Printf.@printf("%12s |", label)
+    for (j, v) in enumerate(vals)
+        j == 1 ? Printf.@printf(" %8.4f", v) : Printf.@printf("%11.4f", v)
+    end
+    println("  ")
+end
+
+println("-"^69)
+println("    Variable | VCE_oim    VCE_opg    VCE_rob    VCE_clu    VCE_boot  ")
+println("-"^13, "+", "-"^55)
+for (i, v) in enumerate(varnames_v)
+    _print_vce_row(v, fill(β_v[i], length(colhead_v)))
+    _print_vce_row("", [ses[Symbol(c)][i] for c in colhead_v])
+end
+println("-"^69)
+```
+
+### 10.4.4 Default estimate of the VCE
+
+### 10.4.5 Robust estimate of the VCE
+
+### 10.4.6 Cluster-robust estimate of the VCE
+
+### 10.4.7 HAC estimate of the VCE
+
+### 10.4.8 Bootstrap standard errors
+
+### 10.4.9 Statistical inference
+
+## 10.5 Prediction
+
+### 10.5.1 The predict equivalents
+
+### 10.5.2 Application
+
+```{julia}
+# Predicted mean number of doctor visits using predict and predictnl
+# (Stata: poisson ..., vce(robust); predict muhat if e(sample), n;
+#  predictnl muhat2 = exp(_b[private]·private + ... + _b[_cons]),
+#  se(semuhat2); summarize docvis muhat muhat2 semuhat2)
+
+s = setup_mus10(df10)        # self-contained: refits via the setup helper
+muhat    = exp.(s.X * s.β)               # = predict, n
+muhat2   = copy(muhat)                    # predictnl: exp(linear index)
+# Delta-method SE: ∂μ/∂β = μ·x, so SE(μ̂) = μ · sqrt(x' V x)
+semuhat2 = [μ * sqrt(x' * s.V * x) for (μ, x) in zip(muhat2, eachrow(s.X))]
+
+stata_summarize(DataFrames.DataFrame(
+    docvis   = s.df.docvis,
+    muhat    = muhat,
+    muhat2   = muhat2,
+    semuhat2 = semuhat2))
+```
+
+### 10.5.3 Out-of-sample prediction
+
+```{julia}
+# (Stata: predict resid, score; gen resid2 = docvis - muhat; summarize ...)
+#
+# For Poisson with log link, the score residual ∂lnL_i/∂(x_iβ) is exactly
+# y_i − μ_i, identical to docvis − muhat. Both means are mathematically zero —
+# Σ(y − μ) = 0 is the Poisson MLE first-order condition for the constant.
+
+s = setup_mus10(df10)
+muhat  = exp.(s.X * s.β)
+y_     = Float64.(s.df.docvis)
+resid  = y_ .- muhat
+resid2 = y_ .- muhat
+
+stata_summarize(DataFrames.DataFrame(resid = resid, resid2 = resid2))
+```
+
+### 10.5.4 Out-of-sample prediction with year01 data
+
+```{julia}
+# Out-of-sample prediction for year01 data using year02 estimates
+# (Stata: poisson ... if year02==1, vce(robust); keep if year01==1;
+#  predict muhatyear01, n; summarize docvis muhatyear01)
+
+s = setup_mus10(df10)        # year02 fit (df10 is already filtered to year02)
+
+# Reload mus10data and subset to year01 to apply year02 coefficients OOS
+df10_full = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus10data.dta"))
+for c in names(df10_full)
+    if eltype(df10_full[!, c]) <: Union{Missing, Float32} || eltype(df10_full[!, c]) === Float32
+        df10_full[!, c] = convert.(Union{Missing, Float64}, df10_full[!, c])
+    end
+end
+df01  = filter(r -> r.year01 == 1, df10_full)
+df01c = DataFrames.dropmissing(df01[:, [:docvis, :private, :chronic, :female, :income]])
+X01   = hcat(Float64.(df01c.private),
+             Float64.(df01c.chronic),
+             Float64.(df01c.female),
+             Float64.(df01c.income),
+             ones(DataFrames.nrow(df01c)))
+muhatyear01 = exp.(X01 * s.β)
+
+stata_summarize(DataFrames.DataFrame(
+    docvis      = df01c.docvis,
+    muhatyear01 = muhatyear01))
+```
+
+### 10.5.5 Prediction at specified regressor values
+
+```{julia}
+# Counterfactual prediction: set private = 1 for everyone in year02 sample
+# (Stata: keep if year02==1; quietly poisson ..., vce(robust);
+#  preserve; replace private = 1; predict muhatpeq1, n;
+#  summarize muhatpeq1; restore)
+
+s = setup_mus10(df10)
+X_pe1 = hcat(ones(s.n),                         # private = 1 for all
+             Float64.(s.df.chronic),
+             Float64.(s.df.female),
+             Float64.(s.df.income),
+             ones(s.n))                         # _cons
+muhatpeq1 = exp.(X_pe1 * s.β)
+
+stata_summarize(DataFrames.DataFrame(muhatpeq1 = muhatpeq1))
+```
+
+```{julia}
+# Prediction at a specified value of all the regressors via delta method
+# (Stata: nlcom exp(_b[_cons] + _b[private]·1 + _b[chronic]·0
+#                   + _b[female]·1 + _b[income]·10))
+#
+# β order is [private, chronic, female, income, _cons], so the regressor
+# vector at the chosen point is (1, 0, 1, 10, 1).
+
+s = setup_mus10(df10)
+stata_nlcom(b -> exp(b[1]*1 + b[2]*0 + b[3]*1 + b[4]*10 + b[5]),
+            s.β, s.V; depvar = "docvis")
+```
+
+```{julia}
+# Linear-combination prediction at a specified value of all regressors,
+# reported on the exp scale (Stata: lincom _cons + private·1 + chronic·0
+#                                    + female·1 + income·10, eform)
+#
+# Compared with `nlcom exp(...)`: lincom builds the SE on the *linear*
+# combination L = w'β and reports z = L/SE(L); with `eform` the point
+# estimate is exp(L), the SE is exp(L)·SE(L), and the CI is the *asymmetric*
+# exp(L ± z·SE(L)).
+
+s = setup_mus10(df10)
+stata_lincom([1.0, 0.0, 1.0, 10.0, 1.0], s.β, s.V;
+             eform = true, depvar = "docvis")
+```
+
+### 10.5.6 Prediction of other quantities
+
+```{julia}
+#=
+* Sample average of predicted number of events
+poisson docvis private chronic female income, vce(robust)
+margins
+=#
+# (Stata: poisson docvis private chronic female income, vce(robust); margins)
+s = setup_mus10(df10; quiet = false)
+stata_margins_at(s.β, s.V, s.X)
+```
+
+```{julia}
+#=
+* Sample average prediction at a particular value of one of the regressors
+margins, at(private=1)
+=#
+# Sample average prediction with private = 1 for everyone
+s = setup_mus10(df10)
+X_pe1 = hcat(ones(s.n), Float64.(s.df.chronic), Float64.(s.df.female),
+             Float64.(s.df.income), ones(s.n))
+stata_margins_at(s.β, s.V, X_pe1)
+```
+
+```{julia}
+#=
+* Prediction at a specified value of all regressors
+margins, at(private=1 chronic=0 female=1 income=10)
+=#
+# Adjusted prediction at a specified point of all regressors
+s = setup_mus10(df10)
+stata_margins_at(s.β, s.V, s.X;
+              at        = [1.0, 0.0, 1.0, 10.0, 1.0],
+              at_labels = [:private => 1, :chronic => 0,
+                           :female  => 1, :income  => 10])
+```
+
+```{julia}
+#=
+* Sample average prediction at different values of indicator variable private
+poisson docvis i.private chronic female income, vce(robust)
+margins private
+=#
+# Sample average prediction at each level of indicator variable private
+s = setup_mus10(df10)
+stata_margins_at(s.β, s.V, s.X; over = "private" => 1)
+```
+
+## 10.6 Marginal effects
+
+### 10.6.1 Calculus and finite-difference methods
+
+### 10.6.2 ME estimates: AME, MEM, MER
+
+### 10.6.3 Elasticities and semielasticities
+
+### 10.6.4 Simple interpretations
+
+### 10.6.5 Manual marginal-effects helpers
+
+### 10.6.6 MEM: Marginal effect at mean
+
+```{julia}
+#=
+* Marginal effects at mean (MEM) using margins command and finite differences
+quietly poisson docvis i.private i.chronic i.female income, vce(robust)
+margins, dydx(*) atmean
+=#
+# Marginal effects at the mean (MEM)
+s = setup_mus10(df10; quiet = false)        # also prints regression table
+stata_margins_dydx(s.β, s.V, s.X;
+    atmean     = true,
+    factors    = [("private", 1), ("chronic", 2), ("female", 3)],
+    continuous = [("income", 4)])
+```
+
+#### Comparison of calculus and finite-difference methods
+
+```{julia}
+#=
+* Marginal effects at mean (MEM) using margins command and only calculus method
+poisson docvis private chronic female income, vce(robust)
+margins, dydx(*) atmean
+=#
+# Calculus-method MEM (no `i.` factor prefixes — every regressor is treated
+# as continuous, so dy/dx_j = β_j · μ(x̄) for every j).
+s = setup_mus10(df10; quiet = false)
+stata_margins_dydx(s.β, s.V, s.X;
+    atmean     = true,
+    factors    = [],
+    continuous = [("private", 1), ("chronic", 2),
+                  ("female",  3), ("income",  4)])
+```
+
+### 10.6.7 MER: Marginal effect at representative value
+
+```{julia}
+#=
+* Marginal effects at representative value (MER) using margins command
+poisson docvis i.private i.chronic i.female income, vce(robust)
+margins, dydx(*) at(private=1 chronic=0 female=1 income=10) noatlegend
+=#
+# MER — marginal effect at a representative point
+s = setup_mus10(df10; quiet = false)
+stata_margins_dydx(s.β, s.V, s.X;
+    factors    = [("private", 1), ("chronic", 2), ("female", 3)],
+    continuous = [("income", 4)],
+    at         = [1.0, 0.0, 1.0, 10.0, 1.0],
+    noatlegend = true)
+```
+
+### 10.6.8 AME: Average marginal effect
+
+```{julia}
+#=
+* Average marginal effects (AME) using margins command and finite differences
+quietly poisson docvis i.private i.chronic i.female income, vce(robust)
+margins, dydx(*)
+=#
+# AME — average marginal effects across the sample
+s = setup_mus10(df10; quiet = false)
+stata_margins_dydx(s.β, s.V, s.X;
+    factors    = [("private", 1), ("chronic", 2), ("female", 3)],
+    continuous = [("income", 4)])
+```
+
+```{julia}
+# Usual ME for a single continuous regressor evaluated at sample means
+# (Stata: quietly poisson ..., vce(robust);
+#  margins, dydx(income) atmean noatlegend)
+s = setup_mus10(df10)
+stata_margins_dydx(s.β, s.V, s.X;
+    atmean     = true,
+    factors    = [],
+    continuous = [("income", 4)],
+    noatlegend = true)
+```
+
+### 10.6.9 Elasticities and semielasticities
+
+```{julia}
+#=
+* Elasticity evaluated at mean of regressors
+margins, eyex(income) atmean noatlegend
+=#
+# Elasticity of E[y] w.r.t. income at the sample-mean point
+# For Poisson with log link: ε = β_income · x̄_income (independent of μ).
+s = setup_mus10(df10)
+stata_margins_dydx(s.β, s.V, s.X;
+    kind       = :eyex,
+    atmean     = true,
+    factors    = [],
+    continuous = [("income", 4)],
+    noatlegend = true)
+```
+
+```{julia}
+#=
+* Semielasticity evaluated at mean of regressors
+margins, eydx(income) atmean noatlegend
+=#
+s = setup_mus10(df10)
+stata_margins_dydx(s.β, s.V, s.X;
+    kind       = :eydx,
+    atmean     = true,
+    factors    = [],
+    continuous = [("income", 4)],
+    noatlegend = true)
+```
+
+```{julia}
+#=
+* Other semielasticity evaluated at mean of regressors
+margins, dyex(income) atmean noatlegend
+=#
+s = setup_mus10(df10)
+stata_margins_dydx(s.β, s.V, s.X;
+    kind       = :dyex,
+    atmean     = true,
+    factors    = [],
+    continuous = [("income", 4)],
+    noatlegend = true)
+```
+
+```{julia}
+#=
+mfx, dydx varlist(income)
+=#
+# Stata's legacy mfx output (older/textbook form of margins, dydx atmean)
+s = setup_mus10(df10)
+stata_mfx(s.β, s.V, s.X;
+    factors    = [],
+    continuous = [("income", 4)])
+```
+
+```{julia}
+#=
+mfx, eyex varlist(income)
+=#
+# Stata's legacy mfx with elasticity option
+s = setup_mus10(df10)
+stata_mfx(s.β, s.V, s.X;
+    kind       = :eyex,
+    factors    = [],
+    continuous = [("income", 4)])
+```
+
+```{julia}
+#=
+mfx, eydx varlist(income)
+=#
+# Stata's legacy mfx with semi-elasticity option: ∂lnE[y]/∂x = β_j
+s = setup_mus10(df10)
+stata_mfx(s.β, s.V, s.X;
+    kind       = :eydx,
+    factors    = [],
+    continuous = [("income", 4)])
+```
+
+```{julia}
+#=
+mfx, dyex varlist( income)
+=#
+# Stata's legacy mfx with dy/ex: β_j · μ · x_j (depends on both μ and x)
+s = setup_mus10(df10)
+stata_mfx(s.β, s.V, s.X;
+    kind       = :dyex,
+    factors    = [],
+    continuous = [("income", 4)])
+```
+
+### 10.6.10 AME computed manually
+
+```{julia}
+#=
+* AME computed manually for a single regressor
+quietly poisson docvis private chronic female income, vce(robust)
+preserve
+predict mu0, n
+quietly replace income = income + 0.01
+predict mu1, n
+generate memanual = (mu1-mu0)/0.01
+summarize memanual
+restore
+=#
+# AME for income via finite differences: memanual_i = (μ̂(inc+0.01) − μ̂(inc))/0.01
+s = setup_mus10(df10)
+μ0 = exp.(s.X * s.β)                          # predict, n  (income at original)
+X1 = copy(s.X); X1[:, 4] .+= 0.01             # bump income by 0.01
+μ1 = exp.(X1 * s.β)                           # predict, n  (after bump)
+memanual = (μ1 .- μ0) ./ 0.01
+
+stata_summarize(DataFrames.DataFrame(memanual = memanual))
+```
+
+```{julia}
+#=
+* AME computed manually for all regressors
+global xlist private chronic female income
+preserve
+predict mu0, n
+foreach var of varlist $xlist {
+  quietly summarize `var'
+  generate delta = r(sd)/1000
+  ...
+ }
+summarize me_*
+restore
+=#
+# AME computed manually for ALL regressors using per-variable step sd(v)/1000.
+# These are the *calculus*-method per-obs MEs (≈ β_v · μ_i for log link).
+s = setup_mus10(df10)
+μ0 = exp.(s.X * s.β)
+df_me = DataFrames.DataFrame()
+for (nm, idx) in [("private", 1), ("chronic", 2),
+                  ("female",  3), ("income",  4)]
+    delta = Statistics.std(s.X[:, idx]) / 1000
+    X1    = copy(s.X); X1[:, idx] .+= delta
+    μ1    = exp.(X1 * s.β)
+    df_me[!, "me_$nm"] = (μ1 .- μ0) ./ delta
+end
+
+stata_summarize(df_me)
+```
+
+### 10.6.11 Polynomial regressors
+
+```{julia}
+# AME for a polynomial regressor via the chain rule
+# (Stata: gen inc2 = income^2; gen inc3 = income^3;
+#  poisson docvis private chronic female income inc2 inc3, vce(robust);
+#  predict muhat,n; gen me_income = muhat*(β_inc + 2·β_inc2·income + 3·β_inc3·inc2))
+#
+# For Poisson with log link: ∂μ/∂income = μ · (β_income + 2·β_inc2·income + 3·β_inc3·income²)
+
+dfp = DataFrames.dropmissing(df10[:,
+    [:docvis, :private, :chronic, :female, :income]])
+dfp.inc2 = dfp.income .^ 2
+dfp.inc3 = dfp.income .^ 3
+
+fit_poly = stata_poisson(dfp,
+    GLM.@formula(docvis ~ private + chronic + female + income + inc2 + inc3);
+    vce = :robust);
+
+# β order: [private, chronic, female, income, inc2, inc3, _cons]
+β_v   = fit_poly.β
+X_v   = fit_poly.X
+μ_hat = exp.(X_v * β_v)
+inc   = X_v[:, 4]
+
+me_income = μ_hat .* (β_v[4] .+ 2 .* β_v[5] .* inc .+ 3 .* β_v[6] .* inc.^2)
+
+stata_summarize(DataFrames.DataFrame(me_income = me_income))
+```
+
+### 10.6.12 Interacted regressors
+
+### 10.6.13 Complex interactions and nonlinearities
+
+```{julia}
+#=
+* AME for a polynomial regressor: computation using factor variables
+quietly poisson docvis private chronic female c.income c.income#c.income c.income#c.income#c.income, vce(robust)
+margins, dydx(income)
+=#
+# AME of `income` from the cubic-in-income Poisson model, with delta-method SE.
+# Same point estimate as §10.6.11 but the SE accounts for `income` entering
+# the linear index in three terms.
+
+dfp = DataFrames.dropmissing(df10[:,
+    [:docvis, :private, :chronic, :female, :income]])
+dfp.inc2 = dfp.income .^ 2
+dfp.inc3 = dfp.income .^ 3
+
+fit_poly = stata_poisson(dfp,
+    GLM.@formula(docvis ~ private + chronic + female + income + inc2 + inc3);
+    vce = :robust, quiet = true)
+β = fit_poly.β; V = fit_poly.V; X = fit_poly.X; n_p = fit_poly.n; k_p = fit_poly.k
+inc       = X[:, 4]
+μ         = exp.(X * β)
+poly_term = β[4] .+ 2 .* β[5] .* inc .+ 3 .* β[6] .* inc.^2
+me_i      = μ .* poly_term
+ame       = Statistics.mean(me_i)
+
+# Delta-method gradient
+g     = vec((μ .* poly_term)' * X) ./ n_p
+g[4] += sum(μ)               / n_p
+g[5] += sum(μ .* 2 .* inc)   / n_p
+g[6] += sum(μ .* 3 .* inc.^2) / n_p
+se    = sqrt(g' * V * g)
+z     = ame / se
+p     = 2 * (1 - Distributions.cdf(Distributions.Normal(), abs(z)))
+crit  = Distributions.quantile(Distributions.Normal(), 0.975)
+lo, hi = ame - crit*se, ame + crit*se
+
+g9 = function(x; w_::Int=10, sig::Int=7)
+    sig_use = sig
+    s = Printf.@sprintf("%.*g", sig_use, x)
+    cap = (0 < abs(x) < 1 && x < 0) ? 10 : 9
+    while length(s) > cap && sig_use > 1
+        sig_use -= 1
+        s = Printf.@sprintf("%.*g", sig_use, x)
+    end
+    0 < abs(x) < 1 && (s = replace(s, r"^(-?)0\." => s"\1."))
+    lpad(s, w_)
+end
+
+println()
+Printf.@printf("Average marginal effects                                 Number of obs = %s\n",
+               replace(string(n_p), r"(\d)(?=(\d{3})+$)" => s"\1,"))
+println("Model VCE: Robust\n")
+println("Expression: Predicted number of events, predict()")
+println("dy/dx wrt:  income\n")
+println("-"^78)
+println("             |            Delta-method")
+println("             |      dy/dx   std. err.      z    P>|z|     [95% conf. interval]")
+println("-"^13, "+", "-"^64)
+Printf.@printf("%12s | %s  %s  %s   %s    %s  %s\n",
+               "income", g9(ame; w_=10), g9(se; w_=9),
+               Printf.@sprintf("%7.2f", z),
+               Printf.@sprintf("%.3f", p),
+               g9(lo; w_=9), g9(hi; w_=10))
+println("-"^78)
+```
+
+```{julia}
+#=
+* Specify model with interacted regressors using factor variables
+poisson docvis private chronic i.female c.income i.female#c.income, vce(robust) nolog
+=#
+# Poisson with interaction female × income — uses `stata_poisson`'s `layout`
+# keyword to reproduce Stata's multi-line interaction header.
+
+df_intr = DataFrames.dropmissing(df10[:,
+    [:docvis, :private, :chronic, :female, :income]])
+
+stata_poisson(df_intr,
+    GLM.@formula(docvis ~ private + chronic + female + income + female & income);
+    vce = :robust,
+    layout = [
+        "private"  => "private",
+        "chronic"  => "chronic",
+        "1.female" => "female",
+        "income"   => "income",
+        :blank,
+        ["      female#", "    c.income ", "1"] => "female & income",
+        :blank,
+        "_cons"    => "(Intercept)",
+    ]);
+```
+
+```{julia}
+#=
+* AME with interacted regressors given model specified using factor variables
+margins, dydx(female income)
+=#
+# AME for the interaction model — `stata_margins_dydx` takes an `interactions`
+# keyword telling it which X column is the product of which base columns, so
+# switching female 0↔1 also rebuilds the `female × income` column and
+# ∂μ/∂income picks up the β_intr · female contribution.
+
+df_intr = DataFrames.dropmissing(df10[:,
+    [:docvis, :private, :chronic, :female, :income]])
+fit_intr = stata_poisson(df_intr,
+    GLM.@formula(docvis ~ private + chronic + female + income + female & income);
+    vce = :robust, quiet = true)
+
+stata_margins_dydx(fit_intr.β, fit_intr.V, fit_intr.X;
+    factors      = [("female", 3)],
+    continuous   = [("income", 4)],
+    interactions = [(col = 5, base = [3, 4])])  # col 5 = female × income
+```
+
+```{julia}
+#=
+* AME computed manually for a complex model
+preserve
+predict mu0, n
+quietly summarize income
+generate delta = r(sd)/100
+quietly replace income = income + delta
+predict mu1, n
+generate me_inc = (mu1 - mu0)/delta
+summarize me_inc
+restore
+=#
+# AME for income computed manually for the interaction model: bumping `income`
+# also has to rebuild the `female × income` column.
+
+df_intr = DataFrames.dropmissing(df10[:,
+    [:docvis, :private, :chronic, :female, :income]])
+fit_intr = stata_poisson(df_intr,
+    GLM.@formula(docvis ~ private + chronic + female + income + female & income);
+    vce = :robust, quiet = true)
+β_v = fit_intr.β; X_v = fit_intr.X    # cols: 1=priv 2=chr 3=fem 4=inc 5=fem×inc 6=_cons
+
+μ0    = exp.(X_v * β_v)
+delta = Statistics.std(X_v[:, 4]) / 100
+X1    = copy(X_v)
+X1[:, 4] .+= delta                    # bump income
+X1[:, 5]  .= X1[:, 3] .* X1[:, 4]     # rebuild female × income
+μ1    = exp.(X1 * β_v)
+me_inc = (μ1 .- μ0) ./ delta
+
+stata_summarize(DataFrames.DataFrame(me_inc = me_inc))
+```
+
+## 10.7 Model diagnostics
+
+### 10.7.1 Goodness-of-fit measures
+
+```{julia}
+#=
+* Compute pseudo-R-squared after Poisson regression
+quietly poisson docvis private chronic female income, vce(robust)
+display "Pseudo-R^2 = " 1 - e(ll)/e(ll_0)
+=#
+# Pseudo-R² = 1 − ℓ(β̂) / ℓ_0  (McFadden's). `stata_poisson` returns it as
+# `.pseudo_r2`.
+s = setup_mus10(df10)
+Printf.@printf("Pseudo-R^2 = %.7f\n", s.fit.pseudo_r2)
+```
+
+### 10.7.2 Information criteria for model comparison
+
+```{julia}
+#=
+* Report information criteria
+estat ic
+=#
+# AIC / BIC after Poisson regression  (Stata: estat ic)
+s = setup_mus10(df10)
+stata_estat_ic(s.fit);
+```
+
+### 10.7.3 Residuals
+
+```{julia}
+#=
+* Various residuals after command glm
+quietly glm docvis private chronic female income, family(poisson)
+predict mu, mu
+generate uraw = docvis - mu
+predict upearson, pearson
+predict udeviance, deviance
+predict uanscombe, anscombe
+summarize uraw upearson udeviance uanscombe
+=#
+# Four residual flavors after Poisson GLM:
+#   raw      : u_i = y_i − μ̂_i
+#   Pearson  : (y_i − μ̂_i) / √μ̂_i
+#   Deviance : sign(y_i − μ̂_i) · √(2{y_i·log(y_i/μ̂_i) − (y_i − μ̂_i)})
+#   Anscombe : (3/2) · (y_i^(2/3) − μ̂_i^(2/3)) / μ̂_i^(1/6)
+
+s = setup_mus10(df10)
+y = Float64.(s.df.docvis)
+μ = exp.(s.X * s.β)
+
+uraw     = y .- μ
+upearson = (y .- μ) ./ sqrt.(μ)
+udev     = [sign(y[i] - μ[i]) *
+            sqrt(2 * (y[i] > 0 ? y[i]*log(y[i]/μ[i]) - (y[i] - μ[i])
+                                : -(y[i] - μ[i])))
+            for i in eachindex(y)]
+uans     = (3/2) .* (y.^(2/3) .- μ.^(2/3)) ./ μ.^(1/6)
+
+stata_summarize(DataFrames.DataFrame(
+    uraw      = uraw,
+    upearson  = upearson,
+    udeviance = udev,
+    uanscombe = uans))
+```
+
+### 10.7.4 Model-specification tests
+
+```{julia}
+#=
+// Following not presented in book
+correlate uraw upearson udeviance uanscombe
+=#
+# Pairwise correlations of the four residual flavors from the previous chunk
+dfres = DataFrames.DataFrame(
+    uraw      = uraw,
+    upearson  = upearson,
+    udeviance = udev,
+    uanscombe = uans)
+stata_correlate(dfres, [:uraw, :upearson, :udeviance, :uanscombe])
+```
+
+## 10.8 Stata resources
+
+## 10.9 Exercises

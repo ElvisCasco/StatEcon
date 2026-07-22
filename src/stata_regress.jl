@@ -101,6 +101,30 @@ function stata_regress(df, formula; vce = :ols, cluster = nothing, kwargs...)
     return m
 end
 
+# Positional Stata-style call `stata_regress(df, y, [xs]; ...)`. Supports
+# `weights = :w`, `vcov = Vcov.robust()/Vcov.cluster(:id)`, and the display
+# kwargs from `stata_regress(m; ...)` (`yname`, `xnames`, `title`, ...).
+#
+#   fgls = stata_regress(df5, :y, [:x2, :x3]; weights = :w_fgls,
+#                        vcov = FixedEffectModels.Vcov.robust())
+#
+# Kept alongside the keyword-args `stata_regress(df; y, x, ...)` method above
+# because ch05's `regress_stata(df, y, xs; ...)` pattern is more concise for
+# WLS/FGLS calls that supply weights and a vcov together.
+function stata_regress(df::DataFrames.AbstractDataFrame, y::Union{Symbol,AbstractString}, xs;
+                       vcov = nothing, weights = nothing, kwargs...)
+    ys  = Symbol(y)
+    xsv = xs isa Union{Symbol,AbstractString} ? [Symbol(xs)] :
+          [Symbol(v) for v in xs]
+    f  = StatsModels.term(ys) ~ sum(StatsModels.term.(xsv))
+    kw = weights === nothing ? (;) : (; weights = Symbol(weights))
+    m  = vcov === nothing ?
+         FixedEffectModels.reg(df, f; kw...) :
+         FixedEffectModels.reg(df, f, vcov; kw...)
+    stata_regress(m; kwargs...)
+    return m
+end
+
 # One regressor -> a term. `:train` is a plain variable; a tuple `(:train, :educ_dm)`
 # is Stata's interaction c.train#c.educ_dm.
 _sr_term(v::Symbol)          = StatsModels.Term(v)

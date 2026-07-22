@@ -1,0 +1,893 @@
+---
+title: "Cameron & Trivedi — Ch. 4: Simulation (via StatEcon)"
+Authors:
+- Colin Cameron
+- Pravin Trivedi
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+Translation of *Microeconometrics Using Stata* Chapter 4, routed through
+[`StatEcon`](https://github.com/ElvisCasco/StatEcon). Chapter 4 is a
+simulation chapter — the workhorses are `Random`, `Distributions` and
+`CairoMakie`; StatEcon is loaded for consistency across the series but
+no `stata_*` helper is required for the body of this chapter.
+
+[Microeconometrics with R](https://ycroissant.github.io/micsr_book/)
+· [UCLA Stata modules](https://stats.oarc.ucla.edu/stata/modules/)
+· [Github](https://github.com/thousandoaks?tab=repositories)
+
+# Julia setup
+
+```{julia}
+using StatEcon
+using DataFrames
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels
+using KernelDensity
+using CairoMakie
+CairoMakie.activate!(type = "png")
+import Distributions
+using Distributions: Normal, Chisq, TDist, FDist, Gamma, Poisson, Binomial,
+                     MvNormal, cdf, pdf, quantile
+```
+
+# 4 Simulation
+
+## 4.1 Introduction
+
+## 4.2 Pseudorandom-number generators: Introduction
+
+### 4.2.1 Uniform random-number generation
+
+```{julia}
+#=
+set more off
+version 11
+clear all
+set memory 10m
+set scheme s1mono  /* Graphics scheme */
+=#
+# Setup
+Random.seed!(10101)
+```
+
+```{julia}
+#=
+* Single draw of a uniform number 
+set seed 10101
+scalar u = runiform()
+display u
+=#
+# Single draw of a uniform number
+Random.seed!(10101)
+u = rand()
+println("u = ", u)
+```
+
+```{julia}
+#=
+* 1000 draws of uniform numbers
+quietly set obs 1000
+set seed 10101
+generate x = runiform()
+list x in 1/5, clean
+summarize x
+=#
+# 1000 draws of uniform numbers
+Random.seed!(10101)
+x = rand(1000)
+println("First 5: ", x[1:5])
+@printf("mean = %.4f, sd = %.4f, min = %.4f, max = %.4f\n",
+        mean(x), std(x), minimum(x), maximum(x))
+```
+
+```{julia}
+#=
+* Output not included in book
+histogram x, start(0) width(0.1)
+=#
+# Histogram
+fig4 = Figure(size = (600, 400))
+ax = Axis(fig4[1, 1], xlabel = "x", ylabel = "frequency")
+hist!(ax, x, bins = 0:0.1:1)
+fig4
+```
+
+```{julia}
+#=
+* First three autocorrelations for the uniform draws
+generate t = _n
+tsset t
+pwcorr x L.x L2.x L3.x, star(0.05) 
+=#
+# First three autocorrelations of the uniform draws
+function autocor_lag(v, k)
+    n = length(v); m = mean(v)
+    sum((v[1:n-k] .- m) .* (v[k+1:n] .- m)) / sum((v .- m).^2)
+end
+for k in 1:3
+    @printf("Autocorrelation lag %d = %.4f\n", k, autocor_lag(x, k))
+end
+```
+
+```{julia}
+#=
+* Output not included in book
+ac x      // Autocorrelations with 95% confidence band
+=#
+# Autocorrelations with 95% confidence band (approximate ±1.96/√n)
+fig_ac = Figure(size = (700, 350))
+ax = Axis(fig_ac[1, 1], xlabel = "lag", ylabel = "ACF",
+          title = "Autocorrelations of x")
+lags = 1:20
+acs  = [autocor_lag(x, k) for k in lags]
+band = 1.96 / sqrt(length(x))
+hlines!(ax, [band, -band], color = :red, linestyle = :dash)
+stem!(ax, collect(lags), acs)
+fig_ac
+```
+
+### 4.2.2 Draws from normal
+
+```{julia}
+#=
+* normal and uniform
+clear
+quietly set obs 1000
+set seed 10101                           // set the seed
+generate uniform = runiform()            // uniform(0,1)
+generate stnormal = rnormal()            // N(0,1)
+generate norm5and2 = rnormal(5,2)    
+tabstat uniform stnormal norm5and2, stat(mean sd skew kurt min max) col(stat)
+=#
+# Uniform, standard normal, and N(5, 2²)
+Random.seed!(10101)
+N = 1000
+uniform   = rand(N)
+stnormal  = randn(N)
+norm5and2 = 5 .+ 2 .* randn(N)
+
+for (n, v) in [("uniform", uniform), ("stnormal", stnormal), ("norm5and2", norm5and2)]
+    @printf("%-10s mean=%8.4f sd=%7.4f skew=%7.4f kurt=%7.4f min=%7.3f max=%7.3f\n",
+            n, mean(v), std(v), skewness(v), kurtosis(v) + 3,
+            minimum(v), maximum(v))
+end
+```
+
+### 4.2.3 Draws from t, chi-squared, F, gamma, and beta
+
+```{julia}
+#=
+* t, chi-squared, and F with constant degrees of freedom
+clear
+quietly set obs 2000
+set seed 10101
+generate xt = rt(10)               // result xt ~ t(10)
+generate xc = rchi2(10)            // result xc ~ chisquared(10) 
+generate xfn = rchi2(10)/10        // result numerator of F(10,5)
+generate xfd = rchi2(5)/5          // result denominator of F(10,5)
+generate xf = xfn/xfd              // result xf ~ F(10,5) 
+summarize xt xc xf
+=#
+Random.seed!(10101)
+N = 2000
+xt  = rand(TDist(10), N)
+xc  = rand(Chisq(10), N)
+xfn = rand(Chisq(10), N) ./ 10
+xfd = rand(Chisq(5),  N) ./ 5
+xf  = xfn ./ xfd
+@printf("xt: mean=%8.4f sd=%7.4f\n", mean(xt), std(xt))
+@printf("xc: mean=%8.4f sd=%7.4f\n", mean(xc), std(xc))
+@printf("xf: mean=%8.4f sd=%7.4f\n", mean(xf), std(xf))
+```
+
+### 4.2.4 Draws from binomial, Poisson, and negative binomial
+
+#### Independent (but not identically distributed) draws from binomial
+
+```{julia}
+#=
+* Discrete rv's: binomial
+set seed 10101
+generate p1 = runiform()              // here p1~uniform(0,1) 
+generate trials = ceil(10*runiform()) // here # trials varies btwn 1 & 10
+generate xbin = rbinomial(trials,p1)  // draws from binomial(n,p1)  
+summarize p1 trials xbin
+=#
+Random.seed!(10101)
+N = 2000
+p1     = rand(N)
+trials = ceil.(Int, 10 .* rand(N))
+xbin   = [rand(Binomial(t, p)) for (t, p) in zip(trials, p1)]
+@printf("p1     mean=%.4f\n", mean(p1))
+@printf("trials mean=%.4f\n", mean(trials))
+@printf("xbin   mean=%.4f\n", mean(xbin))
+```
+
+#### Independent (but not identically distributed) draws from Poisson
+
+```{julia}
+#=
+* Discrete rv's: independent poisson and negbin draws
+set seed 10101 
+generate xb= 4 + 2*runiform()
+generate xg = rgamma(1,1)           // draw from gamma;E(v)=1
+generate xbh = xb*xg                // apply multiplicative heterogeneity
+generate xp = rpoisson(5)           // result xp ~ Poisson(5)
+generate xp1 = rpoisson(xb)         // result xp1 ~ Poisson(xb)
+generate xp2 = rpoisson(xbh)        // result xp2 ~ NB(xb)
+summarize xg xb xp xp1 xp2
+=#
+Random.seed!(10101)
+N   = 2000
+xb  = 4 .+ 2 .* rand(N)
+xg  = rand(Gamma(1, 1), N)
+xbh = xb .* xg
+xp  = rand(Poisson(5), N)
+xp1 = [rand(Poisson(m)) for m in xb]
+xp2 = [rand(Poisson(m)) for m in xbh]
+for (n, v) in [("xg", xg), ("xb", xb), ("xp", xp), ("xp1", xp1), ("xp2", xp2)]
+    @printf("%-4s mean=%8.4f sd=%7.4f\n", n, mean(v), std(v))
+end
+```
+
+#### Histograms and density plots
+
+```{julia}
+#=
+* Example of histogram and kernel density plus graph combine
+quietly twoway (histogram xc, width(1)) (kdensity xc, lwidth(thick)), ///
+   title("Draws from chisquared(10)") 
+quietly graph save musr/mus04cdistr.gph, replace
+quietly twoway (histogram xp, discrete) (kdensity xp, lwidth(thick) ///
+   w(1)),  title("Draws from Poisson(mu) for 5<mu<6") 
+quietly graph save musr/mus04poissdistr.gph, replace
+graph combine musr/mus04cdistr.gph musr/mus04poissdistr.gph, ///
+   title("Random-number generation examples", margin(b=2) size(vlarge)) 
+graph export musr/mus04fig1.eps, replace
+=#
+# Histograms + density curves
+fig_hd = Figure(size = (900, 400))
+ax1 = Axis(fig_hd[1, 1], title = "Draws from chi-squared(10)", xlabel = "xc")
+hist!(ax1, xc, bins = 30, normalization = :pdf, color = (:steelblue, 0.5))
+kdc = kde(xc); lines!(ax1, kdc.x, kdc.density, linewidth = 2.5)
+
+ax2 = Axis(fig_hd[1, 2], title = "Draws from Poisson(5..6)", xlabel = "xp")
+hist!(ax2, xp, bins = -0.5:1:15.5, normalization = :pdf, color = (:tomato, 0.5))
+fig_hd
+```
+
+```{julia}
+#=
+* Simulation using postfile
+set seed 10101
+postfile sim_mem xmean using musr/simresults, replace
+forvalues i = 1/10000 {
+     drop _all
+     quietly set obs 30
+     tempvar x
+     generate `x' = runiform()
+     quietly  summarize `x'
+     post sim_mem (r(mean))
+}
+postclose sim_mem
+=#
+# Simulation of sample means: 10,000 reps × N=30
+Random.seed!(10101)
+xmeans = [mean(rand(30)) for _ in 1:10_000]
+@printf("Mean of sample means = %.6f\n", mean(xmeans))
+@printf("SD   of sample means = %.6f\n", std(xmeans))
+```
+
+```{julia}
+#=
+* See the results stored in simresults
+use musr/simresults, clear
+summarize
+=#
+# Same data — view summary again
+@printf("N=%d, mean=%.6f, sd=%.6f, min=%.4f, max=%.4f\n",
+        length(xmeans), mean(xmeans), std(xmeans),
+        minimum(xmeans), maximum(xmeans))
+```
+
+## 4.3 Distribution of the sample mean
+
+```{julia}
+#=
+clear all
+* Draw 1 sample of size 30 from uniform distribution 
+quietly set obs 30
+set seed 10101
+generate x = runiform()
+=#
+# One sample of size 30 from uniform
+Random.seed!(10101)
+x = rand(30)
+```
+
+```{julia}
+#=
+* Summarize x and produce a histogram
+summarize x
+quietly histogram x, width(0.1) xtitle("x from one sample")
+
+quietly graph export musr/mus04fig1clt.eps, replace
+=#
+@printf("mean=%.4f sd=%.4f\n", mean(x), std(x))
+fig_clt = Figure(size = (600, 400))
+ax = Axis(fig_clt[1, 1], xlabel = "x from one sample", ylabel = "freq")
+hist!(ax, x, bins = 0:0.1:1)
+fig_clt
+```
+
+### 4.3.1 Julia function
+
+
+```{julia}
+Random.seed!(10101)
+@printf("Sample mean = %.6f\n", onesample())
+```
+
+### 4.3.2 The simulate equivalent
+
+```{julia}
+# Run onesample 10,000 times
+Random.seed!(10101)
+xbar = [onesample() for _ in 1:10_000]
+```
+
+```{julia}
+@printf("xbar: N=%d mean=%.4f sd=%.4f\n",
+        length(xbar), mean(xbar), std(xbar))
+
+# Histogram with normal overlay
+fig_clt2 = Figure(size = (700, 400))
+ax = Axis(fig_clt2[1, 1], xlabel = "xbar from many samples", ylabel = "density")
+hist!(ax, xbar, bins = 30, normalization = :pdf, color = (:steelblue, 0.5))
+xs = range(minimum(xbar), maximum(xbar), length=200)
+lines!(ax, xs, pdf.(Normal(mean(xbar), std(xbar)), xs),
+       color = :red, linewidth = 2)
+fig_clt2
+```
+
+### 4.3.4 Storing simulation results
+
+### 4.3.5 Alternative central limit theorem simulation
+
+```{julia}
+#=
+* Simulation using postfile
+set seed 10101
+postfile sim_mem xmean using musr/simresults, replace
+forvalues i = 1/10000 {
+  drop _all
+  quietly set obs 30
+  tempvar x
+  generate `x' = runiform()
+  quietly summarize `x'
+  post sim_mem (r(mean))
+}
+postclose sim_mem
+=#
+# Equivalent of postfile - just collect into a vector
+Random.seed!(10101)
+results = Float64[]
+for _ in 1:10_000
+    push!(results, mean(rand(30)))
+end
+@printf("N=%d mean=%.6f sd=%.6f\n",
+        length(results), mean(results), std(results))
+```
+
+## 4.4 Pseudorandom-number generators: Further details
+
+### 4.4.1 Inverse-probability transformation
+
+```{julia}
+#=
+clear all
+* Inverse probability transformation example: standard normal
+quietly set obs 2000
+set seed 10101
+generate xstn = invnormal(runiform())
+=#
+# Standard normal via inverse CDF
+Random.seed!(10101)
+xstn = quantile.(Normal(), rand(2000))
+```
+
+```{julia}
+#=
+* Inverse probability transformation example: unit exponential
+generate xue = -ln(1-runiform())
+=#
+# Unit exponential via -ln(1-U)
+xue = -log.(1 .- rand(2000))
+```
+
+```{julia}
+#=
+* Inverse probability transformation example: Bernoulli (p = 0.6)
+generate xbernoulli = runiform() > 0.6   // Bernoulli(0.6)
+summarize xstn xue xbernoulli
+=#
+# Bernoulli(0.6)
+xbernoulli = rand(2000) .> 0.6
+@printf("xstn       mean=%.4f sd=%.4f\n", mean(xstn), std(xstn))
+@printf("xue        mean=%.4f sd=%.4f\n", mean(xue), std(xue))
+@printf("xbern(0.6) mean=%.4f sd=%.4f\n", mean(xbernoulli), std(xbernoulli))
+```
+
+### 4.4.2 Direct transformation
+
+### 4.4.3 Other methods
+
+### 4.4.4 Draws from truncated normal
+
+```{julia}
+#=
+* Draws from truncated normal x ~ N(mu,sigma^2) in [a,b]
+quietly set obs 2000
+set seed 10101
+scalar a = 0                             // lower truncation point
+scalar b = 12                            // upper truncation point
+scalar mu = 5                            // mean
+scalar sigma = 4                         // standard deviation
+generate u = runiform()
+generate w=normal((a-mu)/sigma)+u*(normal((b-mu)/sigma)-normal((a-mu)/sigma))
+generate xtrunc = mu + sigma*invnormal(w)
+summarize xtrunc
+=#
+# Truncated normal x ~ N(μ,σ²) on [a,b]
+Random.seed!(10101)
+N, a, b, μ, σ = 2000, 0.0, 12.0, 5.0, 4.0
+u = rand(N)
+Φa, Φb = cdf(Normal(), (a - μ)/σ), cdf(Normal(), (b - μ)/σ)
+w = Φa .+ u .* (Φb - Φa)
+xtrunc = μ .+ σ .* quantile.(Normal(), w)
+@printf("xtrunc: mean=%.4f sd=%.4f min=%.4f max=%.4f\n",
+        mean(xtrunc), std(xtrunc), minimum(xtrunc), maximum(xtrunc))
+```
+
+### 4.4.5 Draws from multivariate normal
+
+#### Direct draws from multivariate normal
+
+```{julia}
+#=
+* Bivariate normal example: 
+* means 10, 20; variances 4, 9; and correlation 0.5
+clear
+quietly set obs 1000
+set seed 10101
+matrix MU = (10,20)                   // MU is 2 x 1
+scalar sig12 = 0.5*sqrt(4*9)
+matrix SIGMA = (4, sig12 \ sig12, 9)  // SIGMA is 2 x 2 
+drawnorm y1 y2, means(MU) cov(SIGMA)
+summarize y1 y2
+correlate y1 y2
+=#
+# Bivariate normal: means (10,20), variances (4,9), correlation 0.5
+Random.seed!(10101)
+sig12 = 0.5 * sqrt(4 * 9)
+MU    = [10.0, 20.0]
+SIGMA = [4.0  sig12; sig12  9.0]
+Y = rand(MvNormal(MU, SIGMA), 1000)'   # 1000×2
+y1 = Y[:, 1]; y2 = Y[:, 2]
+@printf("y1: mean=%.4f sd=%.4f\n", mean(y1), std(y1))
+@printf("y2: mean=%.4f sd=%.4f\n", mean(y2), std(y2))
+@printf("cor(y1,y2) = %.4f\n", cor(y1, y2))
+```
+
+#### Transformation using Cholesky decomposition
+
+### 4.4.6 Draws using Markov chain Monte Carlo method
+
+```{julia}
+#=
+* MCMC example: Gibbs for bivariate normal mu's=0 v's=1 corr=rho=0.9
+set seed 10101    
+clear all
+set obs 1000
+generate double y1 =.
+generate double y2 =.
+=#
+# MCMC: Gibbs sampler for bivariate normal, μ=0, σ=1, ρ=0.9
+Random.seed!(10101)
+s0 = 10_000   # burn-in
+s1 = 1_000    # kept draws
+ρ  = 0.9
+y1 = zeros(s0 + s1); y2 = zeros(s0 + s1)
+for i in 2:(s0 + s1)
+    y1[i] = sqrt(1 - ρ^2) * randn() + ρ * y2[i-1]
+    y2[i] = sqrt(1 - ρ^2) * randn() + ρ * y1[i]
+end
+y = hcat(y1[s0+1:end], y2[s0+1:end])
+println("means:    ", mean(y, dims = 1))
+println("variance: ", cov(y))
+println("corr:     ", cor(y))
+```
+
+```{julia}
+#=
+mata:
+  s0 = 10000             // Burn-in for the Gibbs sampler (to be discarded)
+  s1 = 1000              // Actual draws used from the Gibbs sampler
+  y1 = J(s0+s1,1,0)      // Initialize y1 
+  y2 = J(s0+s1,1,0)      // Initialize y2 
+  rho = 0.90             // Correlation parameter
+  for(i=2; i<=s0+s1; i++) {
+      y1[i,1] = ((1-rho^2)^0.5)*(rnormal(1, 1, 0, 1)) + rho*y2[i-1,1]
+      y2[i,1] = ((1-rho^2)^0.5)*(rnormal(1, 1, 0, 1)) + rho*y1[i,1]
+  }
+  y = y1,y2
+  y = y[|(s0+1),1 \ (s0+s1),.|]  // Drop the burn-ins
+  mean(y)                        // Means of y1, y2
+  variance(y)                    // Variance matrix of y1, y2
+  correlation(y)                 // Correlation matrix of y1, y2
+end
+=#
+# Correlation between y2_t and y2_{t-1}
+y2_kept = y[:, 2]
+println("cor(y2, y2[lag1]) = ",
+        cor(y2_kept[2:end], y2_kept[1:end-1]))
+```
+
+## 4.5 Computing integrals
+
+### 4.5.1 Quadrature
+
+### 4.5.2 Monte Carlo integration
+
+```{julia}
+#=
+* Integral evaluation by Monte Carlo simulation with S=100 
+clear all
+quietly set obs 100
+set seed 10101
+generate double y = invnormal(runiform())
+generate double gy = exp(-exp(y))
+quietly summarize gy, meanonly
+scalar Egy = r(mean)
+display "After 100 draws the MC estimate of E[exp{-exp(x)}] is " Egy
+=#
+# Integral evaluation by Monte Carlo with S=100
+Random.seed!(10101)
+y  = quantile.(Normal(), rand(100))   # standard normal draws
+gy = exp.(.-exp.(y))
+@printf("After 100 draws E[exp(-exp(x))] ≈ %.6f\n", mean(gy))
+```
+
+### 4.5.3 Monte Carlo integration using different S
+
+
+```{julia}
+#=
+* Program mcintegration to compute E{g(y)} numsims times
+program mcintegration, rclass
+   version 11 
+   args numsims        // Call to program will include value for numsims
+   drop _all
+   quietly set obs `numsims'
+   set seed 10101
+   generate double y = rnormal(0) 
+   generate double gy = exp(-exp(y)) 
+   quietly summarize gy, meanonly
+   scalar Egy = r(mean)
+   display "#simulations: " %9.0g `numsims'  ///
+     "  MC estimate of  E[exp{-exp(x)}] is " Egy
+end
+=#
+for s in (10, 100, 1_000, 10_000, 100_000)
+    mcintegration(s)
+end
+```
+
+
+```{julia}
+#=
+* Run program mcintegration S = 10, 100, ...., 100000 times
+mcintegration 10 
+mcintegration 100
+mcintegration 1000
+mcintegration 10000
+mcintegration 100000
+=#
+# Run 1000 times
+Random.seed!(10101)
+mutilde = [simulateexample() for _ in 1:1000]
+@printf("mean=%.4f sd=%.4f\n", mean(mutilde), std(mutilde))
+```
+
+```{julia}
+#=
+* Following code was not included in the book
+* It compares use of simulate and postfile for a simple example   
+
+* Program to generate one sample and return the sample median program 
+
+* Simulate distribution of sample median
+program simulateexample, rclass
+version 11
+drop _all
+set obs 9
+tempvar y
+generate `y' = rnormal(0)
+centile `y'
+return scalar median = r(c_1)
+end
+=#
+# Same via explicit loop
+Random.seed!(10101)
+mutilde2 = Float64[]
+for _ in 1:1000
+    push!(mutilde2, median(randn(9)))
+end
+@printf("mean=%.4f sd=%.4f\n", mean(mutilde2), std(mutilde2))
+```
+
+## 4.6 Simulation for regression: Introduction
+
+### 4.6.1 Simulation example: OLS with $\chi^2$ errors
+
+
+
+```{julia}
+#=
+* Define global macros for sample size and number of simulations
+global numobs 150             // sample size N
+global numsims "1000"         // number of simulations 
+=#
+Random.seed!(10101)
+res = chi2data()
+println(res)
+```
+
+```{julia}
+#=
+* Program for finite-sample properties of OLS
+program chi2data, rclass
+    version 11  
+    drop _all
+    set obs $numobs
+    generate double x = rchi2(1)   
+    generate y = 1 + 2*x + rchi2(1)-1     // demeaned chi^2 error 
+    regress y x
+    return scalar b2 =_b[x]
+    return scalar se2 = _se[x]
+    return scalar t2 = (_b[x]-2)/_se[x]
+    return scalar r2 = abs(return(t2))>invttail($numobs-2,.025)
+    return scalar p2 = 2*ttail($numobs-2,abs(return(t2)))
+end
+=#
+# Run NUMSIMS replications
+Random.seed!(10101)
+sims = [chi2data() for _ in 1:NUMSIMS]
+b2f      = [s.b2 for s in sims]
+se2f     = [s.se2 for s in sims]
+t2f      = [s.t2 for s in sims]
+reject2f = [s.r2 for s in sims]
+p2f      = [s.p2 for s in sims]
+
+@printf("Mean b2     = %.4f\n", mean(b2f))
+@printf("Mean se2    = %.4f\n", mean(se2f))
+@printf("Reject rate = %.4f\n", mean(reject2f))
+```
+
+```{julia}
+#=
+* Show that test gives same result as doing test manually
+set seed 10101
+quietly chi2data
+return list
+quietly test x=2
+return list
+=#
+# Summary statistics
+@printf("b2:      mean=%.4f sd=%.4f\n", mean(b2f), std(b2f))
+@printf("se2:     mean=%.4f sd=%.4f\n", mean(se2f), std(se2f))
+@printf("rejects: %.4f\n", mean(reject2f))
+```
+
+### 4.6.2 Interpreting simulation output
+
+#### Unbiasedness of estimator
+
+#### Standard errors
+
+#### t statistic
+
+```{julia}
+#=
+* t-statistic distribution
+kdensity t2f,  n(1000) gen(t2_x t2_d) nograph
+generate double t2_d2 = tden(148, t2_x)
+graph twoway (line t2_d t2_x) (line t2_d2 t2_x)
+graph export musr/mus04ttest.eps, replace
+=#
+# Compare empirical t distribution to theoretical t(148)
+fig_t = Figure(size = (700, 400))
+ax = Axis(fig_t[1, 1], xlabel = "t", ylabel = "density",
+          title = "Empirical vs theoretical t-density")
+kd = kde(t2f)
+lines!(ax, kd.x, kd.density, label = "empirical")
+xs = range(-4, 4, length=200)
+lines!(ax, xs, pdf.(TDist(148), xs), color = :red, label = "t(148)")
+axislegend(ax)
+fig_t
+```
+
+#### Test size
+
+#### Number of simulations
+
+### 4.6.3 Variations
+
+#### Different sample size and number of simulations
+
+#### Test power
+
+
+```{julia}
+#=
+* Program for finite-sample properties of OLS: power
+program chi2datab, rclass
+    version 11  
+    drop _all
+    set obs $numobs
+    generate double x = rchi2(1)   
+    generate y = 1 + 2*x + rchi2(1)-1     // demeaned chi^2 error 
+    regress y x
+    return scalar b2  =_b[x]
+    return scalar se2 =_se[x]
+    test x=2.1
+    return scalar r2 = (r(p)<.05)
+end
+=#
+Random.seed!(10101)
+sims = [chi2datab() for _ in 1:NUMSIMS]
+@printf("Mean b2     = %.4f\n", mean(s.b2 for s in sims))
+@printf("Mean se2    = %.4f\n", mean(s.se2 for s in sims))
+@printf("Reject rate = %.4f\n", mean(s.r2 for s in sims))
+```
+
+#### Different error distributions
+
+### 4.6.4 Estimator inconsistency
+
+```{julia}
+#=
+* Inconsistency of OLS in errors-in-variables model (measurement error)
+clear
+quietly set obs 10000
+set seed 10101
+matrix mu = (0,0,0)
+matrix sigmasq = (9,0,0\0,1,0\0,0,1)
+drawnorm xstar u v, means(mu) cov(sigmasq)
+generate y = 1*xstar + u   // DGP for y depends on xstar
+generate x = xstar + v     // x is mismeasured xstar 
+regress y x, noconstant
+=#
+# Errors-in-variables: x = x* + v, regress y on x without constant
+Random.seed!(10101)
+N = 10_000
+Σ = [9.0 0 0; 0 1.0 0; 0 0 1.0]
+draws = rand(MvNormal([0.0, 0.0, 0.0], Σ), N)'
+xstar = draws[:, 1]; u = draws[:, 2]; v = draws[:, 3]
+y = 1 .* xstar .+ u
+x = xstar .+ v
+β_eiv = (x'x) \ (x'y)
+@printf("OLS estimate (no constant) = %.4f  (true = 1.00)\n", β_eiv)
+```
+
+### 4.6.5 Simulation with endogenous regressors
+
+
+```{julia}
+#=
+* Endogenous regressor
+clear all
+set seed 10101
+program endogreg, rclass
+  version 10.1
+  drop _all
+  set obs $numobs
+  generate u = rnormal(0)
+  generate x = 0.5*u + rnormal(0)
+  generate y = 10 + 2*x + u
+  regress y x
+  return scalar b2 =_b[x]
+  * endogenous regressors
+  return scalar se2 = _se[x] 
+  return scalar t2 = (_b[x]-2)/_se[x]
+  return scalar r2 = abs(return(t2))>invttail($numobs-2,.025)
+  return scalar p2 = 2*ttail($numobs-2, abs(return(t2)))
+end
+=#
+Random.seed!(10101)
+sims = [endogreg() for _ in 1:NUMSIMS]
+@printf("Mean b2     = %.4f  (true = 2.00; OLS biased)\n", mean(s.b2 for s in sims))
+@printf("Mean se2    = %.4f\n", mean(s.se2 for s in sims))
+@printf("Reject rate = %.4f\n", mean(s.r2 for s in sims))
+```
+
+
+```{julia}
+#=
+simulate b2r=r(b2) se2r=r(se2) t2r=r(t2) reject2r=r(r2) p2r=r(p2), reps($numsims) nolegend nodots: endogreg
+mean b2r se2r reject2r
+=#
+Random.seed!(10101)
+sims = [randomreg() for _ in 1:NUMSIMS]
+@printf("Mean b2     = %.4f  (true = 5)\n", mean(s.b2 for s in sims))
+@printf("Mean se2    = %.4f\n", mean(s.se2 for s in sims))
+@printf("Mean t2     = %.4f\n", mean(s.t2 for s in sims))
+@printf("Reject rate = %.4f\n", mean(s.r2 for s in sims))
+```
+
+```{julia}
+#=
+* Program for finite-sample properties of OLS: random regressors
+clear
+set seed 10101
+program randomreg, rclass
+    version 11 
+    drop _all
+    set obs $numobs
+    generate x = rnormal(0)                  // random regressors 
+    generate y = 10 + 5*x + 1*rnormal(0)     // normal error 
+    regress y x
+    return scalar b2 =_b[x]
+    return scalar se2 = _se[x]
+    return scalar t2 = (_b[x]-5)/_se[x]
+    return scalar r2 = abs(return(t2))>invttail($numobs-2,.025)
+    return scalar p2 = 2*ttail($numobs-2,abs(return(t2)))
+end
+=#
+# Same simulation accumulated explicitly
+Random.seed!(10101)
+results = (b2 = Float64[], se2 = Float64[], t2 = Float64[],
+           reject = Bool[])
+for _ in 1:NUMSIMS
+    s = randomreg()
+    push!(results.b2, s.b2)
+    push!(results.se2, s.se2)
+    push!(results.t2, s.t2)
+    push!(results.reject, s.r2)
+end
+@printf("mean b2 = %.4f, mean se2 = %.4f, mean reject = %.4f\n",
+        mean(results.b2), mean(results.se2), mean(results.reject))
+```
+
+```{julia}
+#=
+* Simulation for finite-sample properties of OLS: random regressors
+simulate b2r=r(b2) se2r=r(se2) t2r=r(t2) reject2r=r(r2) p2r=r(p2),  ///
+     reps($numsims) nolegend nodots: randomreg
+summarize
+mean b2r se2r t2r reject2r p2r, noheader
+=#
+# Endogenous regressors: another run
+Random.seed!(10101)
+sims = [endogreg() for _ in 1:NUMSIMS]
+@printf("OLS with endogenous regressor — mean b2 = %.4f (true = 2)\n",
+        mean(s.b2 for s in sims))
+```
+
+## 4.7 Stata resources
+
+## 4.8 Exercises

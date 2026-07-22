@@ -1,0 +1,984 @@
+---
+title: "Cameron & Trivedi -- Ch. 16: Tobit and selection models (via StatEcon)"
+Authors:
+- Colin Cameron
+- Pravin Trivedi
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+# Julia setup
+
+```{julia}
+using StatEcon
+const DATA = first(filter(d -> isdir(d) && (isfile(joinpath(d, "auto.dta")) || isdir(joinpath(d, "musr"))), ["../../data", "data", raw"C:/EC/GitHub/StatEcon/data"]))
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+_rawval(x) = hasproperty(x, :value) ? x.value : x
+```
+
+The censored-regression and sample-selection estimators used in this chapter
+now live in `StatEcon` and are called directly below:
+
+* `stata_tobit`                    — `tobit y x, ll(#) ul(#)` (canonical Tobit MLE)
+* `stata_margins_tobit`            — `margins, dydx(*) predict(...)` after `tobit`
+* `stata_predict_tobit_lognormal`  — lognormal-tobit level predictions
+* `stata_heckman`                  — `heckman y x, select(d = z)` (FIML)
+* `stata_heckman_twostep`          — `heckman ..., twostep` (Heckman 1979)
+* `stata_predict_heckman`          — `heckman` post-estimation predictions
+* `stata_sktest`                   — `sktest var` (skewness/kurtosis normality test)
+* `stata_ols_fit`                  — OLS returning residuals + `e(ll)`
+
+The workhorse commands `stata_probit`, `stata_regress`, `stata_summarize`,
+`stata_tabulate` and `estat_hettest` (Breusch-Pagan / Cook-Weisberg) are also
+in `StatEcon`. The `estat_hettest` default variant is the OLS-residual
+Breusch-Pagan test against the fitted values, exactly the statistic the
+chapter's `hettest` produces. The by-hand demonstrations (direct marginal
+effects, generalized residuals, the LM tests of normality and
+homoskedasticity, and the two-part-model predictions) are kept inline as
+pedagogical scaffolding.
+
+# 16 Tobit and selection models
+
+## 16.1 Introduction
+
+## 16.2 Tobit model
+
+### 16.2.1 Regression with censored data
+
+### 16.2.2 Tobit model setup
+
+### 16.2.3 Unknown censoring point
+
+### 16.2.4 Tobit estimation
+
+### 16.2.5 ML estimation in Stata
+
+## 16.3 Tobit model example
+
+### 16.3.1 Data summary
+
+The data come from Deb, Munkin and Trivedi (2006), "Bayesian Analysis of
+Two-Part Model with Endogeneity", *Journal of Applied Econometrics*. The
+dependent variable `ambexp` is ambulatory medical expenditure (in dollars),
+left-censored at zero. Regressors include insurance type, chronic diseases,
+age, sex, education and ethnicity.
+
+```{julia}
+#=
+********** DATA DESCRIPTION **********
+
+* Subset of data in P. Deb, M. Munkin and P.K. Trivedi (2006)
+* "Bayesian Analysis of Two-Part Model with Endogeneity", Journal of Applied Econometrics, 21, 1081-1100
+* Only the data for year 2001 are used
+
+* Dependent variable is
+*      ambexp   Ambulatory medical expenditures (excluding dental and outpatient mental)
+*      lambexp  Ln(ambexp) given ambexp > 0 ; missing otherwise
+*      dambexp  1 if ambexp > 0 and 0 otherwise
+*      lnambexp  ln(ambexp) if ambexp>0 and 0 if ambexp=0
+
+* Regressors are
+*  - Health insurance measures
+*       ins either PPO or HMO type insurance
+*  - Health status measures
+*       totchr     number of chronic diseases
+*  - Socioeconomic characteristics
+*       age     age in years/10
+*       female   1 for females, zero otherwise
+*       educ     years of schooling of decision maker
+*       blhisp   either black or hispanic
+=#
+```
+
+```{julia}
+#=
+* Raw data summary
+use musr/mus16data.dta, clear
+summarize ambexp age female educ blhisp totchr ins
+=#
+
+# Load mus16data (Deb-Munkin-Trivedi ambulatory-expenditure panel) and
+# call `stata_summarize` on the seven variables Stata lists.
+df16 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus16data.dta"))
+for c in DataFrames.names(df16)
+    if eltype(df16[!, c]) <: Union{Missing, Float32}
+        df16[!, c] = convert.(Union{Missing, Float64}, df16[!, c])
+    end
+end
+stata_summarize(df16, [:ambexp, :age, :female, :educ, :blhisp, :totchr, :ins]);
+```
+
+```{julia}
+#=
+* Detailed summary to show skewness and kurtosis
+summarize ambexp, detail
+=#
+
+# `stata_summarize` with `detail = true` reproduces Stata's percentile /
+# Smallest / Largest / moments block.
+stata_summarize(df16, [:ambexp]; detail = true);
+```
+
+```{julia}
+#=
+* Summary for positives only
+summarize ambexp if ambexp >0, detail
+=#
+
+# Stata's `if ambexp > 0` filter maps to a `DataFrames.filter` on df16.
+stata_summarize(DataFrames.filter(:ambexp => >(0), df16),
+                [:ambexp]; detail = true);
+```
+
+### 16.3.2 Tobit analysis
+
+```{julia}
+#=
+* Tobit analysis for ambexp using all expenditures
+global xlist age female educ blhisp totchr ins   //Define regressor list $xlist
+tobit ambexp $xlist, ll(0)
+=#
+
+# `stata_tobit` fits a Tobit MLE left-censored at 0 (Stata's `ll(0)`) by
+# L-BFGS + ForwardDiff gradient; OIM vcov via FD Hessian with delta-method
+# on σ = exp(lnσ). The returned NamedTuple binds `β`, `σ`, `X`, `coefnames`
+# so the §16.3.3 / .4 prediction / marginal-effect chunks can read them.
+tobit_res = stata_tobit(df16, :ambexp,
+    [:age, :female, :educ, :blhisp, :totchr, :ins]; ll = 0.0)
+β_tob   = tobit_res.β
+σ_tob   = tobit_res.σ
+X16     = tobit_res.X
+xnms16  = tobit_res.coefnames;
+```
+
+### 16.3.3 Prediction after tobit
+
+```{julia}
+#=
+* Tobit prediction and summary
+predict yhatlin
+summarize yhatlin
+=#
+
+# Stata's bare `predict <name>` after `tobit` returns the linear prediction
+# xβ (the latent index — no censoring adjustment). We compute `X16 * β_tob`.
+yhatlin = X16 * β_tob
+stata_summarize(DataFrames.DataFrame(yhatlin = yhatlin), [:yhatlin]);
+```
+
+### 16.3.4 Marginal effects
+
+#### Censored / uncensored / truncated expectations
+
+```{julia}
+#=
+** Tobit postestimation
+* (1) ME on censored expected value E(y|x,y>0)
+quietly tobit ambexp age i.female educ i.blhisp totchr i.ins, ll(0)
+margins, dydx(*) predict(e(0,.)) atmean noatlegend
+=#
+
+# `stata_margins_tobit` — Stata's `margins, dydx(*) predict(e(0, .)) atmean`.
+# `predict = :e_cond` selects the truncated conditional expectation
+# `E[y | L < y < U, x]` with L/U defaulting to the fit's censoring bounds
+# (here lower = 0, upper = ∞). SE is delta-method.
+stata_margins_tobit(tobit_res; predict = :e_cond, at = :mean);
+```
+
+```{julia}
+#=
+* (2) ME without censoring on E(y|x)
+margins, dydx(*) predict(ystar(0,.)) atmean noatlegend
+=#
+
+# `predict = :e_uncond` is the censored unconditional expectation
+# `E[y* | x]` where `y* = max(L, min(y, U))`. Defaults to the fit's
+# bounds (lower = 0, upper = ∞ here); SE is delta-method.
+stata_margins_tobit(tobit_res; predict = :e_uncond, at = :mean);
+```
+
+```{julia}
+#=
+* (3) ME when E(y|0<y<535)
+margins, dydx(*) predict(e(0,535)) atmean noatlegend
+=#
+
+# Same helper, now with `upper = 535` for the doubly-truncated
+# conditional expectation `E[y | 0 < y < 535]`.
+stata_margins_tobit(tobit_res; predict = :e_cond, at = :mean,
+                    lower = 0.0, upper = 535.0);
+```
+
+#### Left-censored case computed directly
+
+```{julia}
+#=
+* Direct computation of marginal effects for E(y|x)
+predict xb1, xb // xb1 is estimate of x'b
+matrix btobit = e(b)
+scalar sigma = btobit[1,11] // sigma is estimate of sigma
+matrix bcoeff = btobit[1,1..9] // bcoeff is betas excl. constant
+quietly summarize xb1
+scalar meanxb = r(mean) // mean of x'b equals (mean of x)'b
+scalar PHI = normal(meanxb/sigma)
+matrix deriv = PHI*bcoeff
+matrix list deriv
+=#
+
+# Direct closed-form ∂E[y|x]/∂x_j = Φ(meanxb/σ) · β_j, in the explicit
+# element-by-element form Stata's `matrix list deriv` shows. Produces the
+# same numbers as `stata_margins_tobit(...; predict = :e_uncond, at = :mean)`.
+xb1     = X16 * β_tob
+meanxb  = Statistics.mean(xb1)
+PHI     = cdf(Normal(), meanxb / σ_tob)
+deriv   = PHI .* β_tob[1:end - 1]
+Printf.@printf("\nmeanxb = %.4f   σ = %.4f   Φ(meanxb/σ) = %.6f\n\n",
+               meanxb, σ_tob, PHI)
+println("deriv[1, 1..$(length(deriv))]:")
+for (n, d) in zip(xnms16[1:end - 1], deriv)
+    Printf.@printf("%-10s  %12.6f\n", n, d)
+end
+```
+
+```{julia}
+#=
+* The following gives nicer looking results
+ereturn post deriv
+ereturn display
+=#
+
+# Stata's `ereturn post deriv; ereturn display` reposts `deriv` as e(b) and
+# prints it through the coefficient-table renderer (no SE for a bare vector).
+println()
+println("-"^60)
+Printf.@printf("%12s | %12s\n", "", "Coefficient")
+println("-"^13, "+", "-"^46)
+for (n, d) in zip(xnms16[1:end - 1], deriv)
+    Printf.@printf("%12s | %12.6f\n", n, d)
+end
+println("-"^60)
+```
+
+#### Marginal impact on probabilities
+
+```{julia}
+#=
+* Compute margins on Pr(5000<ambexp<10000)
+quietly tobit ambexp age i.female educ i.blhisp totchr i.ins, ll(0) vce(robust)
+margins, dydx(*) predict(pr(5000,10000)) atmean noatlegend
+=#
+
+# Same helper, with `predict = :pr` and the interval (5000, 10000). Stata's
+# closed-form ∂P(L < y < U)/∂x_c = (β_c/σ)·[φ((L-η)/σ) − φ((U-η)/σ)]. The
+# Stata refit uses vce(robust) SEs; our helper reports OIM SEs.
+stata_margins_tobit(tobit_res; predict = :pr, at = :mean,
+                    lower = 5000.0, upper = 10000.0);
+```
+
+### 16.3.5 IV tobit
+
+### 16.3.6 Other censored regression options
+
+## 16.4 Tobit for lognormal data
+
+### 16.4.1 Data example
+
+The dependent variable `lny` is `ln(ambexp)` if positive, with the censored
+zeros mapped to a small value `γ - ε` to keep them on the same scale.
+
+```{julia}
+#=
+* ASIDE:
+* We observe  y = 0       if dy=0   and  y = y  if dy=1
+* Let gamma be the smallest of the positive y's
+* We define lny = gamma-0.000001 if dy=0   and lny = ln(y) if dy=1
+* This ensures that tobit, ll will correctly sort out
+* the censored and uncensored observations
+
+* Summary of log(expenditures) for positives only
+summarize lambexp, detail
+=#
+
+# `lambexp` is pre-computed as ln(ambexp) for positive expenditures (missing
+# for ambexp == 0); drop the missings and summarize with `detail = true`.
+stata_summarize(DataFrames.dropmissing(df16, :lambexp),
+                [:lambexp]; detail = true);
+```
+
+### 16.4.2 Setting the censoring point for the log model
+
+```{julia}
+#=
+* "Tricking" Stata to handle log transformation
+generate y = ambexp
+generate dy = ambexp > 0
+generate lny = ln(y)                // Zero values will become missing
+quietly summarize lny
+scalar gamma = r(min)               // This could be negative
+display "gamma = " gamma
+replace lny = gamma - 0.0000001 if lny == .
+tabulate y if y < 0.02              // .02 is arbitrary small value
+tabulate lny if lny < gamma + 0.02
+=#
+
+# Recipe to map log-of-positives onto a tobit-friendly censored variable:
+# zeros get a value just below the smallest log(positive) (`γ - 1e-7`), so a
+# left-censored tobit at `γ` recovers the zero/positive split correctly.
+df16.y   = Float64.(_rawval.(df16.ambexp))
+df16.dy  = Int.(df16.y .> 0)
+df16.lny = [yi > 0 ? log(yi) : missing for yi in df16.y]
+γ_amb    = minimum(skipmissing(df16.lny))
+Printf.@printf("gamma = %.10f\n", γ_amb)
+df16.lny = [ismissing(v) ? γ_amb - 1e-7 : v for v in df16.lny]
+
+# `tabulate y if y < 0.02` — near-zero frequency (collapses to a count of
+# y == 0, the censored obs).
+stata_tabulate(DataFrames.filter(:y => <(0.02), df16), :y)
+# `tabulate lny if lny < gamma + 0.02` — the imputed `γ − 1e-7` value with a
+# count equal to the number of zero-expenditure obs.
+stata_tabulate(DataFrames.filter(:lny => <(γ_amb + 0.02), df16), :lny);
+```
+
+```{julia}
+#=
+// Not included in book
+summarize y lny dy $xlist
+summarize y lny dy, detail
+=#
+
+# `stata_summarize` — first the basic block over y, lny, dy + the xlist,
+# then the `, detail` block for each of y, lny, dy.
+stata_summarize(df16, [:y, :lny, :dy,
+                       :age, :female, :educ, :blhisp, :totchr, :ins])
+stata_summarize(df16, [:y, :lny, :dy]; detail = true);
+```
+
+### 16.4.3 Results
+
+```{julia}
+#=
+* Now do tobit on lny and calculate threshold and lambda
+tobit lny $xlist, ll
+=#
+
+# Stata's pasted output here is an **intercept-only** tobit — the `$xlist`
+# global was never set in the textbook's session, so `tobit lny $xlist, ll`
+# collapsed to `tobit lny, ll`. Stata's `ll` (no argument) counts obs at the
+# limit as uncensored, so no censoring binds and the fit is OLS on lny with
+# an intercept. We reproduce that with an intercept-only model and `ll` set
+# below the data so nothing is censored.
+tobit_lny_res = stata_tobit(df16, :lny, Symbol[];
+    ll = minimum(df16.lny) - 1.0)
+β_tob_lny = tobit_lny_res.β
+σ_tob_lny = tobit_lny_res.σ
+# `var(e.lny)` in Stata is the biased ML variance — divides by N, not N - 1.
+N = tobit_lny_res.n
+var_mle = σ_tob_lny^2
+var_unbiased = var_mle * N / (N - 1)
+Printf.@printf("\nThreshold (lower bound)  ll = %.4f\n", tobit_lny_res.ll_bound)
+Printf.@printf("Mean (_cons)               = %.6f\n", β_tob_lny[end])
+Printf.@printf("σ̂ (MLE)                    = %.6f\n", σ_tob_lny)
+Printf.@printf("var(e.lny)  (= σ̂²)         = %.6f\n", var_mle)
+```
+
+```{julia}
+#=
+* OLS, not tobit
+regress lny $xlist, noheader
+=#
+
+# Stata's pasted output is again intercept-only (`$xlist` undefined). For an
+# intercept-only regression β̂ = mean(lny), SE = std(lny)/√N, t = β̂ / SE.
+let
+    y = collect(skipmissing(df16.lny))
+    n = length(y)
+    μ̂ = Statistics.mean(y)
+    σ̂ = Statistics.std(y)            # sample std (N-1 denom)
+    se = σ̂ / sqrt(n)
+    t  = μ̂ / se
+    crit = quantile(TDist(n - 1), 0.975)
+    lo  = μ̂ - crit * se
+    hi  = μ̂ + crit * se
+    println("-"^78)
+    Printf.@printf("%12s | Coefficient  Std. err.      t    P>|t|     [95%% conf. interval]\n",
+                   "lny")
+    println("-"^13, "+", "-"^64)
+    p_val = 2 * (1 - cdf(TDist(n - 1), abs(t)))
+    Printf.@printf("%12s | %10.6f  %9.7f  %6.2f   %.3f    %8.6f   %8.6f\n",
+                   "_cons", μ̂, se, t, p_val, lo, hi)
+    println("-"^78)
+end;
+```
+
+### 16.4.4 Two-limit tobit
+
+```{julia}
+#=
+* Now do two-limit tobit
+scalar upper = log(10000)
+display upper
+tobit lny $xlist, ll ul(9.2103404)
+=#
+
+# `stata_tobit` supports both lower and upper censoring bounds. As above the
+# pasted Stata output is intercept-only with Stata's `Left-censored = 0`
+# quirk (obs at the lower limit treated as uncensored). We mimic that by
+# fitting intercept-only with only the upper bound active — `ll = nothing`
+# skips left-censoring, `ul = log(10000)` right-clips the obs at ambexp ≥ 10000.
+upper = log(10000)
+@printf("upper = log(10000) = %.7f\n", upper)
+tobit_2lim_res = stata_tobit(df16, :lny, Symbol[];
+    ll = nothing, ul = upper);
+```
+
+### 16.4.5 Model diagnostics
+
+### 16.4.6 Tests of normality and homoskedasticity
+
+#### Generalized residuals
+
+```{julia}
+#=
+* Mills' ratio
+quietly tobit lny $xlist, ll
+predict xb, xb                            // xb is estimate of x'b
+matrix btobit = e(b)
+scalar sigma = btobit[1,e(df_m)+2]        // sigma is estimate of sigma
+generate threshold = (gamma-xb)/sigma     // gamma: lower censoring point
+generate lambda = normalden(threshold)/normal(threshold)
+
+* Generalized residuals (gres1..gres4). gres1, gres2 have mean zero by the
+* first-order conditions; gres3, gres4 have mean zero if correctly specified.
+quietly generate uifdyeq1 = (lny - xb)/sigma if dy == 1
+quietly generate double gres1 = uifdyeq1
+quietly replace gres1 = -lambda if dy == 0
+summarize gres1
+=#
+
+# Tobit generalized-residual `gres1` (Gourieroux et al. 1987). With `$xlist`
+# undefined in Stata, the underlying tobit is intercept-only — reuse
+# `tobit_lny_res` from §16.4.3.
+#
+# Subtle: Stata's `scalar sigma = btobit[1,e(df_m)+2]` reads the
+# second-from-last entry of e(b), which in newer Stata is `var(e.lny)` — the
+# *variance* — not σ̂. So `threshold = (gamma-xb)/sigma` actually uses σ̂², and
+# `gres1` for positives is `(lny − xb) / σ̂²`. We follow the same substitution.
+xb          = tobit_lny_res.X * tobit_lny_res.β
+σ_lny       = tobit_lny_res.σ
+sigma_buggy = σ_lny^2                              # what Stata reads
+threshold   = (γ_amb .- xb) ./ sigma_buggy
+λ_tobit     = [pdf(Normal(), z) / cdf(Normal(), z) for z in threshold]
+gres1       = [df16.dy[i] == 1 ? (df16.lny[i] - xb[i]) / sigma_buggy :
+                                 -λ_tobit[i]
+               for i in 1:nrow(df16)]
+df16.gres1 = gres1
+stata_summarize(df16, [:gres1]);
+```
+
+```{julia}
+#=
+* Second- to fourth-sample moments
+quietly generate double gres2 = uifdyeq1^2 - 1
+quietly replace gres2 = -threshold*lambda if dy == 0
+quietly generate double gres3 = uifdyeq1^3
+replace gres3 = -(2 + threshold^2)*lambda if dy == 0
+quietly generate double gres4 = uifdyeq1^4 - 3
+quietly replace gres4 = -(3*threshold + threshold^3)*lambda if dy == 0
+=#
+
+# Higher-order generalized residuals (Gourieroux et al.). `sigma` follows the
+# buggy textbook substitution from the previous chunk (= σ̂², not σ̂).
+uifdyeq1 = (df16.lny .- xb) ./ sigma_buggy
+df16.gres2 = [df16.dy[i] == 1 ? uifdyeq1[i]^2 - 1 :
+                                -threshold[i] * λ_tobit[i]
+              for i in 1:nrow(df16)]
+df16.gres3 = [df16.dy[i] == 1 ? uifdyeq1[i]^3 :
+                                -(2 + threshold[i]^2) * λ_tobit[i]
+              for i in 1:nrow(df16)]
+df16.gres4 = [df16.dy[i] == 1 ? uifdyeq1[i]^4 - 3 :
+                                -(3 * threshold[i] + threshold[i]^3) * λ_tobit[i]
+              for i in 1:nrow(df16)];
+```
+
+#### Test of normality
+
+```{julia}
+#=
+* Generate the scores to use in the LM test
+global xlist age female educ blhisp totchr ins
+capture drop score*
+foreach var in $xlist {
+   generate score`var' = gres1*`var'
+}
+global scores score* gres1 gres2
+summarize $scores gres3 gres4 threshold lambda
+=#
+
+# Build score_<var> = gres1·<var> for each xlist regressor. Also stash
+# `threshold` and `λ_tobit` as df16 columns for `stata_summarize`.
+xlist = [:age, :female, :educ, :blhisp, :totchr, :ins]
+for v in xlist
+    df16[!, Symbol("score_$v")] = df16.gres1 .* Float64.(_rawval.(df16[!, v]))
+end
+df16.threshold = threshold
+df16.lambda    = λ_tobit
+
+scores_vars = [:score_age, :score_female, :score_educ,
+               :score_blhisp, :score_totchr, :score_ins,
+               :gres1, :gres2]
+stata_summarize(df16,
+    [scores_vars; :gres3; :gres4; :threshold; :lambda]);
+```
+
+```{julia}
+#=
+* Test of normality in tobit regression
+* NR^2 from the uncentered regression has chi-squared distribution
+capture drop one
+generate one = 1
+quietly regress one gres3 gres4 $scores, noconstant
+display "N R^2 = " e(N)*e(r2) " with p-value = " chi2tail(2,e(N)*e(r2))
+=#
+
+# LM test of normality (Pagan-Vella / Newey style): regress a vector of ones
+# on (gres3, gres4, score_*, gres1, gres2) with NO constant. The score
+# components are mean-zero by the tobit FOC, so the uncentered R² reflects
+# what gres3 and gres4 add. N·R² ~ χ²(2) under H0: normality.
+let
+    N_h = DataFrames.nrow(df16)
+    one = ones(N_h)
+    X = hcat(df16.gres3, df16.gres4,
+             df16.score_age, df16.score_female, df16.score_educ,
+             df16.score_blhisp, df16.score_totchr, df16.score_ins,
+             df16.gres1, df16.gres2)
+    β = X \ one
+    yhat = X * β
+    RSS = sum((one .- yhat).^2)
+    TSS_uncentered = sum(one.^2)     # = N
+    R2_uncentered  = 1 - RSS / TSS_uncentered
+    LM = N_h * R2_uncentered
+    p  = 1 - cdf(Chisq(2), LM)
+    Printf.@printf("N R^2 = %.6f  with p-value = %.6g\n", LM, p)
+end;
+```
+
+#### Test of homoskedasticity
+
+```{julia}
+#=
+* Test of homoskedasticity in tobit regression
+global xlist age female educ blhisp totchr ins
+capture drop score2*
+foreach var in $xlist {
+   generate score2`var' = gres2*`var'
+}
+global scores2 score* score2* gres1 gres2
+quietly regress one gres3 gres4 $scores2, noconstant
+display "N R^2 = " e(N)*e(r2) " with p-value = " chi2tail(2,e(N)*e(r2))
+=#
+
+# LM test of homoskedasticity — adds `score2_<var> = gres2·<var>` (the
+# σ-equation gradient pieces) on top of the score_<var> block. `gres3` and
+# `gres4` remain the test directions; N·R² ~ χ²(2) under H0: homoskedastic.
+xlist = [:age, :female, :educ, :blhisp, :totchr, :ins]
+for v in xlist
+    df16[!, Symbol("score2_$v")] = df16.gres2 .* Float64.(_rawval.(df16[!, v]))
+end
+let
+    N_h = DataFrames.nrow(df16)
+    one = ones(N_h)
+    X = hcat(df16.gres3, df16.gres4,
+             df16.score_age, df16.score_female, df16.score_educ,
+             df16.score_blhisp, df16.score_totchr, df16.score_ins,
+             df16.score2_age, df16.score2_female, df16.score2_educ,
+             df16.score2_blhisp, df16.score2_totchr, df16.score2_ins,
+             df16.gres1, df16.gres2)
+    β   = X \ one
+    yhat = X * β
+    RSS = sum((one .- yhat).^2)
+    R2_uncentered = 1 - RSS / N_h
+    LM = N_h * R2_uncentered
+    p  = 1 - cdf(Chisq(2), LM)
+    Printf.@printf("N R^2 = %.6f  with p-value = %.6g\n", LM, p)
+end;
+```
+
+```{julia}
+#=
+// Following not included in book
+* tobcm command is deprecated - use margins to compute marginal effects after tobit
+* For our example lny is left-censored at 0- but 0 is a noncensored observation
+tobit lny $xlist, ll(0)
+margins, dydx(*) predict(ystar(0,.)) atmeans
+=#
+
+# Refit tobit on `lny` with explicit left-censoring at 0, then compute the
+# at-mean marginal effects on `ystar(0, .) = max(0, y)` (censored expectation).
+tobit_lny_ll0 = stata_tobit(df16, :lny,
+    [:age, :female, :educ, :blhisp, :totchr, :ins]; ll = 0.0)
+stata_margins_tobit(tobit_lny_ll0; predict = :e_uncond, at = :mean);
+```
+
+### 16.4.7 Next step?
+
+## 16.5 Two-part model in logs
+
+### 16.5.1 Model structure
+
+### 16.5.2 Part 1 specification
+
+```{julia}
+#=
+* Part 1 of the two-part model
+probit dy $xlist, nolog
+scalar llprobit = e(ll)
+=#
+
+# Part 1: probit on the 0/1 indicator `dy = 1{ambexp > 0}`. `stata_probit`
+# takes a StatsModels `@formula` and prints the Stata-style table. Stash the
+# log-likelihood as `llprobit` for the two-part sum-of-LLs check.
+probit_part1 = stata_probit(df16,
+    @formula(dy ~ age + female + educ + blhisp + totchr + ins))
+llprobit = probit_part1.ll
+Printf.@printf("llprobit = %.6f\n", llprobit);
+```
+
+### 16.5.3 Part 2 of the two-part model
+
+```{julia}
+#=
+* Part 2 of the two-part model
+regress lny $xlist if dy==1
+scalar lllognormal = e(ll)
+predict rlambexp, residuals
+=#
+
+# Part 2: OLS of `lny` on `$xlist` restricted to the dy == 1 subsample.
+# `stata_ols_fit` fits once via FixedEffectModels, prints the Stata table,
+# and returns residuals + OLS log-likelihood (Stata's `e(ll)`).
+df16_pos  = DataFrames.filter(:dy => ==(1), df16)
+ols_part2 = stata_ols_fit(df16_pos, :lny,
+    [:age, :female, :educ, :blhisp, :totchr, :ins])
+df16_pos.rlambexp = ols_part2.residuals
+lllognormal       = ols_part2.ll
+Printf.@printf("lllognormal = %.6f   (n = %d, σ̂² = %.6f)\n",
+               lllognormal, ols_part2.n, ols_part2.σ̂²)
+
+# Stata's `predict rlambexp, residuals` writes residuals for ALL rows (using
+# the fitted β on the imputed-zero `lny` values for dy==0 obs), so downstream
+# `sktest rlambexp` reads the full-sample residual vector.
+df16.rlambexp = Float64.(df16.lny) .-
+                FixedEffectModels.predict(ols_part2.model, df16);
+```
+
+```{julia}
+#=
+* Create two-part model log likelihood
+scalar lltwopart = llprobit + lllognormal  //two-part model log likelihood
+display "lltwopart = " lltwopart
+=#
+
+# Two-part log-likelihood: sum of Part-1 probit LL and Part-2 lognormal/OLS
+# LL, valid because the joint density factorises as f_dy(dy)·f_lny|dy=1.
+lltwopart = llprobit + lllognormal
+Printf.@printf("lltwopart = %.6f\n", lltwopart);
+```
+
+```{julia}
+#=
+* hettest and sktest commands
+quietly regress lny $xlist if dy==1
+hettest
+sktest rlambexp
+=#
+
+# `estat_hettest` — Breusch-Pagan / Cook-Weisberg test against the fitted
+# values on the estimation sample (dy == 1). Fit the regression quietly
+# (via FixedEffectModels.reg, no printed table) and pass the model.
+xs16   = [:age, :female, :educ, :blhisp, :totchr, :ins]
+m_hty  = FixedEffectModels.reg(df16_pos, term(:lny) ~ sum(term.(xs16)))
+estat_hettest(m_hty, df16_pos)
+
+# `stata_sktest` on the full-sample residual vector (Stata's `predict` writes
+# residuals for all rows, including the imputed-zero dy == 0 obs).
+stata_sktest(df16, :rlambexp);
+```
+
+## 16.6 Selection model
+
+### 16.6.1 Model structure and assumptions
+
+### 16.6.2 ML estimation
+
+### 16.6.3 Estimation without exclusion restrictions
+
+```{julia}
+#=
+* Heckman MLE without exclusion restrictions
+heckman lny $xlist, select(dy = $xlist) nolog
+=#
+
+# `stata_heckman` — full-information ML for the sample-selection model. With
+# no exclusion restriction the outcome and selection equations share the same
+# regressor list. Fits jointly by L-BFGS + ForwardDiff (σ = exp(lnσ), ρ =
+# tanh(athrho) reparametrisations), OIM SEs from an FD Hessian with a
+# delta-method back to (σ, ρ), and prints Stata's two-equation block plus σ̂,
+# ρ̂, λ̂.
+heckman_res = stata_heckman(df16,
+    @formula(lny ~ age + female + educ + blhisp + totchr + ins),
+    @formula(dy  ~ age + female + educ + blhisp + totchr + ins));
+```
+
+### 16.6.4 Two-step estimation
+
+```{julia}
+#=
+* Heckman 2-step without exclusion restrictions
+heckman lny $xlist, select(dy = $xlist) twostep
+=#
+
+# `stata_heckman_twostep` — Heckman (1979) two-step estimator: probit
+# selection on dy, plug the inverse Mills ratio into the outcome equation,
+# OLS on the positives, then Greene's first-stage-corrected variance for the
+# outcome block. Without exclusion restrictions the equations share the same
+# regressors, identified solely off the non-linearity in the Mills term.
+heckman_twostep_res = stata_heckman_twostep(df16,
+    @formula(lny ~ age + female + educ + blhisp + totchr + ins),
+    @formula(dy  ~ age + female + educ + blhisp + totchr + ins));
+```
+
+### 16.6.5 Estimation with exclusion restrictions
+
+```{julia}
+#=
+* Heckman MLE with exclusion restriction
+heckman lny $xlist, select(dy = $xlist income) nolog
+=#
+
+# Same `stata_heckman`, now with `income` added to the selection equation
+# only — the textbook exclusion restriction. ρ is then identified off the
+# linear-projection difference rather than only off the Mills-ratio
+# non-linearity.
+heckman_excl_res = stata_heckman(df16,
+    @formula(lny ~ age + female + educ + blhisp + totchr + ins),
+    @formula(dy  ~ age + female + educ + blhisp + totchr + ins + income));
+```
+
+```{julia}
+#=
+// Following not included in book
+* Heckman 2-step with exclusion restrictions
+heckman lny $xlist, select(dy = $xlist income) twostep
+=#
+
+# Same `stata_heckman_twostep`, now with `income` added to the selection
+# equation only. The exclusion restriction lets ρ be identified off the
+# linear-projection difference, so SEs on β̂ and λ̂ are typically tighter.
+heckman_twostep_excl = stata_heckman_twostep(df16,
+    @formula(lny ~ age + female + educ + blhisp + totchr + ins),
+    @formula(dy  ~ age + female + educ + blhisp + totchr + ins + income));
+```
+
+## 16.7 Prediction from log-outcome models
+
+### 16.7.1 Predictions from tobit
+
+```{julia}
+#=
+// The following yields results that differ from book - book is in error
+* Prediction from tobit on lny
+generate yhat = exp(xb+0.5*sigma^2)*(1-normal((gamma-xb-sigma^2)/sigma))
+generate ytrunchat = yhat / (1 - normal(threshold)) if dy==1
+summarize y yhat
+summarize y yhat ytrunchat if dy==1
+=#
+
+# Predict ambexp level from the tobit on lny via `stata_predict_tobit_lognormal`:
+#   ŷ_i        = exp(xβ̂ + ½σ²) · (1 − Φ((γ − xβ̂ − σ²)/σ))
+#   ŷ_trunc_i  = ŷ_i / (1 − Φ((γ − xβ̂)/σ))           for dy_i = 1
+#
+# Two Stata-session quirks reproduced here:
+#   1. `$xlist` undefined ⇒ intercept-only tobit ⇒ `xb` = α̂ ≈ 5.519 (the
+#      unconditional mean of lny), so `yhat` is the same for every row.
+#   2. Newer Stata stores `var(e.lny) = σ̂²` where the textbook reads σ, so
+#      the yhat formula substitutes σ ← σ̂² and the correction explodes — the
+#      "book is in error" pathology.
+sigma_buggy_lny = tobit_lny_res.σ^2          # what Stata's `sigma` carries
+df16.yhat       = stata_predict_tobit_lognormal(tobit_lny_res;
+                                                σ = sigma_buggy_lny,
+                                                γ = γ_amb)
+ytrunchat_all   = stata_predict_tobit_lognormal(tobit_lny_res;
+                                                σ = sigma_buggy_lny,
+                                                γ = γ_amb,
+                                                truncated = true)
+df16.ytrunchat  = [df16.dy[i] == 1 ? ytrunchat_all[i] : missing
+                   for i in 1:DataFrames.nrow(df16)]
+
+# `summarize y yhat` over the FULL sample.
+stata_summarize(df16, [:y, :yhat])
+
+# `summarize y yhat ytrunchat if dy==1` over the positive subsample.
+stata_summarize(DataFrames.filter(:dy => ==(1), df16),
+                [:y, :yhat, :ytrunchat]);
+```
+
+```{julia}
+#=
+// Following not included in book
+* THE FOLLOWING SHOWS THAT THE POOR PREDICTIONS ARE DUE TO HIGH SIGMA
+scalar sigma = 1
+generate yhatsigma1 = exp(xb+0.5*sigma^2)*(1-normal((gamma-xb-sigma^2)/sigma))
+scalar sigma = 2
+generate yhatsigma2 = exp(xb+0.5*sigma^2)*(1-normal((gamma-xb-sigma^2)/sigma))
+summarize yhat*
+summarize yhat* if dy==1
+=#
+
+# σ-sensitivity check. The main `yhat` exploded because Stata's `sigma`
+# scalar held σ̂² (≈ 7.39). Plugging σ = 1 and σ = 2 (closer to the
+# OLS-on-positives RMSE ≈ 1.27) tames the correction — showing how much of
+# the pathology is driven by σ alone, with intercept-only `xb` ≈ 5.519 fixed.
+df16.yhatsigma1 = stata_predict_tobit_lognormal(tobit_lny_res; σ = 1.0, γ = γ_amb)
+df16.yhatsigma2 = stata_predict_tobit_lognormal(tobit_lny_res; σ = 2.0, γ = γ_amb)
+
+# `summarize yhat*` over the full sample.
+stata_summarize(df16, [:yhat, :yhatsigma1, :yhatsigma2])
+
+# `summarize yhat* if dy==1` over the positive subsample.
+stata_summarize(DataFrames.filter(:dy => ==(1), df16),
+                [:yhat, :yhatsigma1, :yhatsigma2]);
+```
+
+### 16.7.2 Predictions from two-part model
+
+```{julia}
+#=
+* Two-part model predictions
+quietly probit dy $xlist
+predict dyhat, pr
+quietly regress lny $xlist if dy==1
+predict xbpos, xb
+generate  yhatpos = exp(xbpos+0.5*e(rmse)^2)
+
+* Unconditional prediction from two-part model
+generate yhat2step = dyhat*yhatpos
+summarize yhat2step y
+summarize yhatpos y if dy==1
+=#
+
+# Two-part model predictions reusing the fits from §16.5.2 / §16.5.3.
+#   dyhat_i    = Φ(x_i' γ̂)               (probit, Part 1)
+#   xbpos_i   = x_i' β̂_part2              (OLS on positives, applied to all rows)
+#   yhatpos_i = exp(xbpos_i + ½·rmse²)    (lognormal mean; rmse² = σ̂²_unbiased)
+#   yhat2step = dyhat · yhatpos           (unconditional two-part)
+df16.dyhat   = GLM.predict(probit_part1.model, df16)
+df16.xbpos   = FixedEffectModels.predict(ols_part2.model, df16)
+
+# Stata's `e(rmse) = sqrt(RSS / (N − k))` — the *unbiased* root-MSE.
+let k = length(ols_part2.β)
+    rmse² = sum(ols_part2.residuals.^2) / (ols_part2.n - k)
+    df16.yhatpos    = exp.(df16.xbpos .+ 0.5 .* rmse²)
+end
+df16.yhat2step = df16.dyhat .* df16.yhatpos
+
+# `summarize yhat2step y` over the full sample.
+stata_summarize(df16, [:yhat2step, :y])
+
+# `summarize yhatpos y if dy==1` over the positive subsample.
+stata_summarize(DataFrames.filter(:dy => ==(1), df16),
+                [:yhatpos, :y]);
+```
+
+### 16.7.3 Predictions from selection model
+
+```{julia}
+#=
+* Heckman model predictions
+quietly heckman lny $xlist, select(dy = $xlist)
+predict probpos, psel
+predict x1b1, xbsel
+predict x2b2, xb
+scalar sig2sq = e(sigma)^2
+scalar sig12sq = e(rho)*e(sigma)^2
+display "sigma1sq = 1" " sigma12sq = " sig12sq " sigma2sq = " sig2sq
+generate yhatheck = exp(x2b2 + 0.5*(sig2sq))*(1 - normal(-x1b1-sig12sq))
+generate yhatposheck = yhatheck/probpos
+summarize yhatheck y probpos dy
+summarize yhatposheck probpos dy y if dy==1
+=#
+
+# `stata_predict_heckman` — Stata `heckman` post-estimation predictions from
+# the no-exclusion fit `heckman_res` (§16.6.3):
+#   probpos = Φ(z'γ̂), x1b1 = z'γ̂, x2b2 = x'β̂
+#   sig2sq  = σ̂², sig12sq = ρ̂σ̂² (textbook scalar; σ² is the textbook bug)
+#   yhatheck    = exp(x2b2 + ½σ²)·(1 − Φ(−x1b1 − sig12sq))
+#   yhatposheck = yhatheck / probpos
+heck_pred = stata_predict_heckman(df16, heckman_res)
+df16.probpos     = heck_pred.probpos
+df16.x1b1        = heck_pred.x1b1
+df16.x2b2        = heck_pred.x2b2
+df16.yhatheck    = heck_pred.yhatheck
+df16.yhatposheck = heck_pred.yhatposheck
+
+Printf.@printf("sigma1sq = 1 sigma12sq = %.7g sigma2sq = %.7g\n",
+               heck_pred.sig12sq, heck_pred.sig2sq)
+
+# `summarize yhatheck y probpos dy` over the full sample.
+stata_summarize(df16, [:yhatheck, :y, :probpos, :dy])
+
+# `summarize yhatposheck probpos dy y if dy==1` over the positives.
+stata_summarize(DataFrames.filter(:dy => ==(1), df16),
+                [:yhatposheck, :probpos, :dy, :y]);
+```
+
+```{julia}
+#=
+// Following not included in book
+* THE FOLLOWING SHOWS THAT THE POOR PREDICTIONS ARE DUE TO HIGH SIGMA
+scalar sigma = 1
+generate yhatsigma1 = exp(xb+0.5*sigma^2)*(1-normal((gamma-xb-sigma^2)/sigma))
+scalar sigma = 2
+generate yhatsigma2 = exp(xb+0.5*sigma^2)*(1-normal((gamma-xb-sigma^2)/sigma))
+summarize yhat*
+summarize yhat* if dy==1
+=#
+
+# Final wrap-up `summarize yhat*` — all §16.7 predictions together. The three
+# constant columns (yhat, yhatsigma1, yhatsigma2) share the intercept-only
+# tobit `xb` ≈ 5.519; only `yhat` carries the buggy `sigma = σ̂²` substitution.
+df16.yhatsigma1 = stata_predict_tobit_lognormal(tobit_lny_res; σ = 1.0, γ = γ_amb)
+df16.yhatsigma2 = stata_predict_tobit_lognormal(tobit_lny_res; σ = 2.0, γ = γ_amb)
+
+# `summarize yhat*` — Stata expands `yhat*` in variable-creation order.
+yhat_cols = [:yhat, :yhatpos, :yhat2step,
+             :yhatheck, :yhatposheck,
+             :yhatsigma1, :yhatsigma2]
+stata_summarize(df16, yhat_cols)
+
+# `summarize yhat* if dy==1` — same set on the positive subsample.
+stata_summarize(DataFrames.filter(:dy => ==(1), df16), yhat_cols);
+```
+
+## 16.8 Stata resources
+
+## 16.9 Exercises

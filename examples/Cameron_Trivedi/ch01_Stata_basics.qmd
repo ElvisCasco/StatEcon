@@ -1,0 +1,649 @@
+---
+title: "Cameron & Trivedi — Ch. 1: Stata basics (via StatEcon)"
+Authors:
+- Colin Cameron
+- Pravin Trivedi
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+This chapter is a translation of *Microeconometrics Using Stata* Chapter 1,
+routed through the [`StatEcon`](https://github.com/ElvisCasco/StatEcon) package
+so every Stata command shown in the book (`summarize`, `regress`, `ereturn list`, …)
+maps to a single Julia call with Stata-style printed output.
+
+[Microeconometrics with R](https://ycroissant.github.io/micsr_book/)
+· [UCLA Stata modules](https://stats.oarc.ucla.edu/stata/modules/)
+· [Github](https://github.com/thousandoaks?tab=repositories)
+
+# Julia setup
+
+Only the packages actually used in this chapter are loaded. The `stata_*`
+commands come from `StatEcon`; everything else is standard Julia stack.
+
+```{julia}
+using StatEcon                # stata_summarize, stata_regress, ereturn_list, ...
+const DATA = first(filter(d -> isdir(d) && (isfile(joinpath(d, "auto.dta")) || isdir(joinpath(d, "musr"))), ["../../data", "data", raw"C:/EC/GitHub/StatEcon/data"]))
+using DataFrames
+using ReadStatTables
+using FixedEffectModels
+using StatsModels
+using Statistics
+using StatsBase               # for a few direct StatsBase calls in §1.6.2
+using CategoricalArrays
+using Random
+
+# Tiny helper: unwrap a ReadStatTables.LabeledValue -> its underlying number.
+# `stata_summarize` handles this internally, but a couple of hand-written
+# cells below still touch labelled columns directly (factor variables,
+# rep78/foreign interactions).
+_rawval(x) = hasproperty(x, :value) ? x.value : x
+```
+
+# 1 Stata basics
+
+## 1.1 Interactive use
+
+## 1.2 Documentation
+
+### 1.2.1 Stata manuals
+
+### 1.2.2 Additional Stata resources
+
+### 1.2.3 The help command
+
+### 1.2.4 The search, findit, and hsearch commands
+
+## 1.3 Command syntax and operators
+
+### 1.3.1 Basic command syntax
+
+### 1.3.2 Example: The summarize command
+
+```{julia}
+#=
+sysuse auto.dta
+summarize
+=#
+auto = DataFrame(ReadStatTables.readstat("$(DATA)/auto.dta"))
+typeof(auto)
+```
+
+```{julia}
+#=
+summarize mpg price weight , separator(2)
+=#
+# summarize   (all numeric vars, like `summarize` with no varlist)
+stata_summarize(auto)
+```
+
+```{julia}
+# summarize mpg price weight
+stata_summarize(auto, [:mpg, :price, :weight])
+```
+
+```{julia}
+# summarize price, detail
+stata_summarize(auto, :price; detail = true)
+```
+
+### 1.3.3 Example: The regress command
+
+```{julia}
+#=
+regress mpg price weight
+=#
+model1 = stata_regress(auto, y = :mpg, x = [:price, :weight])
+```
+
+```{julia}
+#=
+by foreign: regress mpg price weight if weight < 4000, vce(robust)
+=#
+for g in groupby(filter(r -> r.weight < 4000, auto), :foreign)
+    println("\nforeign = $(first(g.foreign))")
+    stata_regress(DataFrame(g), y = :mpg, x = [:price, :weight]; vce = :robust)
+end
+```
+
+```{julia}
+#=
+quietly regress mpg price weight
+=#
+# `quietly` -> just discard the printed table.
+model_quiet = redirect_stdout(devnull) do
+    stata_regress(auto, y = :mpg, x = [:price, :weight])
+end;
+```
+
+```{julia}
+#=
+* Factor variable for rep78 - base category is omitted
+clear
+sysuse auto
+summarize i.rep78
+=#
+auto.rep78_cat = CategoricalArrays.categorical(auto.rep78)
+println("Summary of rep78 indicator levels:")
+println(combine(groupby(auto, :rep78_cat), nrow => :count))
+```
+
+```{julia}
+#=
+* Factor variable for rep78 - no category is omitted
+summarize ibn.rep78
+=#
+# summarize i.rep78  -- expand rep78 into 0/1 dummies (drop missings), summarize each
+vals = [_rawval(v) for v in skipmissing(auto.rep78)]
+levs = sort(unique(vals))
+dummies = DataFrame((Symbol("$(Int(l)).rep78") => Int.(vals .== l) for l in levs)...)
+stata_summarize(dummies)
+```
+
+```{julia}
+#=
+* Factor variables for interaction between two categorical variables
+summarize i.rep78#i.foreign, allbaselevels
+=#
+println("Counts for each level of rep78:")
+for lev in sort(unique(auto.rep78))
+    n = sum(auto.rep78 .== lev)
+    println("  rep78 == $lev : N = $n, Mean = $(round(mean(auto.rep78 .== lev), digits=4))")
+end
+```
+
+```{julia}
+#=
+* Factor variables for interaction between categorical and continuous variables
+summarize i.rep78#c.weight
+=#
+# summarize i.rep78#i.foreign, allbaselevels  -> one dummy per (rep78, foreign) cell
+sub       = dropmissing(auto[:, [:rep78, :foreign]])
+rep78v    = [_rawval(v) for v in sub.rep78]
+foreignv  = [_rawval(v) for v in sub.foreign]
+rlevs, flevs = sort(unique(rep78v)), sort(unique(foreignv))
+dummies = DataFrame((Symbol("$(Int(r)).rep78#$(Int(f)).foreign") =>
+                     Int.((rep78v .== r) .& (foreignv .== f))
+                     for r in rlevs, f in flevs)...)
+stata_summarize(dummies)
+```
+
+```{julia}
+#=
+* Factor variables for interaction between two continuous variables
+regress mpg price c.weight c.weight#c.weight, noheader
+=#
+# summarize i.rep78#c.weight
+# For each level r of rep78: weight when rep78==r, else 0 (drop rows where rep78 is missing)
+sub    = dropmissing(auto[:, [:rep78, :weight]])
+rep78v = [_rawval(v) for v in sub.rep78]
+wv     = Float64.(sub.weight)
+rlevs  = sort(unique(rep78v))
+inter  = DataFrame((Symbol("$(Int(r)).rep78#c.weight") =>
+                    ifelse.(rep78v .== r, wv, 0.0) for r in rlevs)...)
+stata_summarize(inter)
+```
+
+```{julia}
+# regress mpg price c.weight c.weight#c.weight
+# NOTE: auto.dta stores weight as Int16 — squaring Int16 overflows silently,
+# so cast to Float64 first to match Stata's numeric precision.
+auto.weight_sq = Float64.(auto.weight) .^ 2
+stata_regress(auto, y = :mpg, x = [:price, :weight, :weight_sq])
+```
+
+### 1.3.4 Abbreviations, case sensitivity, and wildcards
+
+```{julia}
+#=
+summarize t*
+=#
+# summarize t*     (variables starting with t)
+stata_summarize(auto, "t*")
+```
+
+```{julia}
+# summarize *e     (variables ending with e)
+stata_summarize(auto, "*e")
+```
+
+```{julia}
+# summarize price-weight    (range of columns, by column order)
+stata_summarize(auto, "price-weight")
+```
+
+### 1.3.5 Arithmetic, relational, and logical operators
+
+```{julia}
+#=
+display -2*(9/ (8+2-7))^2
+=#
+println(-2 * (9 / (8 + 2 - 7))^2)
+```
+
+```{julia}
+#=
+display 2/0
+=#
+println(2 / 0)      # Julia returns Inf
+```
+
+```{julia}
+#=
+regress mpg price weight if weight <= 4000 & price <= 10000
+=#
+sub = filter(r -> r.weight <= 4000 && r.price <= 10000, auto)
+stata_regress(sub, y = :mpg, x = [:price, :weight])
+```
+
+### 1.3.6 Error messages
+
+```{julia}
+#=
+*regress mpg notthere
+=#
+# regress mpg notthere  -- would produce an error, so left commented out.
+# try
+#     stata_regress(auto, y = :mpg, x = [:notthere])
+# catch e
+#     println("Error: ", e)
+# end
+```
+
+## 1.4 Do-files and log files
+
+### 1.4.1 Writing a do-file
+
+### 1.4.2 Running do-files
+
+```{julia}
+#=
+*do example.do
+=#
+# do example.do  -- In Julia, use include("example.jl")
+# include("example.jl")
+```
+
+### 1.4.3 Log files
+
+```{julia}
+#=
+*log using example.txt, text replace
+=#
+# log using example.txt -- In Julia, redirect output to a file:
+# open("example.txt", "w") do io
+#     redirect_stdout(io) do
+#         # commands here
+#     end
+# end
+```
+
+### 1.4.4 A three-step process
+
+1. Create or change the do-file.
+2. Execute the do-file in Stata.
+3. Read the resulting log with a text editor.
+
+### 1.4.5 Comments and long lines
+
+```{julia}
+#=
+* Demonstrate use of comments
+* This program reads in system file auto.dta and gets summary statistics
+clear                                     // Remove data from memory
+sysuse ///
+auto.dta
+summarize
+=#
+# In Julia, comments use #
+auto = DataFrame(ReadStatTables.readstat("$(DATA)/auto.dta"))
+DataFrames.describe(auto)
+```
+
+```{julia}
+auto = DataFrame(ReadStatTables.readstat("$(DATA)/auto.dta"))
+stata_summarize(auto)
+```
+
+### 1.4.6 Different implementations of Stata
+
+```{julia}
+#=
+*set matsize 300
+=#
+# set matsize 300  -- not needed in Julia (no matrix size limit)
+```
+
+## 1.5 Scalars and matrices
+
+### 1.5.1 Scalars
+
+```{julia}
+#=
+scalar a = 2*3
+scalar b = "2 times 3 = "
+display b a
+=#
+a = 2 * 3
+b = "2 times 3 = "
+println(b, a)
+```
+
+### 1.5.2 Matrices
+
+```{julia}
+#=
+matrix define A = ( 1,2,3 \ 4,5,6 )
+matrix list A
+=#
+A = [1 2 3; 4 5 6]
+display(A)
+```
+
+```{julia}
+#=
+scalar c = A[2,3]
+display c
+=#
+c = A[2, 3]
+println(c)
+```
+
+## 1.6 Using results from Stata commands
+
+### 1.6.1 Using results from the r-class command summarize
+
+```{julia}
+#=
+summarize mpg
+=#
+stata_summarize(auto, :mpg)
+```
+
+```{julia}
+#=
+return list
+=#
+# Stata's `return list` after `summarize mpg`: the r() scalars.
+r_mean = mean(auto.mpg)
+r_sd   = std(auto.mpg)
+r_min  = minimum(auto.mpg)
+r_max  = maximum(auto.mpg)
+r_N    = length(auto.mpg)
+r_sum  = sum(auto.mpg)
+println("r(N)    = ", r_N)
+println("r(mean) = ", r_mean)
+println("r(Var)  = ", r_sd^2)
+println("r(sd)   = ", r_sd)
+println("r(min)  = ", r_min)
+println("r(max)  = ", r_max)
+println("r(sum)  = ", r_sum)
+```
+
+```{julia}
+#=
+quietly summarize mpg
+scalar range = r(max) - r(min)
+display "Sample range = " range
+=#
+range_mpg = r_max - r_min
+println("Sample range = ", range_mpg)
+```
+
+```{julia}
+# Save a result as a scalar
+mpgmean = r_mean
+```
+
+### 1.6.2 Using results from the e-class command regress
+
+```{julia}
+#=
+regress mpg price weight
+=#
+model_ols = stata_regress(auto, y = :mpg, x = [:price, :weight])
+```
+
+```{julia}
+#=
+ereturn list
+=#
+ereturn_list(model_ols);
+```
+
+```{julia}
+#=
+* Use of e() where scalar
+scalar r2 = e(mss) / ( e(mss) + e(rss) )
+display "r-squared = " r2
+=#
+println("Number of obs = ", StatsBase.nobs(model_ols))
+println("R-squared     = ", round(StatsBase.r2(model_ols), digits = 6))
+println("Adj R-squared = ", round(StatsBase.adjr2(model_ols), digits = 6))
+println("Coefficients  = ", StatsBase.coef(model_ols))
+println("Std errors    = ", StatsBase.stderror(model_ols))
+```
+
+```{julia}
+# r-squared computed manually from e(rss) and total SS
+tss       = sum((auto.mpg .- mean(auto.mpg)).^2)
+rss       = StatsBase.deviance(model_ols)
+r2_manual = 1 - rss / tss
+println("r-squared = ", round(r2_manual, digits = 6))
+```
+
+```{julia}
+#=
+* Use of e() where matrix
+matrix best  = e(b)
+scalar bprice = best[1,1]
+matrix Vest  = e(V)
+scalar Vprice = Vest[1,1]
+scalar tprice = bprice/sqrt(Vprice)
+display "t statistic for H0: b_price = 0 is " tprice
+=#
+best   = StatsBase.coef(model_ols)
+bprice = best[2]                       # coefficient on price
+Vest   = StatsBase.vcov(model_ols)
+Vprice = Vest[2, 2]
+tprice = bprice / sqrt(Vprice)
+println("t statistic for H0: b_price = 0 is ", round(tprice, digits = 4))
+```
+
+## 1.7 Global and local macros
+
+### 1.7.1 Global macros
+
+```{julia}
+#=
+global xlist price weight
+regress mpg $xlist , noheader
+=#
+xlist   = [:price, :weight]
+model_g = stata_regress(auto, y = :mpg, x = xlist)
+```
+
+### 1.7.2 Local macros
+
+```{julia}
+#=
+local xlist "price weight"
+regress mpg `xlist', noheader
+=#
+xlist   = [:price, :weight]
+model_l = stata_regress(auto, y = :mpg, x = xlist)
+```
+
+```{julia}
+#=
+local y mpg
+regress `y' `xlist', noheader
+=#
+y       = :mpg
+model_l2 = stata_regress(auto, y = y, x = xlist)
+```
+
+```{julia}
+#=
+local z = 2+2
+display `z'
+=#
+z = 2 + 2
+println(z)
+```
+
+### 1.7.3 Scalar or macro?
+
+```{julia}
+#=
+global b 3
+local  c 4
+scalar d = 5
+clear
+display $b _skip(3) `c'
+=#
+# In Julia, variables persist until they go out of scope.
+b = 3
+c = 4
+d = 5
+println(b, "   ", c)
+```
+
+```{julia}
+#=
+display d
+=#
+println(d)
+```
+
+```{julia}
+#=
+clear all
+display $b _skip(3) `c'
+=#
+# After `clear all` in Stata, only globals/locals survive; in Julia everything
+# in the current scope survives, so this just prints the same values.
+println(b, "   ", c)
+```
+
+```{julia}
+#=
+* display the scalar
+* display d
+=#
+# println(d) still works in Julia (no `clear` semantics).
+```
+
+## 1.8 Looping commands
+
+```{julia}
+#=
+* Make artificial dataset of 100 observations on 4 uniform variables
+clear
+set obs 100
+set seed 10101
+generate x1var = runiform()
+generate x2var = runiform()
+generate x3var = runiform()
+generate x4var = runiform()
+=#
+Random.seed!(10101)
+df_loop = DataFrame(
+    x1var = rand(100),
+    x2var = rand(100),
+    x3var = rand(100),
+    x4var = rand(100),
+)
+```
+
+```{julia}
+#=
+generate sum = x1var + x2var + x3var + x4var
+summarize sum
+=#
+df_loop.sum_var = df_loop.x1var .+ df_loop.x2var .+ df_loop.x3var .+ df_loop.x4var
+stata_summarize(df_loop, :sum_var)
+```
+
+### 1.8.1 The foreach loop
+
+```{julia}
+#=
+quietly replace sum = 0
+foreach var of varlist x1var x2var x3var x4var {
+    quietly replace sum = sum + `var'
+}
+summarize sum
+=#
+df_loop.sum_var .= 0.0
+for var in [:x1var, :x2var, :x3var, :x4var]
+    df_loop.sum_var .+= df_loop[!, var]
+end
+stata_summarize(df_loop, :sum_var)
+```
+
+### 1.8.2 The forvalues loop
+
+```{julia}
+#=
+quietly replace sum = 0
+forvalues i = 1/4 {
+    quietly replace sum = sum + x`i'var
+}
+summarize sum
+=#
+df_loop.sum_var .= 0.0
+for i in 1:4
+    df_loop.sum_var .+= df_loop[!, Symbol("x$(i)var")]
+end
+stata_summarize(df_loop, :sum_var)
+```
+
+```{julia}
+#=
+// Not in the book
+quietly replace sum = 0
+foreach i of numlist 1 2 3 4 {
+    quietly replace sum = sum + x`i'var
+}
+summarize sum
+=#
+df_loop.sum_var .= 0.0
+for i in [1, 2, 3, 4]
+    df_loop.sum_var .+= df_loop[!, Symbol("x$(i)var")]
+end
+stata_summarize(df_loop, :sum_var)
+```
+
+### 1.8.3 The while loop
+
+```{julia}
+#=
+quietly replace sum = 0
+local i 1
+while `i' <= 4 {
+    quietly replace sum = sum + x`i'var
+    local i = `i' + 1
+}
+summarize sum
+=#
+df_loop.sum_var .= 0.0
+i = 1
+while i <= 4
+    df_loop.sum_var .+= df_loop[!, Symbol("x$(i)var")]
+    global i += 1
+end
+stata_summarize(df_loop, :sum_var)
+```

@@ -1,0 +1,946 @@
+---
+title: "Microeconometrics Using Stata"
+Authors:
+- Colin Cameron
+- Pravin Trivedi
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+[Microeconometrics with R](https://ycroissant.github.io/micsr_book/)
+
+[UCLA](https://stats.oarc.ucla.edu/stata/modules/)
+
+[Github](https://github.com/thousandoaks?tab=repositories)
+
+# Julia setup
+
+
+```{julia}
+using StatEcon
+const DATA = first(filter(d -> isdir(d) && (isfile(joinpath(d, "auto.dta")) || isdir(joinpath(d, "musr"))), ["../../data", "data", raw"C:/EC/GitHub/StatEcon/data"]))
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+
+# -- ReadStatTables labelled-value unwrap (mirrors StatEcon internals)
+_rawval(x) = hasproperty(x, :value) ? x.value : x
+
+# -- Pedagogical helper: quantile regression by direct check-loss minimization
+# with Optim + NelderMead. Used in the by-hand demonstrations throughout the
+# chapter. For the polished Stata-style workflow use `stata_qreg` / `stata_sqreg`
+# / `stata_qcount` from StatEcon.
+function quantreg(X, y, τ)
+    n, p = size(X)
+    function loss(β)
+        r = y .- X * β
+        sum(@. ifelse(r >= 0, τ * r, (τ - 1) * r))
+    end
+    β0 = (X' * X) \ (X' * y)                           # OLS warm start
+    res = Optim.optimize(loss, β0, Optim.NelderMead(),
+                         Optim.Options(iterations = 5000, x_abstol = 1e-8))
+    return Optim.minimizer(res)
+end
+```
+
+
+# 7 Quantile regression
+
+## 7.1 Introduction
+
+## 7.2 QR
+
+### 7.2.1 Conditional quantiles
+
+### 7.2.2 Computation of QR estimates and standard errors
+
+### 7.2.3 The qreg, bsqreg, and sqreg commands
+
+## 7.3 QR for medical expenditures data
+
+Quantile regression in Julia: there is no single canonical package; we implement the check-loss minimization manually with `Optim.jl`.
+
+
+### 7.3.1 Data summary
+
+```{julia}
+#=
+clear all
+set scheme s1mono  /* Graphics scheme */
+
+********** 7.3: QUANTILE REGRESSION FOR MEDICAL EXPENDITURES DATA
+
+* Read in log of medical expenditures data and summarize
+use musr/mus03data.dta, clear
+drop if ltotexp == . 
+summarize ltotexp suppins totchr age female white, separator(0)
+=#
+# Read log medical expenditures data
+df7 = DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus03data.dta"))
+df7 = dropmissing(df7, :ltotexp)
+DataFrames.describe(df7[:, [:ltotexp, :suppins, :totchr, :age, :female, :white]])
+```
+
+```{julia}
+#=
+* Quantile plot for ltotexp (qplot replacement)
+* Create percentiles and plot
+preserve
+sort ltotexp
+generate pctile = _n / _N
+twoway line ltotexp pctile, ///
+    ytitle("quantiles of ln(totexp) if totexp>0") xtitle("Fraction of the data") ///
+    scale(1.5) name(qplot_ltotexp, replace)
+quietly graph export musr/mus07fig1_qltotexp.eps, replace 
+restore
+=#
+stata_summarize(df7, [:ltotexp, :suppins, :totchr, :age, :female, :white])
+```
+
+```{julia}
+# Quantile plot for ltotexp
+fig7 = Figure(size = (700, 400))
+ax = Axis(fig7[1, 1], xlabel = "Fraction of data",
+          ylabel = "quantiles of ln(totexp) | totexp > 0")
+sorted_y = sort(df7.ltotexp)
+pct = (1:length(sorted_y)) ./ length(sorted_y)
+lines!(ax, pct, sorted_y)
+fig7
+```
+
+### 7.3.2 QR estimates
+
+```{julia}
+#=
+* Basic quantile regression for q = 0.5
+qreg ltotexp suppins totchr age female white
+=#
+# Median (q = 0.5) regression
+df7c = dropmissing(df7[:, [:ltotexp, :suppins, :totchr, :age, :female, :white]])
+y    = df7c.ltotexp
+X    = hcat(ones(nrow(df7c)),
+            df7c.suppins, df7c.totchr, df7c.age, df7c.female, df7c.white)
+βqr  = quantreg(X, y, 0.5)
+xnms = ["_cons", "suppins", "totchr", "age", "female", "white"]
+println("\n— Quantile regression at τ = 0.5 —")
+for i in eachindex(βqr)
+    @printf("%-10s %12.6f\n", xnms[i], βqr[i])
+end
+```
+
+```{julia}
+#* Basic quantile regression for q = 0.5
+#qreg ltotexp suppins totchr age female white
+stata_qreg(df7, :ltotexp,
+           [:suppins, :totchr, :age, :female, :white]; τ = 0.5);
+```
+
+### 7.3.3 Interpretation of conditional quantile coefficients
+
+### 7.3.4 Retransformation
+
+```{julia}
+#=
+* Obtain multiplier to convert QR coeffs in logs to AME in levels. 
+quietly predict xb
+generate expxb = exp(xb)
+quietly summarize expxb
+display "Multiplier of QR in logs coeffs to get AME in levels = " r(mean)
+=#
+# Multiplier exp(x'β) — converts QR coefficients in logs to AME in levels
+xb     = X * βqr
+expxb  = exp.(xb)
+@printf("Mean of exp(x'β) = %.4f (multiplier)\n", mean(expxb))
+```
+
+### 7.3.5 Comparison of estimates at different quantiles
+
+```{julia}
+#=
+* Compare (1) OLS; (2-4) coeffs across quantiles; (5) bootstrap SEs
+quietly regress ltotexp suppins totchr age female white   
+estimates store OLS
+quietly qreg ltotexp suppins totchr age female white, quantile(.25)  
+estimates store QR_25
+quietly qreg ltotexp suppins totchr age female white, quantile(.50) 
+estimates store QR_50
+quietly qreg ltotexp suppins totchr age female white, quantile(.75) 
+estimates store QR_75
+set seed 10101 
+quietly bsqreg ltotexp suppins totchr age female white, quant(.50) reps(400) 
+estimates store BSQR_50 
+estimates table OLS QR_25 QR_50 QR_75 BSQR_50, b(%7.3f) se 
+=#
+# OLS + QR at τ = 0.25, 0.50, 0.75
+ols7  = (X' * X) \ (X' * y)
+qr25  = quantreg(X, y, 0.25)
+qr50  = quantreg(X, y, 0.50)
+qr75  = quantreg(X, y, 0.75)
+
+println("\n— OLS vs Quantile Regressions —")
+@printf("%-10s %10s %10s %10s %10s\n",
+        "Variable", "OLS", "QR_25", "QR_50", "QR_75")
+for i in eachindex(ols7)
+    @printf("%-10s %10.4f %10.4f %10.4f %10.4f\n",
+            xnms[i], ols7[i], qr25[i], qr50[i], qr75[i])
+end
+```
+
+```{julia}
+# Bootstrap SEs at τ = 0.5  (B = 200)
+Random.seed!(10101)
+B = 200
+β_boot = Matrix{Float64}(undef, B, length(βqr))
+for b in 1:B
+    idx = sample(1:length(y), length(y); replace = true)
+    β_boot[b, :] = quantreg(X[idx, :], y[idx], 0.5)
+end
+se_boot = vec(std(β_boot, dims = 1))
+println("\n— Bootstrap SE for τ = 0.5 —")
+for i in eachindex(βqr)
+    @printf("%-10s coef=%10.4f  bs.se=%10.4f\n",
+            xnms[i], βqr[i], se_boot[i])
+end
+```
+
+```{julia}
+#=
+* Compare (1) OLS; (2-4) coeffs across quantiles; (5) bootstrap SEs
+quietly regress ltotexp suppins totchr age female white
+estimates store OLS
+quietly qreg ltotexp suppins totchr age female white, quantile(.25)
+estimates store QR_25
+quietly qreg ltotexp suppins totchr age female white, quantile(.50)
+estimates store QR_50
+quietly qreg ltotexp suppins totchr age female white, quantile(.75)
+estimates store QR_75
+set seed 10101
+quietly bsqreg ltotexp suppins totchr age female white, quant(.50) reps(400)
+estimates store BSQR_50
+estimates table OLS QR_25 QR_50 QR_75 BSQR_50, b(%7.3f) se
+=#
+_wrap_fem(m) = (;
+    β         = StatsBase.coef(m),
+    V         = StatsBase.vcov(m),
+    se        = sqrt.(max.(LinearAlgebra.diag(StatsBase.vcov(m)), 0.0)),
+    coefnames = replace.(string.(StatsBase.coefnames(m)), "(Intercept)" => "_cons"),
+    n         = Int(StatsBase.nobs(m)),
+)
+
+xqr = [:suppins, :totchr, :age, :female, :white]
+
+OLS   = _wrap_fem(FixedEffectModels.reg(df7,
+            @formula(ltotexp ~ suppins + totchr + age + female + white)))
+QR_25 = stata_qreg(df7, :ltotexp, xqr; τ=0.25, quiet=true)
+QR_50 = stata_qreg(df7, :ltotexp, xqr; τ=0.50, quiet=true)
+QR_75 = stata_qreg(df7, :ltotexp, xqr; τ=0.75, quiet=true)
+
+# Bootstrap SEs for τ = 0.5 (re-fit qreg on 400 paired resamples).
+Random.seed!(10101)
+B      = 400
+nb     = DataFrames.nrow(df7)
+k_q    = length(QR_50.β)
+β_boot = Matrix{Float64}(undef, B, k_q)
+for b in 1:B
+    idx = StatsBase.sample(1:nb, nb; replace=true)
+    fit_b = stata_qreg(df7[idx, :], :ltotexp, xqr; τ=0.5, quiet=true)
+    β_boot[b, :] = fit_b.β
+end
+BSQR_50 = (; β         = QR_50.β,
+             V         = zeros(k_q, k_q),
+             se        = vec(Statistics.std(β_boot; dims=1)),
+             coefnames = QR_50.coefnames,
+             n         = QR_50.n)
+
+stata_estimates_table(
+    [OLS, QR_25, QR_50, QR_75, BSQR_50],
+    ["OLS", "QR_25", "QR_50", "QR_75", "BSQR_50"];
+    vars_order = ["suppins", "totchr", "age", "female", "white", "_cons"],
+    fmt        = "%7.3f")
+```
+
+### 7.3.6 Heteroskedasticity test
+
+```{julia}
+# Breusch–Pagan in linear model
+m_ols7 = FixedEffectModels.reg(df7c, @formula(ltotexp ~ suppins + totchr + age + female + white))
+yhat7  = FixedEffectModels.predict(m_ols7, df7c)
+df7c.uhat2 = (df7c.ltotexp .- yhat7).^2
+m_bp7 = FixedEffectModels.reg(df7c, @formula(uhat2 ~ suppins + totchr + age + female + white))
+LM = nrow(df7c) * StatsBase.r2(m_bp7)
+@printf("BP LM(5) = %.3f, p = %.4f\n", LM, 1 - cdf(Chisq(5), LM))
+```
+
+### 7.3.7 Hypothesis tests
+
+```{julia}
+#=
+* Simultaneous QR regression with several values of q
+set seed 10101
+sqreg ltotexp suppins totchr age female white, q(.25 .50 .75) reps(400)
+=#
+# Simultaneous QR with bootstrap-jointly: estimate at three τ then test β_τ equality
+Random.seed!(10101)
+β25_b = Matrix{Float64}(undef, B, length(βqr))
+β50_b = Matrix{Float64}(undef, B, length(βqr))
+β75_b = Matrix{Float64}(undef, B, length(βqr))
+for b in 1:B
+    idx = sample(1:length(y), length(y); replace = true)
+    β25_b[b, :] = quantreg(X[idx, :], y[idx], 0.25)
+    β50_b[b, :] = quantreg(X[idx, :], y[idx], 0.50)
+    β75_b[b, :] = quantreg(X[idx, :], y[idx], 0.75)
+end
+i_supp = findfirst(==("suppins"), xnms)
+diff = β25_b[:, i_supp] .- β75_b[:, i_supp]
+@printf("β25(suppins) - β75(suppins): mean=%.4f  bs.se=%.4f  z=%.2f\n",
+        mean(diff), std(diff), mean(diff) / std(diff))
+```
+
+
+```{julia}
+#=
+* Test of coefficient equality across QR with different q
+test [q25=q50=q75]: suppins
+=#
+#* Simultaneous QR regression with several values of q
+#set seed 10101
+#sqreg ltotexp suppins totchr age female white, q(.25 .50 .75) reps(400)
+sq_fit = stata_sqreg(df7, :ltotexp,
+                     [:suppins, :totchr, :age, :female, :white];
+                     τs=[0.25, 0.50, 0.75], reps=400, seed=10101);
+```
+
+```{julia}
+#* Test of coefficient equality across QR with different q
+#test [q25=q50=q75]: suppins
+stata_test_sureg(sq_fit,
+           ["[q25]suppins = [q50]suppins",
+            "[q25]suppins = [q75]suppins"];
+           df_F = sq_fit.df_resid);
+```
+
+### 7.3.8 Graphical display of coefficients over quantiles
+
+```{julia}
+#=
+* Plots of each regressor's coefficients as quantile q varies
+*ssc install grqreg
+quietly bsqreg ltotexp suppins totchr age female white, quantile(.50) reps(400)
+label variable suppins "=1 if supp ins"
+label variable totchr "# of chronic condns"
+grqreg, cons ci ols olsci scale(1.1)
+quietly graph export musr/mus07fig3_qrcoeff.eps, replace
+=#
+# grqreg, cons ci ols olsci  — Plot ALL regressors' coefficients as quantile τ varies
+τs = collect(0.10:0.05:0.90)
+nτ = length(τs)
+p = size(X, 2)
+βmat   = Matrix{Float64}(undef, nτ, p)   # coefficients at each τ
+lo_mat = similar(βmat); up_mat = similar(βmat)
+ols_coef = (X'X) \ (X'y)
+
+Random.seed!(10101)
+for (j, τ) in enumerate(τs)
+    β = quantreg(X, y, τ)
+    βmat[j, :] = β
+    bs = Matrix{Float64}(undef, 50, p)
+    for b in 1:50
+        idx = sample(1:length(y), length(y); replace = true)
+        bs[b, :] = quantreg(X[idx, :], y[idx], τ)
+    end
+    se = vec(std(bs, dims = 1))
+    lo_mat[j, :] = β .- 1.96 .* se
+    up_mat[j, :] = β .+ 1.96 .* se
+end
+
+# Panel plot: one subplot per regressor (including constant)
+fig_grq = Figure(size = (900, 700))
+ncols = 3; nrows = ceil(Int, p / ncols)
+for k in 1:p
+    r, c = divrem(k - 1, ncols)
+    ax = Axis(fig_grq[r+1, c+1], xlabel = "quantile τ", ylabel = xnms[k])
+    band!(ax, τs, lo_mat[:, k], up_mat[:, k], color = (:blue, 0.15))
+    lines!(ax, τs, βmat[:, k], color = :blue, linewidth = 2)
+    hlines!(ax, [ols_coef[k]], color = :red, linestyle = :dash, linewidth = 1)
+end
+fig_grq
+```
+
+## 7.4 QR for generated heteroskedastic data
+
+### 7.4.1 Simulated dataset
+
+```{julia}
+#=
+clear all
+* Generated dataset with heteroskedastic errors
+set seed 10101
+set obs 10000
+generate x2 = rchi2(1)
+generate x3 = 5*rnormal(0)
+generate e = 5*rnormal(0)
+generate u = (.1+0.5*x2)*e
+generate y = 1 + 1*x2 + 1*x3 + u
+summarize e x2 x3 u y
+* Save generated variables to CSV for reuse (Julia, R, etc.)
+export delimited y x2 x3 e u using "musr/7_4_1.csv", replace
+=#
+# Heteroskedastic DGP — load the dataset exported by Stata
+# (Stata seed 10101 differs from Julia's RNG, so reading the CSV ensures
+#  identical values across both notebooks.)
+df7g = CSV.read("$(DATA)/musr/7_4_1.csv", DataFrame)
+for c in names(df7g)
+    df7g[!, c] = Float64.(df7g[!, c])
+end
+N7  = DataFrames.nrow(df7g)
+x2g = df7g.x2
+x3g = df7g.x3
+eg  = df7g.e
+ug  = df7g.u
+yg  = df7g.y
+DataFrames.describe(df7g)
+```
+
+```{julia}
+#=
+* Quantile regression for q = .25, .50 and .75
+sqreg y x2 x3, quantile(.25 .50 .75)
+=#
+stata_summarize(df7g, [:e, :x2, :x3, :u, :y])
+```
+
+```{julia}
+#=
+* Predicted coefficient of x2 for q = .25, .50 and .75
+quietly summarize e, detail
+display "Predicted coefficient of x2 for q = .25, .50, and .75" ///
+ _newline 1+.5*r(p25) _newline 1+.5*r(p50) _newline 1+.5*r(p75)
+=#
+# QR at τ = .25, .50, .75
+Xg = hcat(ones(N7), df7g.x2, df7g.x3)
+yg_v = df7g.y
+qr25g = quantreg(Xg, yg_v, 0.25)
+qr50g = quantreg(Xg, yg_v, 0.50)
+qr75g = quantreg(Xg, yg_v, 0.75)
+println("\n— QR at three quantiles —")
+@printf("%-7s %10s %10s %10s\n", "Var", "QR25", "QR50", "QR75")
+for (i, n) in enumerate(("_cons","x2","x3"))
+    @printf("%-7s %10.4f %10.4f %10.4f\n", n, qr25g[i], qr50g[i], qr75g[i])
+end
+```
+
+
+```{julia}
+#=
+* Generate scatterplots and qplot (replaced with custom quantile plot)
+quietly kdensity u, scale(1.25) lwidth(medthick) saving(musr/density, replace)
+* Create quantile plot for y
+preserve
+sort y
+generate pctile_y = _n / _N
+quietly twoway line y pctile_y, ///
+    ytitle("y") xtitle("Fraction of the data") ///
+    scale(1.4) lwidth(medthick) name(quanty, replace)
+quietly graph save musr/quanty.gph, replace
+restore
+quietly scatter y x2, scale(1.25) saving(musr/yversusx2, replace)
+quietly scatter y x3, scale(1.25) saving(musr/yversusx3, replace)
+graph combine musr/density.gph musr/quanty.gph musr/yversusx2.gph musr/yversusx3.gph
+quietly graph export musr/mus07hetexample.eps, replace
+=#
+#* Quantile regression for q = .25, .50 and .75
+#sqreg y x2 x3, quantile(.25 .50 .75)
+sq_fit7g = stata_sqreg(df7g, :y, [:x2, :x3];
+                       τs=[0.25, 0.50, 0.75], reps=400, seed=10101);
+```
+
+```{julia}
+#=
+* Quantile regression for q = .25, .50 and .75
+sqreg y x2 x3, quantile(.25 .50 .75)
+=#
+# Theoretical β_x2(τ) = 1 + 0.5·F_e^{-1}(τ) where e ~ N(0, 25)
+σ_e = 5
+for τ in (0.25, 0.50, 0.75)
+    @printf("Predicted β_x2(τ=%.2f) = %.4f\n",
+            τ, 1 + 0.5 * quantile(Normal(0, σ_e), τ))
+end
+```
+
+
+```{julia}
+#=
+* Predicted coefficient of x2 for q = .25, .50 and .75
+quietly summarize e, detail
+display "Predicted coefficient of x2 for q = .25, .50, and .75" ///
+ _newline 1+.5*r(p25) _newline 1+.5*r(p50) _newline 1+.5*r(p75)
+=#
+#* Predicted coefficient of x2 for q = .25, .50 and .75
+#quietly summarize e, detail
+#display "Predicted coefficient of x2 for q = .25, .50, and .75" ///
+# _newline 1+.5*r(p25) _newline 1+.5*r(p50) #_newline 1+.5*r(p75)
+println("Predicted coefficient of x2 for q = .25, .50, and .75")
+for τ in (0.25, 0.50, 0.75)
+    Printf.@printf("%.7g\n", 1 + 0.5 * Statistics.quantile(eg, τ))
+end
+```
+
+
+```{julia}
+# Density of u, quantile plot of y, and scatterplots
+fig7g = Figure(size = (900, 700))
+ax1 = Axis(fig7g[1, 1], title = "Density of u")
+kdu = kde(df7g.y .- 1 .- df7g.x2 .- df7g.x3)
+lines!(ax1, kdu.x, kdu.density)
+
+ax2 = Axis(fig7g[1, 2], title = "Quantiles of y", xlabel = "fraction")
+ys = sort(df7g.y); pct = (1:length(ys)) ./ length(ys)
+lines!(ax2, pct, ys)
+
+ax3 = Axis(fig7g[2, 1], title = "y vs x2", xlabel = "x2", ylabel = "y")
+scatter!(ax3, df7g.x2, df7g.y, markersize = 1)
+
+ax4 = Axis(fig7g[2, 2], title = "y vs x3", xlabel = "x3", ylabel = "y")
+scatter!(ax4, df7g.x3, df7g.y, markersize = 1)
+fig7g
+```
+
+```{julia}
+#* Quantile regression for q = .25, .50 and .75
+#sqreg y x2 x3, quantile(.25 .50 .75)
+sq_fit7g = stata_sqreg(df7g, :y, [:x2, :x3];
+                       τs=[0.25, 0.50, 0.75], reps=400, seed=10101);
+```
+
+### 7.4.2 QR estimates
+
+```{julia}
+#=
+* OLS and quantile regression for q = .25, .5, .75
+quietly regress y x2 x3
+estimates store OLS
+quietly regress y x2 x3, vce(robust)
+estimates store OLS_Rob
+quietly bsqreg y x2 x3, quantile(.25) reps(400)
+estimates store QR_25
+quietly bsqreg y x2 x3, quantile(.50) reps(400)
+estimates store QR_50
+quietly bsqreg y x2 x3, quantile(.75) reps(400)
+estimates store QR_75
+estimates table OLS OLS_Rob QR_25 QR_50 QR_75, b(%7.3f) se 
+=#
+# OLS and QR comparison on the simulated data
+ols_g  = (Xg' * Xg) \ (Xg' * yg_v)
+println("\n— OLS vs QR (simulated heteroskedastic data) —")
+@printf("%-7s %10s %10s %10s %10s\n", "Var", "OLS", "QR25", "QR50", "QR75")
+for (i, n) in enumerate(("_cons","x2","x3"))
+    @printf("%-7s %10.4f %10.4f %10.4f %10.4f\n",
+            n, ols_g[i], qr25g[i], qr50g[i], qr75g[i])
+end
+```
+
+```{julia}
+#=
+* Test equality of coeff of x2 for q=.25 and q=.75
+set seed 10101
+quietly sqreg y x2 x3, q(.25 .75) reps(400)
+test [q25]x2 = [q75]x2
+test [q25]x3 = [q75]x3
+=#
+#=
+* OLS and quantile regression for q = .25, .5, .75
+quietly regress y x2 x3
+estimates store OLS
+quietly regress y x2 x3, vce(robust)
+estimates store OLS_Rob
+quietly bsqreg y x2 x3, quantile(.25) reps(400)
+estimates store QR_25
+quietly bsqreg y x2 x3, quantile(.50) reps(400)
+estimates store QR_50
+quietly bsqreg y x2 x3, quantile(.75) reps(400)
+estimates store QR_75
+estimates table OLS OLS_Rob QR_25 QR_50 QR_75, b(%7.3f) se
+=#
+_wrap_fem(m) = (;
+    β         = StatsBase.coef(m),
+    V         = StatsBase.vcov(m),
+    se        = sqrt.(max.(LinearAlgebra.diag(StatsBase.vcov(m)), 0.0)),
+    coefnames = replace.(string.(StatsBase.coefnames(m)), "(Intercept)" => "_cons"),
+    n         = Int(StatsBase.nobs(m)),
+)
+
+OLS     = _wrap_fem(FixedEffectModels.reg(df7g, @formula(y ~ x2 + x3)))
+OLS_Rob = _wrap_fem(FixedEffectModels.reg(df7g, @formula(y ~ x2 + x3),
+                                          Vcov.robust()))
+
+# Bootstrap bsqreg: separate resampling stream for each quantile.
+function _bsqreg(df, y, xs, τ; reps::Int=400, seed::Int=10101)
+    Random.seed!(seed)
+    fit0 = stata_qreg(df, y, xs; τ=τ, quiet=true)
+    nobs = DataFrames.nrow(df)
+    β_b  = Matrix{Float64}(undef, reps, length(fit0.β))
+    for b in 1:reps
+        idx = StatsBase.sample(1:nobs, nobs; replace=true)
+        β_b[b, :] = stata_qreg(df[idx, :], y, xs; τ=τ, quiet=true).β
+    end
+    return (; β = fit0.β,
+              se = vec(Statistics.std(β_b; dims=1)),
+              coefnames = fit0.coefnames,
+              n = fit0.n)
+end
+
+QR_25 = _bsqreg(df7g, :y, [:x2, :x3], 0.25; reps=400, seed=10101)
+QR_50 = _bsqreg(df7g, :y, [:x2, :x3], 0.50; reps=400, seed=10101)
+QR_75 = _bsqreg(df7g, :y, [:x2, :x3], 0.75; reps=400, seed=10101)
+
+stata_estimates_table(
+    [OLS, OLS_Rob, QR_25, QR_50, QR_75],
+    ["OLS", "OLS_Rob", "QR_25", "QR_50", "QR_75"];
+    vars_order = ["x2", "x3", "_cons"],
+    fmt        = "%7.3f")
+```
+
+```{julia}
+# Bootstrap test that β_x2(τ=0.25) ≠ β_x2(τ=0.75)
+Random.seed!(10101)
+diffs = Float64[]
+for _ in 1:200
+    idx = sample(1:N7, N7; replace = true)
+    b25 = quantreg(Xg[idx, :], yg_v[idx], 0.25)
+    b75 = quantreg(Xg[idx, :], yg_v[idx], 0.75)
+    push!(diffs, b25[2] - b75[2])
+end
+@printf("β_x2(.25) - β_x2(.75) = %.4f  bs.se = %.4f  z = %.2f\n",
+        mean(diffs), std(diffs), mean(diffs) / std(diffs))
+```
+
+```{julia}
+#* Test equality of coeff of x2 for q=.25 and q=.75
+#set seed 10101
+#quietly sqreg y x2 x3, q(.25 .75) reps(400)
+#test [q25]x2 = [q75]x2
+#test [q25]x3 = [q75]x3
+sq_25_75 = stata_sqreg(df7g, :y, [:x2, :x3];
+                       τs=[0.25, 0.75], reps=400, seed=10101);
+
+# test [q25]x2 = [q75]x2
+stata_test_sureg(sq_25_75, ["[q25]x2 = [q75]x2"]; df_F = sq_25_75.df_resid);
+
+# test [q25]x3 = [q75]x3
+stata_test_sureg(sq_25_75, ["[q25]x3 = [q75]x3"]; df_F = sq_25_75.df_resid);
+```
+
+## 7.5 QR for count data
+
+### 7.5.1 Quantile count regression
+
+### 7.5.2 The qcount approach
+
+### 7.5.3 Summary of doctor visits data
+
+```{julia}
+#=
+* Read in doctor visits count data and summarize
+use musr/mus07qrcnt.dta, clear
+summarize docvis private totchr age female white, separator(0)
+=#
+df7q = DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus07qrcnt.dta"))
+for c in names(df7q)
+    if eltype(df7q[!, c]) <: Union{Missing, Float32} || eltype(df7q[!, c]) === Float32
+        df7q[!, c] = convert.(Union{Missing, Float64}, df7q[!, c])
+    end
+end
+DataFrames.describe(df7q[:, [:docvis, :private, :totchr, :age, :female, :white]])
+```
+
+```{julia}
+#=
+* Generate jittered values and compare quantile plots
+set seed 10101
+generate docvisu = docvis + runiform()
+* Create quantile plot for docvis
+preserve
+keep if docvis < 40
+sort docvis
+generate pctile_dv = _n / _N
+quietly twoway line docvis pctile_dv, ///
+    ytitle("docvis") xtitle("Fraction of the data") ///
+    scale(1.25) lwidth(medthick) name(docvisqplot, replace)
+quietly graph save musr/docvisqplot.gph, replace
+restore
+* Create quantile plot for docvisu
+preserve
+keep if docvis < 40
+sort docvisu
+generate pctile_dvu = _n / _N
+quietly twoway line docvisu pctile_dvu, ///
+    ytitle("docvisu") xtitle("Fraction of the data") ///
+    scale(1.25) lwidth(medthick) name(docvisuqplot, replace)
+quietly graph save musr/docvisuqplot.gph, replace
+restore
+graph combine musr/docvisqplot.gph musr/docvisuqplot.gph
+graph export musr/mus07dvqplot2.eps, replace
+=#
+stata_summarize(df7q, [:docvis, :private, :totchr, :age, :female, :white])
+```
+
+```{julia}
+#=
+* Marginal effects from conventional negative binomial model
+quietly nbreg docvis i.private totchr age i.female i.white, vce(robust)
+margins, dydx(*) atmean noatlegend
+=#
+# Quantile plots: docvis vs jittered docvisu
+Random.seed!(10101)
+df7q.docvisu = df7q.docvis .+ rand(nrow(df7q))
+sub = filter(r -> r.docvis < 40, df7q)
+
+fig7q = Figure(size = (900, 400))
+ax1 = Axis(fig7q[1, 1], xlabel = "fraction of data", ylabel = "docvis")
+ys = sort(sub.docvis); pct = (1:length(ys)) ./ length(ys)
+lines!(ax1, pct, ys)
+
+ax2 = Axis(fig7q[1, 2], xlabel = "fraction of data", ylabel = "docvisu (jittered)")
+ys2 = sort(sub.docvisu); pct2 = (1:length(ys2)) ./ length(ys2)
+lines!(ax2, pct2, ys2)
+fig7q
+```
+
+```{julia}
+# Negative binomial model and average marginal effects
+nb7 = negbin(@formula(docvis ~ private + totchr + age + female + white),
+             df7q, LogLink())
+println(nb7)
+
+# AME for Poisson/NB: ∂μ/∂x_j = β_j · μ(x); average over sample
+df7q_clean = dropmissing(df7q, [:docvis, :private, :totchr, :age, :female, :white])
+μhat = GLM.predict(nb7, df7q_clean)
+println("\n— Average marginal effects (NB) —")
+for (name, β) in zip(StatsBase.coefnames(nb7), StatsBase.coef(nb7))
+    name == "(Intercept)" && continue
+    @printf("%-10s %12.6f\n", name, β * mean(μhat))
+end
+```
+
+```{julia}
+#* Marginal effects from conventional negative binomial model
+#quietly nbreg docvis i.private totchr age i.female i.white, vce(robust)
+#margins, dydx(*) atmean noatlegend
+df7m = dropmissing(df7q, [:docvis, :private, :totchr, :age, :female, :white])
+nb7m = GLM.negbin(@formula(docvis ~ private + totchr + age + female + white),
+                  df7m, GLM.LogLink())
+stata_margins_count(nb7m, df7m;
+              binary = [:private, :female, :white],
+              atmean = true);
+```
+
+```{julia}
+#* Marginal effects from conventional negative binomial model
+#quietly nbreg docvis i.private totchr age i.female i.white, vce(robust)
+#margins, dydx(*) atmean noatlegend
+#
+# MEM for NB model: for continuous x_j, dy/dx_j = β_j · μ(x̄);
+# for binary (i.) regressors use the discrete change μ(x=1) − μ(x=0).
+# SEs by the delta method with the nbreg vcov.
+df7m = dropmissing(df7q, [:docvis, :private, :totchr, :age, :female, :white])
+nb7m = GLM.negbin(@formula(docvis ~ private + totchr + age + female + white),
+                  df7m, GLM.LogLink())
+stata_margins_count(nb7m, df7m;
+              binary = [:private, :female, :white],
+              atmean = true);
+```
+
+### 7.5.4 Results from quantile count regression
+
+```{julia}
+# Quantile count regression (Machado–Santos Silva 2005) at τ = 0.50
+# Algorithm: (1) jitter the count y → y* = y + U(0,1)
+#            (2) run standard QR on log(y*) at the desired τ
+#            (3) repeat for R replications, average the coefficients
+#            (4) marginal effects: dy/dx = exp(x'β) · β_j  (for continuous x)
+Random.seed!(10101)
+df7qc = dropmissing(df7q, [:docvis, :private, :totchr, :age, :female, :white])
+yq = Float64.(df7qc.docvis)
+Xq = hcat(ones(nrow(df7qc)), df7qc.private, df7qc.totchr, df7qc.age,
+          df7qc.female, df7qc.white)
+xnms_q = ["_cons", "private", "totchr", "age", "female", "white"]
+nq = length(yq)
+
+function qcount_est(yq, Xq, τ; R = 500, seed = 10101)
+    rng = Random.MersenneTwister(seed)
+    p = size(Xq, 2)
+    β_sum = zeros(p)
+    for r in 1:R
+        ystar = yq .+ rand(rng, nq)
+        ly    = log.(ystar)
+        β_sum .+= quantreg(Xq, ly, τ)
+    end
+    return β_sum ./ R
+end
+
+β_qcr50 = qcount_est(yq, Xq, 0.50; R = 500)
+println("— Quantile count regression at τ = 0.50 —")
+for i in eachindex(β_qcr50)
+    @printf("%-10s %12.6f\n", xnms_q[i], β_qcr50[i])
+end
+```
+
+```{julia}
+#=
+* Quantile count regression
+* Install qcount if not already installed
+capture which qcount
+if _rc != 0 {
+    ssc install qcount
+}
+set seed 10101
+qcount docvis private totchr age female white, q(0.50) rep(500)
+=#
+qc_fit = stata_qcount(df7q, :docvis,
+                      [:private, :totchr, :age, :female, :white];
+                      τ=0.50, reps=500, seed=10101);
+```
+
+
+```{julia}
+# qcount_mfx at τ = 0.50  — marginal effects: ME_j = β_j · exp(x̄'β)
+xbar = vec(mean(Xq, dims = 1))
+expxb = exp(dot(xbar, β_qcr50))
+println("— QCR marginal effects at τ = 0.50 (at sample means) —")
+for i in 2:length(β_qcr50)   # skip constant
+    @printf("%-10s  dy/dx = %12.6f\n", xnms_q[i], β_qcr50[i] * expxb)
+end
+```
+
+```{julia}
+#=
+* Marginal effects after quantile regression for median
+set linesize 81
+qcount_mfx
+=#
+stata_margins_count(qc_fit, df7q;
+              binary = [:private, :female, :white],
+              atmean = true);
+
+```
+
+```{julia}
+# Quantile count regression at τ = 0.75 + marginal effects
+β_qcr75 = qcount_est(yq, Xq, 0.75; R = 500)
+expxb75 = exp(dot(xbar, β_qcr75))
+println("— Quantile count regression at τ = 0.75 —")
+for i in eachindex(β_qcr75)
+    @printf("%-10s %12.6f\n", xnms_q[i], β_qcr75[i])
+end
+println("\n— QCR marginal effects at τ = 0.75 (at sample means) —")
+for i in 2:length(β_qcr75)
+    @printf("%-10s  dy/dx = %12.6f\n", xnms_q[i], β_qcr75[i] * expxb75)
+end
+```
+
+
+```{julia}
+#=
+* Quantile count regression for q = 0.75
+set seed 10101
+quietly qcount docvis private totchr age female white, q(0.75) rep(500)
+qcount_mfx
+=#
+qc_fit75 = stata_qcount(df7q, :docvis,
+                      [:private, :totchr, :age, :female, :white];
+                      τ=0.75, reps=500, seed=10101);
+stata_margins_count(qc_fit75, df7q;
+              binary = [:private, :female, :white],
+              atmean = true);
+```
+
+## 7.6 Stata resources
+
+## 7.7 Exercises
+
+```{julia}
+#=
+* Save coefficients and generate graph for a range of quantiles
+use musr/mus03data.dta, clear
+drop if ltotexp == . 
+capture program drop mus07plot
+program mus07plot
+  postfile myfile percentile b1 upper lower using musr/bsqrcoef1.dta, replace 
+  forvalues tau1=0.10(0.1)0.9 {
+  set seed 10101
+  quietly bsqreg ltotexp suppins age female white totchr, quant(`tau1') reps(400)
+  matrix b = e(b)
+  scalar b1=b[1,1]
+  matrix V = e(V)
+  scalar v1=V[1,1]
+  scalar df=e(df_r) 
+  scalar upper = b1 + invttail(df,.025)*sqrt(v1)
+  scalar lower = b1 - invttail(df,.025)*sqrt(v1)
+  post myfile (`tau1') (b1) (upper) (lower) 
+  matrix drop V b
+  scalar drop b1 v1 upper lower df
+  }
+  postclose myfile
+end
+mus07plot
+program drop mus07plot
+use musr/bsqrcoef1.dta, clear
+twoway connected b1 percentile || line upper percentile||line lower percentile, ///
+  title("Slope Estimates") subtitle("Coefficient of suppins") ///
+  xtitle("Quantile", size(medlarge)) ///
+  ytitle("Slope and confidence bands", size(medlarge)) ///
+  legend(label(1 "Quantile slope coefficient") ///
+  label(2 "Upper 95% bs confidence band")  ///
+  label(3 "Lower 95% bs confidence band"))  
+graph save musr/bsqrcoef1.gph, replace
+=#
+# Save quantile-coefficient series for τ = 0.10, 0.20, ..., 0.90 and plot
+df7p = dropmissing(DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus03data.dta"))[:,
+        [:ltotexp, :suppins, :age, :female, :white, :totchr]])
+yp = df7p.ltotexp
+Xp = hcat(ones(nrow(df7p)),
+          df7p.suppins, df7p.age, df7p.female, df7p.white, df7p.totchr)
+
+τs = 0.10:0.10:0.90
+b1s = Float64[]; ups = Float64[]; los = Float64[]
+Random.seed!(10101)
+for τ in τs
+    β = quantreg(Xp, yp, τ)
+    push!(b1s, β[2])  # suppins
+    bs = Float64[]
+    for _ in 1:50
+        idx = sample(1:length(yp), length(yp); replace = true)
+        push!(bs, quantreg(Xp[idx, :], yp[idx], τ)[2])
+    end
+    se = std(bs)
+    push!(ups, β[2] + 1.96 * se)
+    push!(los, β[2] - 1.96 * se)
+end
+
+fig_qr = Figure(size = (700, 450))
+ax = Axis(fig_qr[1, 1],
+          title = "Slope of suppins across quantiles",
+          xlabel = "Quantile", ylabel = "Coefficient and 95% CI")
+band!(ax, collect(τs), los, ups, color = (:steelblue, 0.3))
+lines!(ax, collect(τs), b1s, linewidth = 2)
+scatter!(ax, collect(τs), b1s)
+fig_qr
+```
