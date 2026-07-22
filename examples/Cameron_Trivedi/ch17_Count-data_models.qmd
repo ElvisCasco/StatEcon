@@ -1,0 +1,2370 @@
+---
+title: "Cameron & Trivedi -- Ch. 17: Count-data models (via StatEcon)"
+Authors:
+- Colin Cameron
+- Pravin Trivedi
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+# Julia setup
+
+```{julia}
+using StatEcon
+const DATA = first(filter(d -> isdir(d) && (isfile(joinpath(d, "auto.dta")) || isdir(joinpath(d, "musr"))), ["../../data", "data", raw"C:/EC/GitHub/StatEcon/data"]))
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+_rawval(x) = hasproperty(x, :value) ? x.value : x
+```
+
+The count-data estimators in this chapter now live in `StatEcon` and are
+called directly below: the canonical models `stata_poisson`, `stata_nbreg`,
+`stata_glm`, `stata_logit` (reused from earlier chapters) and the ch17
+commands `stata_ztnb`, `stata_gnbreg`, `stata_zinb`, `stata_fmm_poisson`,
+`stata_fmm_nbreg`, `stata_estat_lcmean`, `stata_poisson_gmm`,
+`stata_estat_overid_gmm`, `stata_nl_exp`, `stata_boot_cf_poisson`,
+`stata_margins_dydx_ztnb`, and `stata_estimates_stats`, plus the table
+helpers `stata_summarize`, `stata_tabulate`, `stata_correlate`,
+`stata_regress`. The pedagogical plotting / by-hand marginal-effect helpers
+(`_c17_histogram_discrete_stata`, `_c17_histogram_grid_stata`,
+`_c17_margins_dydx_at_binary_stata`, `_c17_margins_dydx_stata`) are kept
+inline below as scaffolding.
+
+```{julia}
+# Pedagogical inline helpers (kept as scaffolding; `_c17_` prefixed).
+# Discrete/grid count histograms, the by-hand delta-method marginal
+# effects, and a dependency-free log-Γ used in the narrative demos.
+
+# Dependency-free log-Γ (Lanczos g=7) for the by-hand count-probability
+# demos (SpecialFunctions is not imported).
+function _c17_loggamma(x::Real)
+    g = 7.0
+    c = (0.99999999999980993, 676.5203681218851, -1259.1392167224028,
+         771.32342877765313, -176.61502916214059, 12.507343278686905,
+         -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7)
+    x < 0.5 && return log(π / sin(π * x)) - _c17_loggamma(1 - x)
+    x -= 1; a = c[1]; t = x + g + 0.5
+    for i in 1:8
+        a += c[i + 1] / (x + i)
+    end
+    return 0.5 * log(2π) + (x + 0.5) * log(t) - t + log(a)
+end
+
+"""
+    _c17_histogram_discrete_stata(x; xlabel, ylabel="freq", size=(600,400),
+                              bins=nothing, title=nothing)
+
+CairoMakie analogue of Stata's `histogram <var>, discrete xtitle("…")`.
+Produces a one-panel `Figure` with integer-valued bins centred on each
+observed count. Pass `bins = lo:1:hi` to override the auto-range
+(useful for keeping multiple subplots on the same x-axis).
+"""
+function _c17_histogram_discrete_stata(x::AbstractVector;
+                                   xlabel::AbstractString,
+                                   ylabel::AbstractString = "freq",
+                                   size::Tuple{Int,Int} = (600, 400),
+                                   bins::Union{Nothing,AbstractRange} = nothing,
+                                   title::Union{Nothing,AbstractString} = nothing)
+    xint = Int.(x)
+    rng  = bins === nothing ?
+           ((minimum(xint) - 0.5):1:(maximum(xint) + 0.5)) : bins
+    fig  = CairoMakie.Figure(; size = size)
+    ax   = title === nothing ?
+           CairoMakie.Axis(fig[1, 1]; xlabel, ylabel) :
+           CairoMakie.Axis(fig[1, 1]; xlabel, ylabel, title)
+    CairoMakie.hist!(ax, xint; bins = rng)
+    return fig
+end
+
+"""
+    _c17_histogram_grid_stata(panels; title="", ncols=2, bins=nothing,
+                         xlabel="x", ylabel="freq", size=(900,700),
+                         common=true, discrete=true, nbins=30)
+
+CairoMakie analogue of Stata's `graph combine g1 g2 …, title(…)
+[xcommon ycommon]`. `panels` is a vector of `(data, paneltitle)`
+pairs; lays them out row-major in an `ncols`-wide grid with a shared
+super-title. `common=true` links the axes across panels (Stata's
+`xcommon ycommon`).
+
+`discrete=true` (default) is for count data: each series is rounded to
+`Int` and a single shared integer-centred `bins` range is used so the
+bars align. `discrete=false` is for continuous series (e.g. fitted
+means `predict, mu`): no rounding, and `nbins` equal-width bins span
+the pooled data range (override with an explicit `bins`).
+"""
+function _c17_histogram_grid_stata(panels::AbstractVector;
+                              title::AbstractString = "",
+                              ncols::Int = 2,
+                              bins::Union{Nothing,AbstractRange} = nothing,
+                              xlabel::AbstractString = "x",
+                              ylabel::AbstractString = "freq",
+                              size::Tuple{Int,Int} = (900, 700),
+                              common::Bool = true,
+                              discrete::Bool = true,
+                              nbins::Int = 30)
+    if discrete
+        series = [Int.(p[1]) for p in panels]
+        rng = bins === nothing ?
+              ((minimum(minimum, series) - 0.5):1:(maximum(maximum, series) + 0.5)) :
+              bins
+    else
+        series = [Float64.(p[1]) for p in panels]
+        if bins === nothing
+            lo = minimum(minimum, series); hi = maximum(maximum, series)
+            rng = range(lo, hi; length = nbins + 1)
+        else
+            rng = bins
+        end
+    end
+    fig  = CairoMakie.Figure(; size = size)
+    isempty(title) ||
+        CairoMakie.Label(fig[0, 1:ncols], title; fontsize = 16,
+                         font = :bold)
+    axs = CairoMakie.Axis[]
+    for (k, (_, ptitle)) in enumerate(panels)
+        row = div(k - 1, ncols) + 1
+        col = mod(k - 1, ncols) + 1
+        ax  = CairoMakie.Axis(fig[row, col]; xlabel, ylabel, title = ptitle)
+        CairoMakie.hist!(ax, series[k]; bins = rng)
+        push!(axs, ax)
+    end
+    common && length(axs) > 1 && CairoMakie.linkaxes!(axs...)
+    return fig
+end
+
+"""
+    _c17_margins_dydx_at_binary_stata(β, V, c; specs, link=:logit,
+        depvar="y", vce_label="OIM", level=0.95, n_obs=nothing,
+        at_labels=nothing, noatlegend=false)
+
+Stata-style `margins, dydx(*) at(...)` (MER) for a binary GLM (logit
+or probit). Computes marginal effects at the user-specified point
+`c` (length-k vector in β order, with intercept slot included), with
+delta-method SEs via the analytic Jacobian.
+
+`specs` is a vector of `(name::String, kind::Symbol, col_idx::Int)`:
+- `kind = :continuous` → analytic derivative `ME = β_j · μ'(c'β)`
+   - logit:  μ'(η) = Λ(1−Λ),    μ''(η) = Λ(1−Λ)(1−2Λ)
+   - probit: μ'(η) = φ(η),      μ''(η) = −η · φ(η)
+   Jacobian: e_j · μ'(η) + β_j · μ''(η) · c
+- `kind = :factor` → discrete change `ME = μ(c | x_j=1) − μ(c | x_j=0)`
+   Jacobian: μ'(η_1)·c_1 − μ'(η_0)·c_0  (where c_1/c_0 set x_j to 1/0)
+
+Output mirrors Stata's `Conditional marginal effects` block for MER
+(header / `dy/dx wrt:` / optional `At:` block + the variable rows).
+Factor rows print as `1.<name>` per Stata's i.<var> labeling.
+
+Returns `(; rows = Vector{NamedTuple}, c)` where each row has
+`(name, me, se, z, p, ci_lo, ci_hi)`.
+"""
+function _c17_margins_dydx_at_binary_stata(β::AbstractVector, V::AbstractMatrix,
+                                      c::AbstractVector;
+                                      specs::AbstractVector,
+                                      link::Symbol = :logit,
+                                      depvar::AbstractString = "y",
+                                      vce_label::AbstractString = "OIM",
+                                      level::Float64 = 0.95,
+                                      n_obs::Union{Nothing,Int} = nothing,
+                                      at_labels::Union{Nothing,AbstractVector} = nothing,
+                                      noatlegend::Bool = false,
+                                      expression::Union{Nothing,AbstractString} = nothing)
+    # Link evaluators: μ(η), μ'(η), μ''(η)
+    if link == :logit
+        μfn(η)   = 1 / (1 + exp(-η))
+        μ1fn(η)  = (Λ = μfn(η); Λ * (1 - Λ))
+        μ2fn(η)  = (Λ = μfn(η); Λ * (1 - Λ) * (1 - 2*Λ))
+    elseif link == :probit
+        μfn(η)   = Distributions.cdf(Distributions.Normal(), η)
+        μ1fn(η)  = Distributions.pdf(Distributions.Normal(), η)
+        μ2fn(η)  = -η * Distributions.pdf(Distributions.Normal(), η)
+    else
+        error("link=$link not supported (use :logit or :probit)")
+    end
+
+    crit = Distributions.quantile(Distributions.Normal(), 1 - (1-level)/2)
+    rows = NamedTuple[]
+    for (name, kind, idx) in specs
+        if kind == :continuous
+            η  = LinearAlgebra.dot(c, β)
+            μ1 = μ1fn(η);  μ2 = μ2fn(η)
+            me = β[idx] * μ1
+            J  = β[idx] .* μ2 .* c
+            J[idx] += μ1
+            row_label = name
+        elseif kind == :factor
+            c1 = copy(c); c1[idx] = 1.0
+            c0 = copy(c); c0[idx] = 0.0
+            η1 = LinearAlgebra.dot(c1, β); η0 = LinearAlgebra.dot(c0, β)
+            me = μfn(η1) - μfn(η0)
+            J  = μ1fn(η1) .* c1 .- μ1fn(η0) .* c0
+            row_label = "1." * name
+        else
+            error("kind=$kind not supported (use :continuous or :factor)")
+        end
+        se = sqrt(LinearAlgebra.dot(J, V * J))
+        z  = me / se
+        p  = 2 * (1 - Distributions.cdf(Distributions.Normal(), abs(z)))
+        push!(rows, (name = row_label, me = me, se = se, z = z, p = p,
+                     ci_lo = me - crit*se, ci_hi = me + crit*se))
+    end
+
+    # Stata `%9.0g` formatter
+    function g9(x; w::Int=10, sig::Int=7)
+        (ismissing(x) || !isfinite(x)) && return lpad(".", w)
+        sig_use = sig
+        s = Printf.@sprintf("%.*g", sig_use, x)
+        cap = (0 < abs(x) < 1 && x < 0) ? 10 : 9
+        while length(s) > cap && sig_use > 1
+            sig_use -= 1
+            s = Printf.@sprintf("%.*g", sig_use, x)
+        end
+        0 < abs(x) < 1 && (s = replace(s, r"^(-?)0\." => s"\1."))
+        lpad(s, w)
+    end
+    commafmt(num) = begin
+        s = string(abs(num)); parts = String[]; i = length(s)
+        while i >= 1; push!(parts, s[max(1, i-2):i]); i -= 3; end
+        (num < 0 ? "-" : "") * join(reverse(parts), ",")
+    end
+
+    expr = expression === nothing ? "Pr($depvar), predict()" : expression
+    println()
+    # Header: "Conditional marginal effects" left-padded; "Number of obs"
+    # right-aligned at col 78. Stata's exact widths: title in 57, label
+    # "Number of obs" in 13, " = ", value right-aligned in 5 → total 78.
+    if n_obs !== nothing
+        Printf.@printf("%-57s%-13s = %5s\n",
+                       "Conditional marginal effects",
+                       "Number of obs", commafmt(n_obs))
+    else
+        println("Conditional marginal effects")
+    end
+    println("Model VCE: $vce_label")
+    println()
+    println("Expression: $expr")
+    println("dy/dx wrt:  ", join([r.name for r in rows], " "))
+    if !noatlegend && at_labels !== nothing
+        for (i, kv) in enumerate(at_labels)
+            prefix = i == 1 ? "At  : " : "      "
+            Printf.@printf("%s%-12s = %s\n", prefix, string(kv.first),
+                           string(kv.second))
+        end
+    end
+    println()
+    # Coefficient table: 12 (name) + 2 ( | ) + 11 (dy/dx) + 11 (se) +
+    # 9 (z) + 8 (p) + 13 (ci_lo) + 12 (ci_hi) = 78 chars.
+    println("-"^78)
+    println("             |            Delta-method")
+    Printf.@printf("%12s |      dy/dx   std. err.      z    P>|z|     [%g%% conf. interval]\n",
+                   "", 100*level)
+    println("-"^13, "+", "-"^64)
+    for r in rows
+        Printf.@printf("%12s |%s%s%9.2f%8.3f%s%s\n",
+                       r.name,
+                       g9(r.me;    w=11),
+                       g9(r.se;    w=11),
+                       r.z, r.p,
+                       g9(r.ci_lo; w=13),
+                       g9(r.ci_hi; w=12))
+    end
+    println("-"^78)
+    # Stata adds this note when any factor variable appears in the dy/dx list.
+    if any(s -> s[2] == :factor, specs)
+        println("Note: dy/dx for factor levels is the discrete change from the base level.")
+    end
+    return (; rows, c)
+end
+
+"""
+    _c17_margins_dydx_stata(β, V, X; factors, continuous,
+                       atmean=false, at=nothing, at_labels=nothing,
+                       noatlegend=false,
+                       level=0.95, vce_label="Robust",
+                       expression="Predicted number of events, predict()")
+
+Unified Stata-style `margins, dydx(*)` — three modes via keyword args:
+
+  - default (`atmean=false, at=nothing`) → **AME** (Stata: `margins, dydx(*)`).
+    Title: "Average marginal effects". For each obs, compute ∂ŷ_i/∂x_j or the
+    discrete change, then average over the sample.
+  - `atmean=true` → **MEM** (Stata: `margins, dydx(*) atmean`). Title:
+    "Conditional marginal effects". Evaluated at the sample-mean vector x̄.
+  - `at=c` (length-k vector) → **MER** (Stata: `margins, dydx(*) at(...)`).
+    Title: "Conditional marginal effects". Evaluated at the user-specified
+    point c. Pass `at_labels = [:var=>v, ...]` for the "At:" block, or set
+    `noatlegend=true` to suppress it (mirrors Stata's `noatlegend` option).
+
+For each variable:
+  - **Factor** (binary 0/1): discrete change ME = μ(x with j=1) − μ(x with j=0).
+    Gradient: μ_1·x_1 − μ_0·x_0. For AME, this is averaged across observations.
+  - **Continuous**: ME = β_j · μ(x). Gradient: e_j · μ + β_j · μ · x.
+
+`factors` and `continuous` are vectors of `(name, col_idx::Int)` tuples giving
+the variable name (no "1." prefix) and its column index in X.
+"""
+function _c17_margins_dydx_stata(β::AbstractVector, V::AbstractMatrix,
+                            X::AbstractMatrix;
+                            factors::AbstractVector,
+                            continuous::AbstractVector,
+                            kind::Symbol=:dydx,
+                            atmean::Bool=false,
+                            at::Union{Nothing,AbstractVector}=nothing,
+                            at_labels::Union{Nothing,AbstractVector}=nothing,
+                            noatlegend::Bool=false,
+                            interactions::AbstractVector=NamedTuple[],
+                            level::Float64=0.95,
+                            vce_label::String="Robust",
+                            expression::String="Predicted number of events, predict()")
+    # `interactions` lets the helper handle product interaction columns
+    # correctly. Each entry is a NamedTuple `(col=k, base=[i, j, ...])`
+    # meaning column k of X is the elementwise product of columns
+    # `base`. When a factor variable in `base` flips 0↔1 the helper
+    # rebuilds col k from the (possibly modified) base columns; for a
+    # continuous variable in `base`, the chain rule for ∂μ/∂x_j picks
+    # up an extra `β_k · prod(other base cols)` term.
+    # `kind` selects the column header AND the formula for *continuous*
+    # variables (factor variables always use the discrete change, since
+    # ey/ex of a 0/1 dummy is ill-defined). For Poisson with log link:
+    #   :dydx → β_j · μ          (gradient e_j·μ + β_j·μ·x)
+    #   :eyex → β_j · x_j        (gradient e_j·x_j;  ε doesn't depend on μ)
+    #   :eydx → β_j              (gradient e_j;     semi-elasticity)
+    #   :dyex → β_j · μ · x_j    (gradient depends on μ)
+    kind in (:dydx, :eyex, :eydx, :dyex) ||
+        error("kind must be :dydx, :eyex, :eydx, or :dyex; got $kind")
+    kind_label = kind == :dydx ? "dy/dx" :
+                 kind == :eyex ? "ey/ex" :
+                 kind == :eydx ? "ey/dx" : "dy/ex"
+    n, k = size(X)
+
+    g9 = function(x; w_::Int=10, sig::Int=7)
+        (ismissing(x) || !isfinite(x)) && return lpad(".", w_)
+        sig_use = sig
+        s = Printf.@sprintf("%.*g", sig_use, x)
+        # Stata's %9.0g effective rule: cap pre-strip at 9 chars EXCEPT for
+        # negative |x|<1 where cap=10 (the strip will save 1 char). Without
+        # this, negative |x|<1 values lose a digit vs Stata's output.
+        cap = (0 < abs(x) < 1 && x < 0) ? 10 : 9
+        while length(s) > cap && sig_use > 1
+            sig_use -= 1
+            s = Printf.@sprintf("%.*g", sig_use, x)
+        end
+        0 < abs(x) < 1 && (s = replace(s, r"^(-?)0\." => s"\1."))
+        lpad(s, w_)
+    end
+    g_atval = function(x; sig::Int=7)
+        sig_use = sig
+        s = Printf.@sprintf("%.*g", sig_use, x)
+        # Stata's %9.0g effective rule: cap pre-strip at 9 chars EXCEPT for
+        # negative |x|<1 where cap=10 (the strip will save 1 char). Without
+        # this, negative |x|<1 values lose a digit vs Stata's output.
+        cap = (0 < abs(x) < 1 && x < 0) ? 10 : 9
+        while length(s) > cap && sig_use > 1
+            sig_use -= 1
+            s = Printf.@sprintf("%.*g", sig_use, x)
+        end
+        0 < abs(x) < 1 && (s = replace(s, r"^(-?)0\." => s"\1."))
+        s
+    end
+    commafmt(num::Integer) = begin
+        s = string(abs(num)); parts = String[]; i = length(s)
+        while i >= 1; push!(parts, s[max(1, i-2):i]); i -= 3; end
+        (num < 0 ? "-" : "") * join(reverse(parts), ",")
+    end
+    crit = Distributions.quantile(Distributions.Normal(), 1 - (1-level)/2)
+    _summary(dydx, se) = begin
+        z = dydx / se
+        p = 2 * (1 - Distributions.cdf(Distributions.Normal(), abs(z)))
+        (z, p, dydx - crit*se, dydx + crit*se)
+    end
+
+    # Determine evaluation mode
+    if at !== nothing
+        mode  = :atpoint
+        x_eval = collect(at)
+        length(x_eval) == k ||
+            error("at must have length(β)=$k, got $(length(x_eval))")
+    elseif atmean
+        mode  = :atmean
+        x_eval = vec(Statistics.mean(X, dims = 1))
+    else
+        mode  = :average
+        x_eval = nothing
+    end
+
+    title = mode == :average ? "Average marginal effects" :
+                               "Conditional marginal effects"
+
+    # _refresh_interactions! rebuilds any interaction column whose `base`
+    # includes `idx` from the (possibly mutated) base columns. Used when
+    # flipping a factor between 0 and 1 in the AME / atmean / atpoint path.
+    function _refresh_interactions!(Xm::AbstractMatrix, idx::Integer)
+        for intr in interactions
+            if idx in intr.base
+                col = ones(size(Xm, 1))
+                for b in intr.base
+                    col .*= Xm[:, b]
+                end
+                Xm[:, intr.col] .= col
+            end
+        end
+    end
+    function _refresh_interactions_vec!(xv::AbstractVector, idx::Integer)
+        for intr in interactions
+            if idx in intr.base
+                v = 1.0
+                for b in intr.base
+                    v *= xv[b]
+                end
+                xv[intr.col] = v
+            end
+        end
+    end
+
+    # Compute each variable's dy/dx and its delta-method SE
+    rows = Tuple[]
+    for (nm, idx) in factors
+        if mode == :average
+            X0 = copy(X); X0[:, idx] .= 0.0; _refresh_interactions!(X0, idx)
+            X1 = copy(X); X1[:, idx] .= 1.0; _refresh_interactions!(X1, idx)
+            μ0 = exp.(X0 * β); μ1 = exp.(X1 * β)
+            dydx = Statistics.mean(μ1 .- μ0)
+            gvec = vec((μ1' * X1 .- μ0' * X0) ./ n)
+        else
+            x0 = copy(x_eval); x0[idx] = 0.0; _refresh_interactions_vec!(x0, idx)
+            x1 = copy(x_eval); x1[idx] = 1.0; _refresh_interactions_vec!(x1, idx)
+            μ0 = exp(LinearAlgebra.dot(x0, β))
+            μ1 = exp(LinearAlgebra.dot(x1, β))
+            dydx = μ1 - μ0
+            gvec = μ1 .* x1 .- μ0 .* x0
+        end
+        se = sqrt(gvec' * V * gvec)
+        push!(rows, ("1.$nm", dydx, se, _summary(dydx, se)...))
+    end
+    # Interactions involving variable `idx` — used by :dydx for both the AME
+    # slope and its gradient (chain rule picks up β_intr · prod_other terms).
+    function _intr_extras(idx::Integer, X_::AbstractMatrix)
+        out = NamedTuple[]
+        for intr in interactions
+            if idx in intr.base
+                po = ones(size(X_, 1))
+                for b in intr.base
+                    b == idx && continue
+                    po .*= X_[:, b]
+                end
+                push!(out, (col = intr.col, prod_other = po))
+            end
+        end
+        out
+    end
+    function _intr_extras_vec(idx::Integer, xv::AbstractVector)
+        out = NamedTuple[]
+        for intr in interactions
+            if idx in intr.base
+                v = 1.0
+                for b in intr.base
+                    b == idx && continue
+                    v *= xv[b]
+                end
+                push!(out, (col = intr.col, prod_other_at = v))
+            end
+        end
+        out
+    end
+
+    for (nm, idx) in continuous
+        if mode == :average
+            μ_all = exp.(X * β)
+            μ̄    = Statistics.mean(μ_all)
+            x̄_j  = Statistics.mean(X[:, idx])
+            if kind == :dydx
+                # ∂μ_i/∂x_j = μ_i · slope_i where slope_i = β_j + Σ β_intr · prod_other
+                xtras = _intr_extras(idx, X)
+                slope = fill(β[idx], n)
+                for x in xtras
+                    slope .+= β[x.col] .* x.prod_other
+                end
+                dydx = Statistics.mean(μ_all .* slope)
+                gvec = vec((μ_all .* slope)' * X) ./ n
+                gvec[idx] += sum(μ_all) / n
+                for x in xtras
+                    gvec[x.col] += sum(μ_all .* x.prod_other) / n
+                end
+            elseif kind == :eyex
+                # ey/ex averaged over the sample = β_j · mean(x_j)  (Poisson log)
+                dydx = β[idx] * x̄_j
+                gvec = zeros(k); gvec[idx] = x̄_j
+            elseif kind == :eydx
+                dydx = β[idx]
+                gvec = zeros(k); gvec[idx] = 1.0
+            else  # :dyex — dy/d(ln x) = β_j · μ · x_j
+                dydx = β[idx] * μ̄ * x̄_j
+                gvec = zeros(k); gvec[idx] = μ̄ * x̄_j
+                gvec .+= β[idx] * x̄_j .* vec((μ_all' * X) ./ n)
+            end
+        else
+            μ_at = exp(LinearAlgebra.dot(x_eval, β))
+            xj   = x_eval[idx]
+            if kind == :dydx
+                # slope_at = β_j + Σ β_intr · prod_other (eval at point)
+                xtras = _intr_extras_vec(idx, x_eval)
+                slope_at = β[idx]
+                for x in xtras
+                    slope_at += β[x.col] * x.prod_other_at
+                end
+                dydx = μ_at * slope_at
+                gvec = μ_at * slope_at .* x_eval
+                gvec[idx] += μ_at
+                for x in xtras
+                    gvec[x.col] += μ_at * x.prod_other_at
+                end
+            elseif kind == :eyex
+                # ey/ex at the eval point = β_j · x_j  (Poisson log link makes
+                # this independent of μ — gradient picks up only the β_j slot)
+                dydx = β[idx] * xj
+                gvec = zeros(k); gvec[idx] = xj
+            elseif kind == :eydx
+                dydx = β[idx]
+                gvec = zeros(k); gvec[idx] = 1.0
+            else  # :dyex
+                dydx = β[idx] * μ_at * xj
+                gvec = zeros(k); gvec[idx] = μ_at * xj
+                gvec .+= β[idx] * μ_at * xj .* x_eval
+            end
+        end
+        se = sqrt(gvec' * V * gvec)
+        push!(rows, (string(nm), dydx, se, _summary(dydx, se)...))
+    end
+
+    dydx_names = vcat(["1.$nm" for (nm, _) in factors],
+                      [string(nm) for (nm, _) in continuous])
+
+    println()
+    Printf.@printf("%-57s%-13s = %5s\n",
+                   title, "Number of obs", commafmt(n))
+    Printf.@printf("Model VCE: %s\n", vce_label)
+    println()
+    Printf.@printf("Expression: %s\n", expression)
+    Printf.@printf("%s wrt:  %s\n", kind_label, join(dydx_names, " "))
+
+    # "At:" block (only for atmean / atpoint, and only if not suppressed)
+    if !noatlegend && mode != :average
+        if mode == :atmean
+            at_lines = Tuple[]
+            for (nm, idx) in factors
+                m1 = Statistics.mean(X[:, idx])
+                push!(at_lines, ("0.$nm", 1.0 - m1))
+                push!(at_lines, ("1.$nm", m1))
+            end
+            for (nm, idx) in continuous
+                push!(at_lines, (string(nm), x_eval[idx]))
+            end
+            max_name_w = maximum(length(t[1]) for t in at_lines)
+            for (i, (nm, val)) in enumerate(at_lines)
+                prefix = i == 1 ? "At: " : "    "
+                Printf.@printf("%s%-*s = %s (mean)\n",
+                               prefix, max_name_w, nm, g_atval(val))
+            end
+        elseif at_labels !== nothing && !isempty(at_labels)
+            max_name_w = maximum(length(string(p_.first)) for p_ in at_labels)
+            val_strs   = [Printf.@sprintf("%g", float(p_.second)) for p_ in at_labels]
+            max_val_w  = maximum(length, val_strs)
+            for (i, p_) in enumerate(at_labels)
+                prefix = i == 1 ? "At: " : "    "
+                Printf.@printf("%s%-*s = %s\n",
+                               prefix, max_name_w, string(p_.first),
+                               lpad(val_strs[i], max_val_w))
+            end
+        end
+    end
+
+    println()
+    println("-"^78)
+    println("             |            Delta-method")
+    Printf.@printf("             |      %s   std. err.      z    P>|z|     [95%% conf. interval]\n", kind_label)
+    println("-"^13, "+", "-"^64)
+    for (lab, dydx, se, z, p, lo, hi) in rows
+        Printf.@printf("%12s | %s  %s  %s   %s    %s  %s\n",
+                       lab, g9(dydx; w_=10), g9(se; w_=9),
+                       Printf.@sprintf("%7.2f", z),
+                       Printf.@sprintf("%.3f", p),
+                       g9(lo; w_=9), g9(hi; w_=10))
+    end
+    println("-"^78)
+    !isempty(factors) && println("Note: dy/dx for factor levels is the discrete change from the base level.")
+    return rows
+end
+```
+
+# 17 Count-data models
+
+## 17.1 Introduction
+
+## 17.2 Features of count data
+
+### 17.2.1 Generated Poisson data
+
+```{julia}
+#=
+* Poisson (mu=1) generated data
+quietly set obs 10000
+set seed 10101              // set the seed !
+generate xpois= rpoisson(1) // draw from Poisson(mu=1)
+summarize xpois
+tabulate xpois
+* Persist Stata's draw so the Julia translation can read the same
+* realised sample (Stata and Julia have different RNG streams).
+export delimited xpois using "musr/xpois.csv", replace
+=#
+#=
+* Poisson (mu=1) generated data
+quietly set obs 10000
+set seed 10101              // set the seed !
+generate xpois= rpoisson(1) // draw from Poisson(mu=1)
+summarize xpois
+tabulate xpois
+* Persist Stata's draw so Julia can read the same realised sample.
+export delimited xpois using "musr/xpois.csv", replace
+=#
+
+# Stata's `rpoisson` and Julia's `Distributions.Poisson` use
+# different RNG streams, so re-drawing in Julia under the same seed
+# would not reproduce Stata's sample. The Stata chunk persists its
+# draw to `musr/xpois.csv`; we read that file here so the sample
+# moments and frequency table match Stata exactly.
+df_pois = CSV.read("musr/xpois.csv", DataFrames.DataFrame)
+xpois   = Int.(df_pois.xpois)
+
+# `summarize xpois`.
+stata_summarize(df_pois, [:xpois])
+
+# `tabulate xpois`.
+stata_tabulate(df_pois, :xpois);
+```
+
+```{julia}
+#=
+*histogram xpois, discrete xtitle("Poisson")
+*graph save musr/mus17xp, replace
+=#
+#=
+histogram xpois, discrete xtitle("Poisson")
+graph save musr/mus17xp, replace
+=#
+
+# Discrete-count histogram via `_c17_histogram_discrete_stata` (chunk 1)
+# — CairoMakie wrapper for Stata's `histogram <var>, discrete`.
+# Stata's `graph save` step has no Julia analogue; the figure is
+# returned inline by Quarto.
+_c17_histogram_discrete_stata(xpois; xlabel = "Poisson")
+```
+
+### 17.2.2 Overdispersion and negative binomial data
+
+```{julia}
+#=
+* Negative binomial (mu=1 var=2) generated data
+set seed 10101                   // set the seed !
+generate xg = rgamma(1,1)
+generate xnegbin = rpoisson(xg)  // NB generated as a Poisson-gamma mixture
+* Persist Stata's draw so the Julia translation can read the same
+* realised sample (Stata and Julia have different RNG streams).
+export delimited xnegbin using "musr/xnegbin.csv", replace
+
+summarize xnegbin
+tabulate xnegbin
+=#
+#=
+* Negative binomial (mu=1 var=2) generated data
+set seed 10101                   // set the seed !
+generate xg = rgamma(1,1)
+generate xnegbin = rpoisson(xg)  // NB generated as a Poisson-gamma mixture
+summarize xnegbin
+tabulate xnegbin
+* Persist Stata's draw so the Julia translation can read the same
+* realised sample (Stata and Julia have different RNG streams).
+export delimited xnegbin using "musr/xnegbin.csv", replace
+=#
+
+# Negative binomial as a Poisson-gamma mixture: x_i ~ Poisson(g_i),
+# g_i ~ Gamma(1, 1). Marginal E[x] = 1, Var[x] = 1 + 1/k = 2 with
+# k = 1 (Stata's `rgamma(α, β)` is shape-scale parameterisation).
+#
+# Read Stata's realised draw from `musr/xnegbin.csv` rather than
+# re-drawing in Julia (the two RNG streams differ, so re-drawing
+# would not reproduce Stata's sample moments and tabulation).
+df_negbin = CSV.read("musr/xnegbin.csv", DataFrames.DataFrame)
+xnegbin   = Int.(df_negbin.xnegbin)
+
+# `summarize xnegbin`.
+stata_summarize(df_negbin, [:xnegbin])
+
+# `tabulate xnegbin`.
+stata_tabulate(df_negbin, :xnegbin);
+```
+
+```{julia}
+#=
+*histogram xnegbin, discrete xtitle("Negative binomial")
+*graph save musr/mus17negbin, replace
+=#
+#=
+histogram xnegbin, discrete xtitle("Negative binomial")
+graph save musr/mus17negbin, replace
+=#
+
+# Discrete-count histogram via `_c17_histogram_discrete_stata` (chunk 1)
+# Stata's `graph save` step has no Julia analogue; the figure is
+# returned inline by Quarto.
+_c17_histogram_discrete_stata(xnegbin; xlabel = "Negative binomial")
+
+```
+
+### 17.2.3 Modeling strategies
+
+### 17.2.4 Estimation methods
+
+## 17.3 Empirical example 1
+
+### 17.3.1 Data summary
+
+```{julia}
+#=
+drop _all 
+
+* Summary statistics for doctor visits data
+capture use musr/mus17data.dta  
+if _rc != 0 {
+    display "Trying alternative path..."
+    use mus17data.dta
+}
+global xlist private medicaid age age2 educyr actlim totchr 
+summarize docvis $xlist
+=#
+#=
+drop _all
+
+* Summary statistics for doctor visits data
+capture use musr/mus17data.dta
+if _rc != 0 {
+    display "Trying alternative path..."
+    use mus17data.dta
+}
+global xlist private medicaid age age2 educyr actlim totchr
+summarize docvis $xlist
+=#
+
+# Load `mus17data.dta` — Medical Expenditure Panel Survey (MEPS)
+# subsample, dependent variable `docvis` (# doctor visits, count).
+# Promote any Stata Float32 columns to Float64 so downstream MLE /
+# GLM helpers don't trip on a mixed-precision matrix.
+df17 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus17data.dta"))
+for c in DataFrames.names(df17)
+    if eltype(df17[!, c]) <: Union{Missing, Float32}
+        df17[!, c] = convert.(Union{Missing, Float64}, df17[!, c])
+    end
+end
+
+# Stata's `global xlist …` → Julia `Vector{Symbol}`.
+xlist17 = [:private, :medicaid, :age, :age2, :educyr, :actlim, :totchr]
+
+# `summarize docvis $xlist`.
+stata_summarize(df17, vcat([:docvis], xlist17));
+```
+
+```{julia}
+#=
+* Tabulate docvis after recoding values > 10 to ranges 11-40 or 41-143
+generate dvrange = docvis
+recode dvrange (11/40 = 40) (41/143 = 143)
+tabulate dvrange
+=#
+#=
+* Tabulate docvis after recoding values > 10 to ranges 11-40 or 41-143
+generate dvrange = docvis
+recode dvrange (11/40 = 40) (41/143 = 143)
+tabulate dvrange
+=#
+
+# `recode` collapses the long right tail of `docvis` into two
+# bins so the frequency table fits on the page: any value in
+# [11, 40] is rounded up to 40 (interpreted as "11–40"), and any
+# value in [41, 143] to 143 ("41–143"). Values ≤ 10 keep their
+# original integer.
+df17.dvrange = [v ≤ 10 ? Int(v) :
+                v ≤ 40 ? 40   :
+                          143
+                for v in Int.(_rawval.(df17.docvis))]
+
+# `tabulate dvrange`.
+stata_tabulate(df17, :dvrange);
+```
+
+### 17.3.2 Poisson model
+
+#### Poisson model results
+
+```{julia}
+#=
+* Poisson with default ML standard errors
+poisson docvis $xlist, nolog
+=#
+#=
+* Poisson with default ML standard errors
+poisson docvis $xlist, nolog
+=#
+
+# Default-ML Poisson regression: docvis ~ private + medicaid + age +
+# age2 + educyr + actlim + totchr (log link). `stata_poisson`
+# (chunk 1) with `vce = :oim` reproduces Stata's standard `poisson
+# … , nolog` output — Poisson regression header, LR chi2(k) /
+# Prob > chi2 / Pseudo R² block, "Log likelihood = …", and the
+# coefficient table with Stata's %9.0g formatting.
+df17c  = DataFrames.dropmissing(df17[:, vcat([:docvis], xlist17)])
+fml17  = GLM.@formula(docvis ~ private + medicaid + age + age2 +
+                                educyr + actlim + totchr)
+
+pois17_fit = stata_poisson(df17c, fml17; vce = :oim)
+
+# Keep a GLM.jl-backed handle in `pois17` for downstream chunks that
+# call GLM.predict / GLM.coefnames / etc. (`stata_poisson` returns
+# β / V / X / coefnames already, but a few later chunks reach into
+# the GLM model object directly).
+pois17 = GLM.glm(fml17, df17c, Distributions.Poisson(), GLM.LogLink());
+```
+
+```{julia}
+#=
+* Squared correlation between y and yhat
+drop yphat
+predict yphat, n
+quietly correlate docvis yphat
+display "Squared correlation between y and yhat = " r(rho)^2
+=#
+#=
+* Squared correlation between y and yhat
+drop yphat
+predict yphat, n
+quietly correlate docvis yphat
+display "Squared correlation between y and yhat = " r(rho)^2
+=#
+
+# Stata's `predict yphat, n` after `poisson` gives ŷ = exp(x'β̂) —
+# the conditional mean μ̂_i — which is GLM.predict(pois17) here.
+# `correlate docvis yphat` returns `r(rho)` = corr(y, ŷ); squaring
+# it gives the count-data analogue of R² (the "explained-variation"
+# measure used in Cameron & Trivedi §17.3).
+yphat = GLM.predict(pois17)
+Printf.@printf("Squared correlation between y and yhat = %.7f\n",
+               Statistics.cor(df17c.docvis, yphat)^2)
+```
+
+#### Robust estimate of VCE for Poisson MLE
+
+```{julia}
+#=
+/*
+* Poisson with robust standard errors
+display "xlist = $xlist"      // confirm it's still the 7 regressors
+correlate $xlist              // any pair with |ρ|≈1?
+count if missing(docvis) | missing(private) | missing(medicaid) ///
+       | missing(age) | missing(age2) | missing(educyr)         ///
+       | missing(actlim) | missing(totchr)
+
+
+poisson docvis $xlist, vce(robust) nolog  // Poisson robust SEs
+*/
+quietly poisson docvis $xlist               // <- no vce(robust)
+predict muhat, n
+quietly generate ystar = ((docvis-muhat)^2 - docvis)/muhat
+regress ystar muhat, noconstant noheader
+
+=#
+#=
+* Poisson with robust standard errors
+poisson docvis $xlist, vce(robust) nolog
+*// Poisson robust SEs
+=#
+
+# `stata_poisson` with `vce = :robust` (chunk 1) — same MLE
+# point estimates as the default-ML fit, but the variance is the
+# Huber–White sandwich (X'WX)⁻¹ X'diag((y−μ̂)²) X (X'WX)⁻¹ with the
+# n/(n−1) finite-sample correction Stata applies. Header switches
+# "LR chi²" → "Wald chi²" and "Log likelihood" → "Log
+# pseudolikelihood"; the table picks up the "Robust" subheader and
+# lowercase "std. err." label, mirroring Stata's display.
+pois17_robust = stata_poisson(df17c, fml17; vce = :robust);
+```
+
+```{julia}
+#=
+* Poisson with robust standard errors
+display "xlist = $xlist"      // confirm it's still the 7 regressors
+correlate $xlist              // any pair with |ρ|≈1?
+count if missing(docvis) | missing(private) | missing(medicaid) ///
+       | missing(age) | missing(age2) | missing(educyr)         ///
+       | missing(actlim) | missing(totchr)
+
+
+poisson docvis $xlist, vce(robust) nolog  // Poisson robust SEs
+
+quietly poisson docvis $xlist               // <- no vce(robust)
+predict muhat, n
+quietly generate ystar = ((docvis-muhat)^2 - docvis)/muhat
+regress ystar muhat, noconstant noheader
+=#
+
+# Sanity-check the regressor set before fitting `poisson … ,
+# vce(robust)` — in Stata this chunk threw r(3301) ("subscript
+# invalid" inside Mata's `rob__compute()`) because `age` and
+# `age2` were correlated at ρ ≈ 0.9992, making the sandwich
+# H⁻¹·X'diag((y−μ̂)²)X·H⁻¹ numerically rank-deficient. Julia's
+# linear solver (Cholesky on Symmetric) handles the same matrix
+# without complaint, so we run the diagnostics for parity and
+# then both the robust-SE fit and the overdispersion test.
+println("xlist = ", join(string.(xlist17), " "))                # `display "xlist = $xlist"`
+stata_correlate(df17c, xlist17)                                 # `correlate $xlist`
+n_miss = sum(any(ismissing, eachrow(df17[!, vcat([:docvis], xlist17)])))
+Printf.@printf("count if missing(...) = %d\n", n_miss)
+
+# `poisson docvis $xlist, vce(robust) nolog` — Huber–White sandwich.
+stata_poisson(df17c, fml17; vce = :robust)
+
+# `quietly poisson docvis $xlist` — default-ML refit (quiet) for the
+# overdispersion test; β̂ and μ̂ are identical to the robust fit.
+fit_q17 = stata_poisson(df17c, fml17; vce = :oim, quiet = true)
+df17c.muhat = GLM.predict(pois17)
+df17c.ystar = ((df17c.docvis .- df17c.muhat).^2 .- df17c.docvis) ./
+              df17c.muhat
+
+# `regress ystar muhat, noconstant noheader` — auxiliary OLS via
+# `FixedEffectModels.reg` + chunk-1 `stata_regress(model;
+# noheader = true)`.
+m_over_17 = FixedEffectModels.reg(df17c,
+                                  GLM.@formula(ystar ~ muhat + 0))
+stata_regress(m_over_17);
+```
+
+#### Coefficient interpretation and marginal effects
+
+```{julia}
+#=
+* Average marginal effect for Poisson
+quietly poisson docvis i.private i.medicaid age age2 educyr i.actlim totchr
+*, vce(robust)
+margins, dydx(*)
+=#
+#=
+* Average marginal effect for Poisson
+quietly poisson docvis i.private i.medicaid age age2 educyr i.actlim totchr, vce(robust)
+margins, dydx(*)
+=#
+
+# `margins, dydx(*)` after `poisson … , vce(robust)` — Stata's
+# Average Marginal Effect block. With `i.private i.medicaid i.actlim`
+# declared as factors, Stata reports a **discrete change** for those
+# three (μ̂|x=1 − μ̂|x=0 averaged over the sample, rows labelled
+# `1.<var>`) and the **derivative** β_j·μ̂ averaged over the sample
+# for the four continuous regressors (age, age2, educyr, totchr).
+#
+# `_c17_margins_dydx_stata` (chunk 1) takes (β, V, X) in Stata-display
+# order and a (`factors`, `continuous`) split with their column
+# indices into the design matrix. `pois17_robust` from the previous
+# chunk supplies all three.
+_c17_margins_dydx_stata(pois17_robust.β, pois17_robust.V, pois17_robust.X;
+    factors    = [(:private, 1), (:medicaid, 2), (:actlim, 6)],
+    continuous = [(:age, 3), (:age2, 4), (:educyr, 5), (:totchr, 7)],
+    kind       = :dydx,
+    vce_label  = "Robust");
+
+```
+
+```{julia}
+#=
+#=
+// Following not included in book
+* Poisson as glm
+glm docvis $xlist, family(poisson) link(log) robust  // glm
+=#
+
+=#
+#=
+// Following not included in book
+* Poisson as glm
+glm docvis $xlist, family(poisson) link(log) robust  // glm
+=#
+
+# Stata's `glm … , family(poisson) link(log) robust` — same MLE
+# (β̂) as `poisson … , vce(robust)`, but printed under the GLM
+# header (Generalized linear models / Deviance / Pearson / Variance
+# function / Link function / AIC / BIC) and with the "Robust
+# std. err." subheader on the coefficient block. `stata_glm`
+# (chunk 1) reproduces this full layout.
+stata_glm(df17c, fml17;
+          family = :poisson,
+          link   = :log,
+          vce    = :robust);
+```
+
+### 17.3.3 NB2 model
+
+#### NB2 model results
+
+```{julia}
+#=
+* Standard negative binomial (NB2) with default SEs
+nbreg docvis $xlist, nolog
+=#
+#=
+* Standard negative binomial (NB2) with default SEs
+nbreg docvis $xlist, nolog
+=#
+
+# NB2: V(y|x) = μ + α·μ². `stata_nbreg` (chunk 1) fits jointly by
+# MLE on (β, lnα), prints Stata's `nbreg … , nolog` block (Negative
+# binomial regression header, LR chi²(k) / Prob / Pseudo R², the
+# Stata-style coefficient table, plus the `/lnalpha` row, the back-
+# transformed `alpha` row, and the boundary-LR test "LR test of
+# alpha=0: chibar²(01)" against the Poisson restriction α = 0).
+stata_nbreg(df17c, fml17; vce = :oim)
+
+# Bind a GLM-backed handle for downstream chunks that reach into the
+# NB model directly (e.g. `nb17.model.rr.d.r` for the NB dispersion,
+# or `GLM.predict(nb17)` for the conditional mean).
+nb17 = GLM.negbin(fml17, df17c, GLM.LogLink());
+```
+
+```{julia}
+#=
+* Squared correlation between y and yhat
+predict ynbhat, n
+quietly correlate docvis ynbhat
+display "Squared correlation between y and yhat = " r(rho)^2
+=#
+#=
+* Squared correlation between y and yhat
+predict ynbhat, n
+quietly correlate docvis ynbhat
+display "Squared correlation between y and yhat = " r(rho)^2
+=#
+
+# `predict ynbhat, n` after `nbreg` gives ŷ = exp(x'β̂) — the NB2
+# conditional mean μ̂ (same closed form as Poisson, since NB2 and
+# Poisson share the mean function under the log link). The squared
+# Pearson correlation between y and ŷ is the count-data analogue
+# of R² that Cameron & Trivedi report.
+ynbhat = GLM.predict(nb17)
+Printf.@printf("Squared correlation between y and yhat = %.7f\n",
+               Statistics.cor(df17c.docvis, ynbhat)^2)
+```
+
+#### Fitted probabilities for Poisson and NB2 models
+
+#### Manual countfit
+
+```{julia}
+#=
+* Poisson: Sample vs avg predicted probabilities of y = 0, 1, ..., 5
+* countfit is deprecated - use manual calculation of predicted probabilities
+quietly poisson docvis $xlist
+predict phat, n
+forvalues i = 0/5 {
+    quietly count if docvis == `i'
+    local actual`i' = r(N) / _N
+    quietly generate double prob`i' = exp(-phat) * phat^`i' / exp(lnfactorial(`i'))
+    quietly summarize prob`i'
+    local pred`i' = r(mean)
+    display "Count `i': Actual = " %6.4f `actual`i'' "  Predicted = " %6.4f `pred`i''
+}
+drop phat prob*
+=#
+
+# Manual `countfit` — for each k ∈ {0, …, 5}, compare the empirical
+# frequency P̂(y = k) to the mean predicted Poisson probability
+# (1/N) Σ_i exp(−μ̂_i)·μ̂_i^k / k!. Under a correctly-specified
+# Poisson the two columns should agree; gaps signal lack of fit
+# (typically excess zeros and a too-thin upper tail).
+phat17 = GLM.predict(pois17)
+println("Poisson: Sample vs avg predicted probabilities of y = 0, ..., 5")
+for k in 0:5
+    actual = Statistics.mean(df17c.docvis .== k)
+    pred   = Statistics.mean(exp.(.-phat17) .* phat17.^k ./ factorial(k))
+    Printf.@printf("Count %d: Actual = %6.4f  Predicted = %6.4f\n",
+                   k, actual, pred)
+end
+```
+
+```{julia}
+#=
+* NB2: Sample vs average predicted probabilities of y = 0, 1, ..., 5
+* countfit is deprecated - use manual calculation for negative binomial
+quietly nbreg docvis $xlist
+predict phat, n
+local alpha = e(alpha)
+forvalues i = 0/5 {
+    quietly count if docvis == `i'
+    local actual`i' = r(N) / _N
+    quietly generate double prob`i' = exp(lngamma(`i' + 1/`alpha') - lngamma(`i' + 1) - lngamma(1/`alpha')) * (1/(1 + `alpha'*phat))^(1/`alpha') * (`alpha'*phat/(1 + `alpha'*phat))^`i'
+    quietly summarize prob`i'
+    local pred`i' = r(mean)
+    display "Count `i': Actual = " %6.4f `actual`i'' "  Predicted = " %6.4f `pred`i''
+}
+drop phat prob*
+=#
+
+# Manual `countfit` for NB2. Under NB2 with mean μ and dispersion α,
+#   P(Y = k | x) = Γ(k + 1/α) / (Γ(k+1)·Γ(1/α)) ·
+#                  (1/(1+α·μ))^(1/α) · (α·μ/(1+α·μ))^k
+# Same actual-vs-mean-predicted comparison as the Poisson chunk;
+# under NB2 the extra mass at k = 0 (from the gamma mixing) closes
+# most of the Poisson gap there.
+phat17_nb = GLM.predict(nb17)
+α17_nb    = 1 / nb17.model.rr.d.r      # GLM's `r` parameter holds 1/α
+println("NB2: Sample vs avg predicted probabilities of y = 0, ..., 5")
+for k in 0:5
+    actual = Statistics.mean(df17c.docvis .== k)
+    p_k    = exp.(_c17_loggamma(k + 1/α17_nb) -
+                  _c17_loggamma(k + 1) -
+                  _c17_loggamma(1/α17_nb)) .*
+             (1 ./ (1 .+ α17_nb .* phat17_nb)).^(1/α17_nb) .*
+             (α17_nb .* phat17_nb ./
+              (1 .+ α17_nb .* phat17_nb)).^k
+    pred = Statistics.mean(p_k)
+    Printf.@printf("Count %d: Actual = %6.4f  Predicted = %6.4f\n",
+                   k, actual, pred)
+end
+```
+
+#### prvalue equivalent
+
+```{julia}
+#=
+* NB2: Predicted NB2 probabilities at x = x* of y = 0, 1, ..., 5
+* prvalue is deprecated - manually calculate predicted probabilities
+quietly nbreg docvis $xlist
+local alpha = e(alpha)
+predict xb, xb
+quietly replace xb = exp(xb) if !missing(xb)
+forvalues i = 0/5 {
+    quietly generate double prob`i' = exp(lngamma(`i' + 1/`alpha') - lngamma(`i' + 1) - lngamma(1/`alpha')) * (1/(1 + `alpha'*xb))^(1/`alpha') * (`alpha'*xb/(1 + `alpha'*xb))^`i' if private==1 & medicaid==1
+    quietly summarize prob`i' if private==1 & medicaid==1
+    display "Pr(y=`i' | private=1, medicaid=1) = " %6.4f r(mean)
+    drop prob`i'
+}
+drop xb
+=#
+
+# Stata's `prvalue` analogue: average the predicted NB2 probability
+# at each k over the subsample with `private == 1 & medicaid == 1`
+# (representative "covered both ways" patient). Same NB2 closed
+# form as the manual-countfit chunk above; restricting μ̂ to the
+# subsample is the Julia counterpart of Stata's `if` qualifier.
+sub17       = DataFrames.filter(r -> r.private == 1 && r.medicaid == 1, df17c)
+phat17_sub  = GLM.predict(nb17, sub17)
+α17_nb      = 1 / nb17.model.rr.d.r
+
+println("NB2 P(y = k | private = 1, medicaid = 1):")
+for k in 0:5
+    p_k = exp.(_c17_loggamma(k + 1/α17_nb) -
+               _c17_loggamma(k + 1) -
+               _c17_loggamma(1/α17_nb)) .*
+          (1 ./ (1 .+ α17_nb .* phat17_sub)).^(1/α17_nb) .*
+          (α17_nb .* phat17_sub ./
+           (1 .+ α17_nb .* phat17_sub)).^k
+    Printf.@printf("Pr(y = %d | private = 1, medicaid = 1) = %6.4f\n",
+                   k, Statistics.mean(p_k))
+end
+```
+
+#### Discussion
+
+#### Generalized NB model
+
+```{julia}
+#=
+* Generalized negative binomial with alpha parameterized
+capture noisily gnbreg docvis $xlist, lnalpha(female bh) nolog
+if _rc != 0 {
+    display "Note: gnbreg convergence failed"
+}
+=#
+#=
+* Generalized negative binomial with alpha parameterized
+capture noisily gnbreg docvis $xlist, lnalpha(female bh) nolog
+if _rc != 0 {
+    display "Note: gnbreg convergence failed"
+}
+=#
+
+# `stata_gnbreg` (chunk 1) — Generalized NB2 with the dispersion
+# parameter modelled as ln(α_i) = γ_0 + γ_female·female + γ_bh·bh.
+# Jointly MLE in (β, γ) by LBFGS + ForwardDiff with OIM SEs from a
+# finite-difference Hessian. Prints the two-equation Stata block
+# (`docvis` outcome panel and `lnalpha` variance panel) plus the
+# Wald χ²(k_slopes) and Pseudo R² banner.
+#
+# Wrapped in try/catch as the Julia counterpart of Stata's
+# `capture noisily` — `gnbreg` is notorious for failing to
+# converge on real data (Cameron & Trivedi flag this), and we'd
+# rather print a note than crash the notebook.
+try
+    # Pass the full `df17` (not `df17c`) — `df17c` was narrowed to
+    # `[docvis; xlist17]` and no longer contains `female` / `bh`.
+    # The helper drops missings on whatever it needs internally.
+    global gnb17 = stata_gnbreg(df17,
+        GLM.@formula(docvis ~ private + medicaid + age + age2 +
+                              educyr + actlim + totchr);
+        lnalpha_vars = [:female, :bh])
+catch err
+    println("Note: gnbreg convergence failed — $(err)")
+end
+```
+
+### 17.3.4 Nonlinear least-squares estimation
+
+```{julia}
+#=
+* Nonlinear least squares
+capture noisily nl (docvis = exp({xb: $xlist one})), vce(robust) nolog
+if _rc != 0 {
+    display "Note: nl convergence failed"
+}
+=#
+#=
+* Nonlinear least squares
+capture noisily nl (docvis = exp({xb: $xlist one})), vce(robust) nolog
+if _rc != 0 {
+    display "Note: nl convergence failed"
+}
+=#
+
+# `stata_nl_exp` (chunk 1) — Stata's `nl (docvis = exp({xb: …})),
+# vce(robust)`. NLS with exponential mean μ = exp(x'β), Huber–White
+# sandwich SEs. Same β identification as Poisson MLE (since the
+# Poisson score is also a moment of `y − exp(x'β)`); coefficients
+# should match Poisson coefficients up to numerical optimisation
+# noise, but the NLS objective ignores the Poisson variance and is
+# generally less efficient.
+#
+# Wrapped in try/catch as Stata's `capture noisily` analogue —
+# the NLS surface for exponential means is shallow and the
+# textbook flags non-convergence.
+try
+    global nl17 = stata_nl_exp(df17c, :docvis, xlist17; vce = :robust)
+catch err
+    println("Note: nl convergence failed — $(err)")
+end
+```
+
+### 17.3.5 Hurdle model
+
+```{julia}
+#=
+* Hurdle: Pr(y=0)=pi and Pr(y=k)=(1-pi) x Poisson(2) truncated at 0
+quietly set obs 10000
+set seed 10101             // set the seed !
+scalar pi=1-(1-exp(-2))/2  // Probability y=0
+generate xhurdle = 0
+scalar minx = 0
+while minx == 0 {
+ generate xph = rpoisson(2)
+ quietly replace xhurdle = xph if xhurdle==0
+ drop xph
+ quietly summarize xhurdle
+ scalar minx = r(min)
+}
+replace xhurdle = 0 if runiform() < pi
+summarize xhurdle
+* Persist Stata's draw so the Julia translation can read the same
+* realised sample (Stata and Julia have different RNG streams).
+
+export delimited xhurdle using "musr/xhurdle.csv", replace
+=#
+#=
+* Hurdle: Pr(y=0)=pi and Pr(y=k)=(1-pi) x Poisson(2) truncated at 0
+quietly set obs 10000
+set seed 10101             // set the seed !
+scalar pi=1-(1-exp(-2))/2  // Probability y=0
+generate xhurdle = 0
+scalar minx = 0
+while minx == 0 {
+ generate xph = rpoisson(2)
+ quietly replace xhurdle = xph if xhurdle==0
+ drop xph
+ quietly summarize xhurdle
+ scalar minx = r(min)
+}
+replace xhurdle = 0 if runiform() < pi
+summarize xhurdle
+=#
+
+# Stata's two-stage hurdle DGP (rejection-sample ZT-Poisson(2),
+# then knock back to zero with probability π) uses Stata's RNG
+# stream; re-drawing in Julia would not reproduce the moments.
+# Read Stata's persisted realisation from `musr/xhurdle.csv` so
+# `stata_summarize` matches Stata exactly.
+df_hurdle = CSV.read("musr/xhurdle.csv", DataFrames.DataFrame)
+xhurdle   = Int.(df_hurdle.xhurdle)
+
+# `summarize xhurdle`.
+stata_summarize(df_hurdle, [:xhurdle]);
+```
+
+```{julia}
+#=
+// Following not included in book
+*histogram xhurdle, discrete xtitle("Hurdle Poisson")
+*graph save musr/mus17hurdle, replace 
+=#
+#=
+// Following not included in book
+histogram xhurdle, discrete xtitle("Hurdle Poisson")
+graph save musr/mus17hurdle, replace
+=#
+
+# `_c17_histogram_discrete_stata` (chunk 1) — CairoMakie wrapper for
+# Stata's `histogram <var>, discrete`. The bimodal shape (spike at
+# 0 from the hurdle mass, then the Poisson(2) bump over positives)
+# is what motivates the two-part model in this section.
+_c17_histogram_discrete_stata(xhurdle; xlabel = "Hurdle Poisson")
+```
+
+#### Variants of the hurdle model
+
+#### Application of the hurdle model
+
+```{julia}
+#=
+* Hurdle logit-nb model manually
+logit docvis $xlist, nolog
+=#
+#=
+* Hurdle logit-nb model manually
+logit docvis $xlist, nolog
+=#
+
+# Hurdle part 1 — the "any visit?" participation equation. Stata's
+# `logit docvis $xlist` treats `docvis` as binary (0 vs any nonzero
+# value), so we build the indicator `docpos = 1{docvis > 0}` first
+# and fit the logit on it. `stata_logit` (chunk 1) prints Stata's
+# `Logistic regression` block (LR chi²/Prob/Pseudo R² header plus
+# the coefficient table). Part 2 (the zero-truncated NB on the
+# positives) was fit earlier in this section.
+df17c.docpos = Int.(df17c.docvis .> 0)
+stata_logit(df17c,
+    GLM.@formula(docpos ~ private + medicaid + age + age2 +
+                          educyr + actlim + totchr); vce = :oim);
+```
+
+```{julia}
+#=
+* Second step uses positives only
+summarize docvis if docvis > 0
+=#
+#=
+* Second step uses positives only
+summarize docvis if docvis > 0
+=#
+
+# Hurdle part 2 is fit on the positive subsample only. `summarize
+# docvis if docvis > 0` checks the conditional distribution of the
+# count given participation — `DataFrames.filter` is the Julia
+# counterpart of Stata's `if docvis > 0` qualifier.
+stata_summarize(DataFrames.filter(:docvis => >(0), df17c), [:docvis]);
+```
+
+```{julia}
+#=
+* Zero-truncated negative binomial 
+ztnb docvis $xlist if docvis>0, nolog 
+=#
+#=
+* Zero-truncated negative binomial
+ztnb docvis $xlist if docvis>0, nolog
+=#
+
+# Hurdle part 2 — `stata_ztnb` (chunk 1) fits the zero-truncated NB2
+# on the positive subsample (Stata's `if docvis>0`). The density of
+# each positive count is renormalised by 1 − P(Y=0), so the model
+# describes the count *given* at least one visit. `DataFrames.filter`
+# supplies the `if docvis>0` estimation sample; the helper does not
+# filter on its own.
+stata_ztnb(DataFrames.filter(:docvis => >(0), df17c),
+    GLM.@formula(docvis ~ private + medicaid + age + age2 +
+                          educyr + actlim + totchr); vce = :oim);
+```
+
+```{julia}
+#=
+// Following not included in book
+* hnblogit command is not available - hurdle model already estimated above manually
+* Using logit for hurdle and nbreg for positive counts
+display "Note: hnblogit command not available, use manual hurdle estimation shown above"
+=#
+#=
+* margins for marginal effects of first part
+quietly logit docvis i.private i.medicaid age age2 educyr i.actlim totchr, vce(robust)
+margins, dydx(*) atmean noatlegend
+=#
+
+# Marginal effects of the hurdle participation (part 1) logit, at the
+# sample means (Stata's `margins, dydx(*) atmean`). `i.private`,
+# `i.medicaid`, `i.actlim` are factors → discrete change
+# Λ(η̄|x=1) − Λ(η̄|x=0); the rest are continuous → β_j·Λ(η̄)(1−Λ(η̄)).
+#
+# Re-fit the participation logit silently with robust SEs
+# (`stata_logit`, chunk 1), then evaluate `_c17_margins_dydx_at_binary_stata`
+# (chunk 1) at the column means `c̄` with a (name, kind, idx) spec
+# list. `noatlegend = true` suppresses the "At:" block, matching
+# Stata's `noatlegend`.
+df17c.docpos = Int.(df17c.docvis .> 0)
+logit_mfx = stata_logit(df17c,
+    GLM.@formula(docpos ~ private + medicaid + age + age2 +
+                          educyr + actlim + totchr);
+    vce = :robust, quiet = true)
+
+c̄_mfx = vec(Statistics.mean(logit_mfx.X, dims = 1))
+_c17_margins_dydx_at_binary_stata(logit_mfx.β, logit_mfx.V, c̄_mfx;
+    specs = [("private",  :factor,     1),
+             ("medicaid", :factor,     2),
+             ("age",      :continuous, 3),
+             ("age2",     :continuous, 4),
+             ("educyr",   :continuous, 5),
+             ("actlim",   :factor,     6),
+             ("totchr",   :continuous, 7)],
+    link = :logit, depvar = "docpos", vce_label = "Robust",
+    noatlegend = true, n_obs = logit_mfx.n);
+```
+
+```{julia}
+#=
+* margins for marginal effects of first part
+quietly logit docvis i.private i.medicaid age age2 educyr i.actlim totchr, vce(robust)
+margins, dydx(*) atmean noatlegend
+=#
+#=
+* margins for marginal effects of second part
+quietly ztnb docvis i.private i.medicaid age age2 educyr i.actlim totchr if docvis>0, vce(robust)
+margins, dydx(*) atmean noatlegend
+=#
+
+# Marginal effects of the hurdle count (part 2) ZT-NB on its
+# conditional mean m(x) = μ/(1 − P(Y=0)), at the sample means.
+# Re-fit the ZT-NB silently on the positives with robust SEs, then
+# `stata_margins_dydx_ztnb` (chunk 1) computes dy/dx at the means:
+# factors (i.private/medicaid/actlim) get the discrete change, the
+# rest get the derivative; delta-method SEs use a finite-difference
+# gradient against the robust vcov.
+#
+# `stata_ztnb` keeps β in GLM order (column 1 = intercept), so the
+# regressor column indices in `specs` are 2..8.
+ztnb_mfx = stata_ztnb(DataFrames.filter(:docvis => >(0), df17c),
+    GLM.@formula(docvis ~ private + medicaid + age + age2 +
+                          educyr + actlim + totchr);
+    vce = :robust, quiet = true)
+
+stata_margins_dydx_ztnb(ztnb_mfx;
+    specs = [("private",  :factor,     2),
+             ("medicaid", :factor,     3),
+             ("age",      :continuous, 4),
+             ("age2",     :continuous, 5),
+             ("educyr",   :continuous, 6),
+             ("actlim",   :factor,     7),
+             ("totchr",   :continuous, 8)],
+    atmean = true, depvar = "docvis", vce_label = "Robust",
+    noatlegend = true);
+```
+
+```{julia}
+#=
+* margins for marginal effects of second part
+quietly ztnb docvis i.private i.medicaid age age2 educyr i.actlim totchr if docvis>0, vce(robust)
+margins, dydx(*) atmean noatlegend
+=#
+#=
+// Following repeats earlier code as xpois and xnegbin have since been dropped
+* Poisson (mu=1) and NB(1,1) generated data
+quietly set obs 10000
+set seed 10101                   // set the seed !
+generate xpois= rpoisson(1)
+generate xg = rgamma(1,1)
+generate xnegbin = rpoisson(xg) // NB draws
+=#
+
+# Re-create the Poisson(1) and NB(1,1) reference samples for the
+# four-panel comparison figure (the earlier `xpois`/`xnegbin` were
+# dropped). Drawn fresh in Julia rather than read from the §17.2
+# CSVs — note this `xnegbin` is NOT the §17.2.2 realisation: there
+# `xg = rgamma(1,1)` was the first draw after the seed, whereas here
+# `xpois` consumes part of the stream first, so the gamma mixing
+# draws land at a different position. As these only feed a shape-
+# comparison plot and a mean/sd printout, the Monte-Carlo-noise
+# difference from Stata is immaterial.
+# N17 = 10,000 simulated obs (rebind here — the original §17.3.5
+# binding was removed when that chunk switched to reading xhurdle
+# from CSV; `xpmix` below also relies on it).
+N17 = 10_000
+Random.seed!(10101)
+xpois2   = Distributions.rand(Distributions.Poisson(1), N17)
+xg2      = Distributions.rand(Distributions.Gamma(1, 1), N17)
+xnegbin2 = [Distributions.rand(Distributions.Poisson(g)) for g in xg2]
+@printf("xpois2:   mean = %.4f, sd = %.4f\n",
+        Statistics.mean(xpois2), Statistics.std(xpois2))
+@printf("xnegbin2: mean = %.4f, sd = %.4f\n",
+        Statistics.mean(xnegbin2), Statistics.std(xnegbin2))
+```
+
+#### Simulated FMM sample with comparisons
+
+```{julia}
+#=
+* Mixture: Poisson(.5) with prob .9 and Poisson(5.5) with prob .1
+set seed 10101        // set the seed !
+generate xp1= rpoisson(.5)
+generate xp2= rpoisson(5.5)
+summarize xp1 xp2
+generate xpmix = xp1                     // (was: rename xp1 xpmix) keep xp1 for export
+quietly replace xpmix = xp2 if runiform() > 0.9
+summarize xpmix
+* Persist all three columns so the Julia translation reproduces both
+* `summarize` blocks exactly (xpmix needs the runiform() selection).
+export delimited xp1 xp2 xpmix using "musr/xpmix.csv", replace
+=#
+#=
+* Mixture: Poisson(.5) with prob .9 and Poisson(5.5) with prob .1
+set seed 10101        // set the seed !
+generate xp1= rpoisson(.5)
+generate xp2= rpoisson(5.5)
+summarize xp1 xp2
+rename xp1 xpmix
+quietly replace xpmix = xp2 if runiform() > 0.9
+summarize xpmix
+=#
+
+# Two-component Poisson mixture: 0.9·Poisson(0.5) + 0.1·Poisson(5.5),
+# so E[x] = 0.9·0.5 + 0.1·5.5 = 1.0 (same mean as the Poisson(1) and
+# NB(1,1) references) but with a heavier right tail. The mixture
+# assignment uses Stata's `runiform() > 0.9` draw, which Julia can't
+# reproduce, so we read Stata's realised xp1/xp2/xpmix from
+# `musr/xpmix.csv` (persisted by the Stata chunk) — both summaries
+# then match Stata exactly.
+df_mix = CSV.read("musr/xpmix.csv", DataFrames.DataFrame)
+xp1   = Int.(df_mix.xp1)
+xp2   = Int.(df_mix.xp2)
+xpmix = Int.(df_mix.xpmix)
+
+# `summarize xp1 xp2`.
+stata_summarize(df_mix, [:xp1, :xp2])
+
+# `summarize xpmix`.
+stata_summarize(df_mix, [:xpmix]);
+```
+
+```{julia}
+#=
+* Tabulate the mixture data
+tabulate xpmix
+=#
+#=
+* Tabulate the mixture data
+tabulate xpmix
+=#
+
+# `tabulate xpmix` — frequency table of the mixture counts.
+stata_tabulate(DataFrames.DataFrame(xpmix = xpmix), :xpmix);
+```
+
+```{julia}
+#=
+/*
+// Following not included in book
+histogram xpmix, discrete xtitle("Finite mixture Poisson")
+graph save musr/mus17pmix, replace
+*/
+=#
+#=
+// Following not included in book
+histogram xpmix, discrete xtitle("Finite mixture Poisson")
+graph save musr/mus17pmix, replace
+=#
+
+# `_c17_histogram_discrete_stata` (chunk 1) — discrete-count histogram of
+# the finite-mixture sample. The long right shoulder from the 10%
+# Poisson(5.5) component is the visible signature of the mixture.
+_c17_histogram_discrete_stata(xpmix; xlabel = "Finite mixture Poisson")
+```
+
+```{julia}
+#=
+/*
+* Compare the four distributions, all with mean 1
+graph combine musr/mus17xp.gph musr/mus17negbin.gph musr/mus17pmix.gph ///
+musr/mus17hurdle.gph, title("Four different distributions with mean = 1") ///
+ycommon xcommon
+*/
+=#
+#=
+* Compare the four distributions, all with mean 1
+graph combine musr/mus17xp.gph musr/mus17negbin.gph musr/mus17pmix.gph ///
+musr/mus17hurdle.gph, title("Four different distributions with mean = 1") ///
+ycommon xcommon
+=#
+
+# `_c17_histogram_grid_stata` (chunk 1) — CairoMakie analogue of Stata's
+# `graph combine … , ycommon xcommon`. Lays the four mean-1
+# distributions in a 2×2 grid with linked (common) axes, so the
+# differing tail behaviour at a shared scale is directly comparable:
+# Poisson(1) is tight, NB(1,1) is overdispersed, the finite mixture
+# has a secondary bump near 5, and the hurdle piles mass at 0.
+_c17_histogram_grid_stata(
+    [(xpois2,   "Poisson(1)"),
+     (xnegbin2, "Negative binomial"),
+     (xpmix,    "Finite mixture Poisson"),
+     (xhurdle,  "Hurdle Poisson")];
+    title = "Four different distributions with mean = 1",
+    bins  = -0.5:1:15.5)
+```
+
+#### ML estimation of the FMM
+
+#### The fmm equivalent
+
+#### Application: Poisson finite-mixture model
+
+```{julia}
+#=
+* Compare the four distributions, all with mean 1
+summarize xpois xnegbin xpmix xhurdle
+=#
+#=
+* Compare the four distributions, all with mean 1
+summarize xpois xnegbin xpmix xhurdle
+=#
+
+# `summarize xpois xnegbin xpmix xhurdle` — all four are constructed
+# to have population mean 1, but differ in spread: Poisson(1) has
+# variance 1, the others are overdispersed (var ≈ 2 for NB and the
+# mixture, larger still for the hurdle). Stata's `xpois`/`xnegbin`
+# are this section's `xpois2`/`xnegbin2`.
+stata_summarize(
+    DataFrames.DataFrame(xpois   = xpois2,   xnegbin = xnegbin2,
+                         xpmix   = xpmix,    xhurdle = xhurdle),
+    [:xpois, :xnegbin, :xpmix, :xhurdle]);
+```
+
+#### Interpretation
+
+```{julia}
+#=
+* Finite-mixture model using fmm command with constant probabilities
+use musr/mus17data.dta, clear
+use "C:/EC/BSE/DSDM/Term 2/24DM021_Causal Inference and Machine Learning/References/Cameron & Trivedi/musr/mus17data.dta", clear
+fmm 2, vce(robust): poisson docvis $xlist
+=#
+#=
+* Finite-mixture model using fmm command with constant probabilities
+use musr/mus17data.dta, clear
+fmm 2, vce(robust): poisson docvis $xlist
+=#
+
+# `stata_fmm_poisson` (chunk 1) — C-component Poisson finite mixture
+# with constant class probabilities, Stata's `fmm 2, vce(robust):
+# poisson docvis $xlist`. Prints the latent-class logit block plus a
+# per-component Poisson coefficient block; returns the per-component
+# β / μ / class shares. (The mixture density is accumulated with
+# log-sum-exp — `exp(logpmf)` underflows for the long docvis tail,
+# max = 144, which would otherwise drop the high-count obs that pin
+# down the high-mean component. Components are sorted by ascending
+# mean so the labeling matches Stata's class 1 = lower mean.)
+#
+# Stata's session had `$xlist` empty, so the command ran intercept-
+# only `fmm 2: poisson docvis` (only `_cons` per class). We match with
+# `docvis ~ 1`: class 1 _cons = 1.2111 (μ̂₁ = 3.357), class 2 _cons =
+# 2.6986 (μ̂₂ = 14.86), 2.Class _cons = −0.8411 (π̂₁ = 0.699),
+# log-pseudolikelihood −12434.33.
+fmm_res = stata_fmm_poisson(df17c, GLM.@formula(docvis ~ 1);
+                            ncomponents = 2, vce = :robust)
+
+# Bind the names the downstream chunks expect.
+β_fmm1, β_fmm2 = fmm_res.β_components
+μ_fmm1, μ_fmm2 = fmm_res.μ_components
+π_fmm1         = fmm_res.π[1]
+cn_fmm         = fmm_res.coefnames
+β_pois_start   = fmm_res.β_pois_start     # shared with the NB-FMM section
+y_fmm          = fmm_res.y
+X_fmm          = fmm_res.X
+k_fmm          = fmm_res.k;
+```
+
+```{julia}
+#=
+* Predict y for two components
+quietly fmm 2, vce(robust): poisson docvis $xlist
+estat lcmean
+predict yfit*, mu
+summarize yfit*
+=#
+#=
+* Predict y for two components
+quietly fmm 2, vce(robust): poisson docvis $xlist
+estat lcmean
+predict yfit*, mu
+summarize yfit*
+=#
+
+# `estat lcmean` — latent-class marginal means from the FMM fit
+# (`fmm_res`, bound above). `stata_estat_lcmean` (chunk 1) prints the
+# per-class average predicted mean with delta-method SEs. Under the
+# intercept-only fit these are just the component means μ̂₁ ≈ 3.357
+# (low utilisers) and μ̂₂ ≈ 14.86 (high utilisers).
+stata_estat_lcmean(fmm_res; depvar = "docvis")
+
+# `predict yfit*, mu` — per-component fitted means μ̂_c. Intercept-only
+# ⇒ each column is constant across observations.
+df17c.yfit1 = fmm_res.μ_components[1]
+df17c.yfit2 = fmm_res.μ_components[2]
+
+# `summarize yfit*`.
+stata_summarize(df17c, [:yfit1, :yfit2]);
+```
+
+#### Comparing marginal effects
+
+```{julia}
+#=
+* Marginal effects for component 1
+margins, dydx(*) predict(mu class(1)) atmean noatlegend
+* Marginal effects for component 2 
+margins, dydx(*) predict(mu class(2)) atmean noatlegend
+=#
+#=
+* Marginal effects for component 1
+margins, dydx(*) predict(mu class(1)) atmean noatlegend
+* Marginal effects for component 2
+margins, dydx(*) predict(mu class(2)) atmean noatlegend
+=#
+
+# `margins, dydx(*) predict(mu class(c))` differentiates the component
+# mean μ_c = exp(x'β_c) w.r.t. the regressors. With the intercept-only
+# fit (`$xlist` empty in Stata's session) there ARE no regressors to
+# differentiate, so — like Stata, which returns "nothing to compute"
+# for `dydx(*)` after an intercept-only model — there is no marginal-
+# effects table here.
+#
+# (When `$xlist` is defined and the FMM is fit with `fml17`, each
+# component's dy/dx is a plain Poisson-mean `margins, dydx(*) atmean`
+# on β_c, computable via `_c17_margins_dydx_stata(fmm_res.β_components[c],
+# fmm_res.V[(c-1)k+1:ck, …], fmm_res.X; factors=…, continuous=…)`.)
+if fmm_res.k <= 1
+    println("margins, dydx(*): no covariates in the intercept-only " *
+            "mixture — nothing to differentiate.")
+else
+    k = fmm_res.k
+    specs_f = [(:private, 2), (:medicaid, 3), (:actlim, 7)]
+    specs_c = [(:age, 4), (:age2, 5), (:educyr, 6), (:totchr, 8)]
+    for c in 1:2
+        rng  = ((c-1)*k + 1):(c*k)
+        V_cc = fmm_res.V[rng, rng]
+        println("\n=== Component $c: margins, dydx(*) predict(mu class($c)) atmean ===")
+        _c17_margins_dydx_stata(fmm_res.β_components[c], V_cc, fmm_res.X;
+            factors = specs_f, continuous = specs_c,
+            kind = :dydx, atmean = true, noatlegend = true,
+            vce_label = "Robust")
+    end
+end
+```
+
+```{julia}
+#=
+set scheme s1mono  /* Graphics scheme */
+* Create histograms of fitted values  
+quietly histogram yfit1, name(_comp_1, replace)
+quietly histogram yfit2, name(_comp_2, replace)
+quietly graph combine _comp_1 _comp_2
+=#
+#=
+set scheme s1mono  /* Graphics scheme */
+* Create histograms of fitted values
+quietly histogram yfit1, name(_comp_1, replace)
+quietly histogram yfit2, name(_comp_2, replace)
+quietly graph combine _comp_1 _comp_2
+=#
+
+# Side-by-side histograms of the two components' fitted means
+# (`predict, mu class(c)`) via `_c17_histogram_grid_stata` (chunk 1) with
+# `discrete = false`. Under the intercept-only fit each component's
+# μ̂_c is constant, so each panel is a single spike at μ̂₁ ≈ 3.36 and
+# μ̂₂ ≈ 14.86 — the figure becomes meaningful (a spread) only with the
+# full-covariate mixture.
+_c17_histogram_grid_stata(
+    [(df17c.yfit1, "Component 1 (π̂ = $(round(fmm_res.π[1], digits=3)))"),
+     (df17c.yfit2, "Component 2 (π̂ = $(round(fmm_res.π[2], digits=3)))")];
+    discrete = false, nbins = 30, xlabel = "fitted μ")
+```
+
+#### Application: NB finite-mixture model
+
+```{julia}
+#=
+* 2-component mixture of NB1 
+fmm 2, vce(robust): nbreg docvis $xlist, dispersion(mean)
+=#
+#=
+* 2-component mixture of NB1
+fmm 2, vce(robust): nbreg docvis $xlist, dispersion(mean)
+=#
+
+# `stata_fmm_nbreg` (chunk 1) — 2-component NB2 finite mixture, each
+# component with its own dispersion α_c. Stata's `dispersion(mean)`
+# *is* NB2 (Var = μ + α·μ²); the "NB1" in the comment is a textbook
+# labelling slip. Prints the full Stata `fmm … : nbreg` layout (class
+# logit block + per-class `_cons` and `/docvis lnalpha` rows with
+# robust SEs), components sorted by ascending mean.
+#
+# Intercept-only to match Stata's empty-`$xlist` session: class 1
+# _cons = 1.9085 (μ̂₁ = 6.743), lnα₁ = −0.4853 (α̂₁ = 0.615); class 2
+# _cons = 1.9931 (μ̂₂ = 7.338), lnα₂ = 1.1220 (α̂₂ = 3.071); 2.Class
+# _cons = −1.8679 (π̂₁ = 0.866); log-pseudolikelihood −10948.71.
+# Note the mixture separates by DISPERSION (α 0.62 vs 3.07), not mean
+# (6.7 vs 7.3) — the high-α class captures the heavy-tailed users.
+nbfmm_res = stata_fmm_nbreg(df17c, GLM.@formula(docvis ~ 1);
+                            ncomponents = 2);
+```
+
+```{julia}
+#=
+* Fitted values for 2-component NB1 mixture
+capture drop yfit1 yfit2 
+predict yfit*, mu
+summarize yfit*
+=#
+#=
+* Fitted values for 2-component NB1 mixture
+capture drop yfit1 yfit2
+predict yfit*, mu
+summarize yfit*
+=#
+
+# `predict yfit*, mu` after the NB FMM — per-component fitted means
+# μ̂_c (from `nbfmm_res`, bound above). `capture drop yfit1 yfit2`
+# clears the Poisson-FMM yfit columns first; here we just overwrite
+# them with the NB-mixture values. Intercept-only ⇒ each column is
+# constant (μ̂₁ ≈ 6.74, μ̂₂ ≈ 7.34) — the NB mixture separates the
+# population by dispersion, not mean, so the two fitted means are
+# close.
+df17c.yfit1 = nbfmm_res.μ_components[1]
+df17c.yfit2 = nbfmm_res.μ_components[2]
+
+# `summarize yfit*`.
+stata_summarize(df17c, [:yfit1, :yfit2]);
+```
+
+#### Model selection
+
+#### Cautionary note
+
+## 17.4 Empirical example 2
+
+### 17.4.1 Zero-inflated data
+
+```{julia}
+#=
+*drop _all
+
+*set more off
+use musr/mus17data_z.dta 
+* Summary stats for ER use model
+use musr/mus17data_z.dta      
+global xlist1 age actlim totchr 
+summarize er $xlist1
+tabulate er 
+=#
+#=
+*drop _all
+
+*set more off
+use musr/mus17data_z.dta
+* Summary stats for ER use model
+use musr/mus17data_z.dta
+global xlist1 age actlim totchr
+summarize er $xlist1
+tabulate er
+=#
+
+# Load `mus17data_z.dta` — emergency-room visits (`er`), a sharply
+# zero-inflated count (most people have zero ER visits). The
+# regressor set is `$xlist1` = age + actlim + totchr. Promote Stata
+# Float32 columns to Float64 for the downstream MLE helpers.
+df17z = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus17data_z.dta"))
+for c in DataFrames.names(df17z)
+    if eltype(df17z[!, c]) <: Union{Missing, Float32}
+        df17z[!, c] = convert.(Union{Missing, Float64}, df17z[!, c])
+    end
+end
+xlist17z = [:age, :actlim, :totchr]
+
+# `summarize er $xlist1`.
+stata_summarize(df17z, vcat([:er], xlist17z))
+
+# `tabulate er` — frequency table showing the large mass at zero.
+stata_tabulate(df17z, :er);
+```
+
+### 17.4.2 Models for zero-inflated data
+
+### 17.4.3 NB2 model results
+
+```{julia}
+#=
+* NB2 for er
+nbreg er $xlist1, nolog
+=#
+
+# NB2 for ER visits — `stata_nbreg` (chunk 1) prints Stata's `nbreg
+# er age actlim totchr, nolog` block (header, coefficient table,
+# /lnalpha + alpha rows, LR test of α = 0). The large α here flags
+# heavy overdispersion driven by the excess zeros — motivating the
+# zero-inflated models in the chunks that follow.
+df17zc = DataFrames.dropmissing(df17z[:, vcat([:er], xlist17z)])
+fml17z = GLM.@formula(er ~ age + actlim + totchr)
+
+stata_nbreg(df17zc, fml17z; vce = :oim)
+
+# GLM-backed handle for the downstream `prcounts` predicted-probability
+# chunk (`nb17z.model.rr.d.r` for the dispersion, `GLM.predict(nb17z)`
+# for μ̂).
+nb17z = GLM.negbin(fml17z, df17zc, GLM.LogLink());
+```
+
+#### prcounts equivalent
+
+```{julia}
+#=
+* Sample average fitted probabilities of y = 0 to max()
+* prcounts is deprecated - calculate manually using predict
+predict xb, xb
+local alpha = e(alpha)
+forvalues i = 0/3 {
+    generate erpr`i' = exp(lngamma(`i' + 1/`alpha') - lngamma(`i' + 1) - lngamma(1/`alpha')) * (1/(1 + `alpha'*exp(xb)))^(1/`alpha') * (`alpha'*exp(xb)/(1 + `alpha'*exp(xb)))^`i'
+}
+drop xb
+summarize erpr*
+=#
+
+# `prcounts` analogue: for each count j ∈ {0,…,3}, the fitted NB2
+# probability per observation
+#   erpr_j(x_i) = Γ(j+1/α)/(Γ(j+1)Γ(1/α)) ·
+#                 (1/(1+α·μ̂_i))^{1/α} · (α·μ̂_i/(1+α·μ̂_i))^j,
+# μ̂_i = exp(x_i'β̂). `summarize erpr*` then reports each column's
+# sample mean = the average fitted P(er = j). Comparing these to the
+# empirical frequencies (the `tabulate er` above) exposes the NB2's
+# under-prediction of zeros — the motivation for the ZINB below.
+α_z = 1 / nb17z.model.rr.d.r
+μ_z = GLM.predict(nb17z)
+for j in 0:3
+    gj = exp(_c17_loggamma(j + 1/α_z) -
+             _c17_loggamma(j + 1) -
+             _c17_loggamma(1/α_z))
+    df17zc[!, Symbol("erpr$j")] = gj .*
+        (1 ./ (1 .+ α_z .* μ_z)).^(1/α_z) .*
+        (α_z .* μ_z ./ (1 .+ α_z .* μ_z)).^j
+end
+
+# `summarize erpr*`.
+stata_summarize(df17zc, [:erpr0, :erpr1, :erpr2, :erpr3]);
+```
+
+### 17.4.4 ZINB results
+
+```{julia}
+#=
+* Zero-inflated negative binomial for er
+zinb er $xlist1, inflate($xlist1) forcevuong nolog
+=#
+
+# `stata_zinb` (chunk 1) — zero-inflated NB2: an NB2 count equation
+# (er ~ age + actlim + totchr) mixed with a logit "always-zero"
+# inflation on the same `$xlist1`. Prints Stata's `zinb` block (count
+# eq, inflate eq, /lnalpha + alpha) and the `forcevuong` Vuong test of
+# ZINB vs plain NB2 (z > 0 favours ZINB). Default OIM SEs match
+# Stata's `zinb` without `vce(robust)`.
+zinb_res = stata_zinb(df17zc, GLM.@formula(er ~ age + actlim + totchr);
+                      inflate_vars = [:age, :actlim, :totchr],
+                      vce = :oim, vuong = true);
+```
+
+### 17.4.5 Model comparison
+
+#### Model comparison via AIC/BIC
+
+```{julia}
+#=
+* Comparison of NB and ZINB using manual probability calculations
+* countfit is deprecated - estimate both models and compare fit manually
+quietly nbreg er $xlist1
+estimates store NB
+quietly zinb er $xlist1, inflate($xlist1)
+estimates store ZINB
+* Compare AIC and BIC
+estimates stats NB ZINB
+=#
+
+# `estimates stats NB ZINB` — `stata_estimates_stats` (chunk 1) builds
+# the AIC/BIC comparison table. Degrees of freedom: NB2 has 4 count
+# coefficients + lnα = 5; ZINB adds the 4-parameter inflation logit →
+# 9. Lower AIC/BIC favours the ZINB, the formal counterpart of the
+# Vuong test above.
+#
+# `ll(null)` is each command's `e(ll_0)`: for NB it's the intercept-
+# only NB2; for ZINB it's the count equation reduced to its intercept
+# with the inflation equation kept (NOT intercept-only everywhere,
+# which would collapse to the NB null). `stata_zinb` returns that as
+# `ll_null`.
+let
+    nb_ll   = GLM.loglikelihood(nb17z)
+    nb_df   = length(GLM.coef(nb17z)) + 1            # + lnalpha
+    nb_ll0  = GLM.loglikelihood(GLM.negbin(GLM.@formula(er ~ 1),
+                                           df17zc, GLM.LogLink()))
+    zinb_df = length(zinb_res.β) + length(zinb_res.γ) + 1
+    stata_estimates_stats(
+        [("NB",   DataFrames.nrow(df17zc), nb_ll,       nb_df,   nb_ll0),
+         ("ZINB", zinb_res.n,              zinb_res.ll, zinb_df, zinb_res.ll_null)])
+end;
+```
+
+## 17.5 Models with endogenous regressors
+
+### 17.5.1 Structural-model approach (control function)
+
+#### Model and assumptions
+
+#### Two-step estimation
+
+#### Application
+
+```{julia}
+#=
+clear all
+* First-stage linear regression
+use "C:\EC\BSE\DSDM\Term 2\24DM021_Causal Inference and Machine Learning\References\Cameron & Trivedi\musr\mus17data.dta", clear
+global xlist2 medicaid age age2 educyr actlim totchr
+regress private $xlist2 income ssiratio, vce(robust)
+predict lpuhat, residual
+=#
+#=
+clear all
+* First-stage linear regression
+use musr/mus17data.dta
+global xlist2 medicaid age age2 educyr actlim totchr
+regress private $xlist2 income ssiratio, vce(robust)
+predict lpuhat, residual
+=#
+
+# Control-function (two-step) approach to the endogenous regressor
+# `private`. First stage: OLS of `private` on the exogenous `$xlist2`
+# plus the excluded instruments `income` and `ssiratio`, robust SEs.
+# The first-stage residual `lpuhat` is the control function added to
+# the second-stage Poisson (next subsection). `$xlist2` here drops
+# `private` from the §17.3 `$xlist` (it's the endogenous variable).
+xlist17_2 = [:medicaid, :age, :age2, :educyr, :actlim, :totchr]
+df17_iv = DataFrames.dropmissing(
+    df17[:, vcat([:docvis, :private, :income, :ssiratio], xlist17_2)])
+
+m_first17 = FixedEffectModels.reg(df17_iv,
+    GLM.@formula(private ~ medicaid + age + age2 + educyr + actlim +
+                            totchr + income + ssiratio),
+    FixedEffectModels.Vcov.robust())
+
+# `regress … , vce(robust)` — Stata-style table via `stata_regress`
+# (chunk 1).
+stata_regress(m_first17)
+
+# `predict lpuhat, residual` — first-stage residual (control function).
+df17_iv.lpuhat = df17_iv.private .-
+                 FixedEffectModels.predict(m_first17, df17_iv);
+```
+
+```{julia}
+#=
+* Second-stage Poisson with robust SEs
+poisson docvis private $xlist2 lpuhat, vce(robust) nolog
+=#
+#=
+* Second-stage Poisson with robust SEs
+poisson docvis private $xlist2 lpuhat, vce(robust) nolog
+=#
+
+# Control-function second stage: Poisson of docvis on the endogenous
+# `private`, the exogenous `$xlist2`, and the first-stage residual
+# `lpuhat` (from §17.5.1). A significant `lpuhat` coefficient is the
+# endogeneity test — if `private` were exogenous its control function
+# would carry no information. `stata_poisson` (chunk 1) with
+# `vce = :robust`. (Note: these robust SEs do NOT correct for the
+# first-stage estimation of `lpuhat`; a proper two-step / bootstrap
+# vcov is wider — the textbook uses this fit for the endogeneity
+# test, not final inference.)
+stata_poisson(df17_iv,
+    GLM.@formula(docvis ~ private + medicaid + age + age2 + educyr +
+                          actlim + totchr + lpuhat); vce = :robust);
+```
+
+```{julia}
+#=
+* Program and bootstrap for Poisson two-step estimator
+program endogtwostep, eclass
+  version 11
+  tempname b
+  capture drop lpuhat2
+  regress private $xlist2 income ssiratio
+  predict lpuhat2, residual
+  poisson docvis private $xlist2 lpuhat2
+  matrix `b' = e(b)
+  ereturn post `b'
+end
+bootstrap _b, reps(400) seed(10101) nodots nowarn: endogtwostep
+=#
+#=
+* Program and bootstrap for Poisson two-step estimator
+program endogtwostep, eclass
+  version 11
+  tempname b
+  capture drop lpuhat2
+  regress private $xlist2 income ssiratio
+  predict lpuhat2, residual
+  poisson docvis private $xlist2 lpuhat2
+  matrix `b' = e(b)
+  ereturn post `b'
+end
+bootstrap _b, reps(400) seed(10101) nodots nowarn: endogtwostep
+=#
+
+# `stata_boot_cf_poisson` (chunk 1) — bootstraps the whole two-step
+# control-function pipeline (first-stage OLS → residual → second-stage
+# Poisson) 400 times, so the SEs account for the first-stage estimation
+# that §17.5.1's naive robust SEs ignore. Stata's MT64 RNG differs from
+# Julia's MersenneTwister, so the bootstrap SEs match Stata only up to
+# Monte Carlo noise, not digit-for-digit.
+stata_boot_cf_poisson(df17_iv;
+    count_dep   = :docvis,
+    endog       = :private,
+    exog        = [:medicaid, :age, :age2, :educyr, :actlim, :totchr],
+    instruments = [:income, :ssiratio],
+    B = 400, seed = 10101,
+    title = "Poisson two-step (control function), bootstrap SEs");
+```
+
+### 17.5.2 Nonlinear IV method
+
+```{julia}
+#=
+* Nonlinear IV estimator for Poisson: computation using optimize
+generate cons = 1
+local y docvis
+local xlist private medicaid age age2 educyr actlim totchr cons
+local zlist income ssiratio medicaid age age2 educyr actlim totchr cons
+* Mata code to obtain GMM estimator for Poisson using command optimize
+mata 
+  void pgmm(todo, b, y, X, Z, Qb, g, H)
+  {
+    Xb = X*b'
+    mu = exp(Xb)
+    h = Z'(y-mu)
+    W = cholinv(cross(Z,Z))
+    Qb = h'W*h
+    if (todo == 0) return
+    G = -(mu:*Z)'X
+    g = (G'W*h)'
+    if (todo == 1) return
+    H = G'W*G
+    _makesymmetric(H)
+   }
+  st_view(y=., ., "`y'")  
+  st_view(X=., ., tokens("`xlist'"))
+  st_view(Z=., ., tokens("`zlist'"))
+  S = optimize_init()
+  optimize_init_which(S,"min")
+  optimize_init_evaluator(S, &pgmm())
+  optimize_init_evaluatortype(S, "d2")
+  optimize_init_argument(S, 1, y)
+  optimize_init_argument(S, 2, X)
+  optimize_init_argument(S, 3, Z)
+  optimize_init_params(S, J(1,cols(X),0))
+  optimize_init_technique(S,"nr")
+  b = optimize(S)  
+  // Compute robust estimate of VCE and SEs
+  Xb = X*b'
+  mu = exp(Xb)
+  h = Z'(y-mu)
+  W = cholinv(cross(Z,Z))
+  G = -(mu:*Z)'X
+  Shat = ((y-mu):*Z)'((y-mu):*Z)*rows(X)/(rows(X)-cols(X))
+  Vb = luinv(G'W*G)*G'W*Shat*W*G*luinv(G'W*G)
+  *seb = (sqrt(diagonal(Vb)))'
+  *b \ seb
+  st_matrix("b",b)
+  st_matrix("Vb",Vb) 
+end
+=#
+#=
+* Nonlinear IV estimator for Poisson: computation using optimize
+generate cons = 1
+local y docvis
+local xlist private medicaid age age2 educyr actlim totchr cons
+local zlist income ssiratio medicaid age age2 educyr actlim totchr cons
+* Mata code to obtain GMM estimator for Poisson using command optimize
+mata 
+  void pgmm(todo, b, y, X, Z, Qb, g, H)
+  {
+    Xb = X*b'
+    mu = exp(Xb)
+    h = Z'(y-mu)
+    W = cholinv(cross(Z,Z))
+    Qb = h'W*h
+    if (todo == 0) return
+    G = -(mu:*Z)'X
+    g = (G'W*h)'
+    if (todo == 1) return
+    H = G'W*G
+    _makesymmetric(H)
+   }
+  st_view(y=., ., "`y'")  
+  st_view(X=., ., tokens("`xlist'"))
+  st_view(Z=., ., tokens("`zlist'"))
+  S = optimize_init()
+  optimize_init_which(S,"min")
+  optimize_init_evaluator(S, &pgmm())
+  optimize_init_evaluatortype(S, "d2")
+  optimize_init_argument(S, 1, y)
+  optimize_init_argument(S, 2, X)
+  optimize_init_argument(S, 3, Z)
+  optimize_init_params(S, J(1,cols(X),0))
+  optimize_init_technique(S,"nr")
+  b = optimize(S)  
+  // Compute robust estimate of VCE and SEs
+  Xb = X*b'
+  mu = exp(Xb)
+  h = Z'(y-mu)
+  W = cholinv(cross(Z,Z))
+  G = -(mu:*Z)'X
+  Shat = ((y-mu):*Z)'((y-mu):*Z)*rows(X)/(rows(X)-cols(X))
+  Vb = luinv(G'W*G)*G'W*Shat*W*G*luinv(G'W*G)
+  *seb = (sqrt(diagonal(Vb)))'
+  *b \ seb
+  st_matrix("b",b)
+  st_matrix("Vb",Vb)
+end
+=#
+
+# `stata_poisson_gmm` (chunk 1) — the Julia counterpart of the Mata
+# `pgmm` program. Nonlinear-IV (GMM) Poisson: moment conditions
+# E[Z'(y − exp(Xβ))] = 0 with one-step weight W = (Z'Z)⁻¹, and the
+# robust GMM-sandwich vcov V = (G'WG)⁻¹ G'WŜWG (G'WG)⁻¹ exactly as in
+# the Mata code. `xlist` = private + the exogenous regressors; `zlist`
+# = the excluded instruments (income, ssiratio) + the exogenous
+# regressors. The endogenous `private` is instrumented; a significant
+# difference from the plain-Poisson `private` coefficient signals
+# endogeneity.
+gmm17 = stata_poisson_gmm(df17, :docvis,
+    [:private, :medicaid, :age, :age2, :educyr, :actlim, :totchr],
+    [:income, :ssiratio, :medicaid, :age, :age2, :educyr, :actlim, :totchr])
+
+# Bind the names the §17.7 two-step / overid chunks expect.
+β_gmm17 = gmm17.β
+X_g     = gmm17.X
+Z_g     = gmm17.Z
+y_g     = gmm17.y
+xnms_g  = gmm17.coefnames
+df17_g  = gmm17.df;
+```
+
+## 17.6 Stata resources
+
+## 17.7 Exercises
+
+```{julia}
+#=
+* Command gmm for one-step GMM (nonlinear IV) of overidentified Poisson model
+gmm (docvis - exp({xb:private medicaid age age2 educyr actlim totchr}+{b0})), ///
+ instruments(income ssiratio medicaid age age2 educyr actlim totchr) onestep nolog
+=#
+#=
+* Command gmm for one-step GMM (nonlinear IV) of overidentified Poisson model
+gmm (docvis - exp({xb:private medicaid age age2 educyr actlim totchr}+{b0})), ///
+ instruments(income ssiratio medicaid age age2 educyr actlim totchr) onestep nolog
+=#
+
+# Stata's built-in `gmm` command, one-step, is the exact same
+# estimator as the Mata `pgmm` program in §17.5.2 — moment condition
+# E[Z'(docvis − exp(Xβ))] = 0 with the same X (private + exogenous +
+# constant) and instruments Z (income, ssiratio + exogenous +
+# constant), one-step weight W = (Z'Z)⁻¹. So `stata_poisson_gmm`
+# (chunk 1) reproduces it identically (private ≈ 0.592, _cons ≈
+# −11.86, robust GMM SEs).
+stata_poisson_gmm(df17, :docvis,
+    [:private, :medicaid, :age, :age2, :educyr, :actlim, :totchr],
+    [:income, :ssiratio, :medicaid, :age, :age2, :educyr, :actlim, :totchr]);
+```
+
+```{julia}
+#=
+* Command gmm for two-step GMM (nonlinear IV) of overidentified Poisson model
+gmm (docvis - exp({xb:private medicaid age age2 educyr actlim totchr}+{b0})), ///
+ instruments(income ssiratio medicaid age age2 educyr actlim totchr) twostep nolog
+=#
+#=
+* Command gmm for two-step GMM (nonlinear IV) of overidentified Poisson model
+gmm (docvis - exp({xb:private medicaid age age2 educyr actlim totchr}+{b0})), ///
+ instruments(income ssiratio medicaid age age2 educyr actlim totchr) twostep nolog
+=#
+
+# Two-step GMM — same moment conditions as the one-step fit above,
+# but the second step re-weights by the optimal Ŝ⁻¹ estimated from
+# the first-step residuals (Ŝ = (1/N) Σ (y−μ̂)²·z z'), which is
+# efficient under heteroskedasticity. `stata_poisson_gmm` (chunk 1)
+# with `twostep = true`. Estimates are close to the one-step fit; the
+# SEs are the efficient-GMM ones. Bound as `gmm_ts17` for the
+# `estat overid` chunk below.
+gmm_ts17 = stata_poisson_gmm(df17, :docvis,
+    [:private, :medicaid, :age, :age2, :educyr, :actlim, :totchr],
+    [:income, :ssiratio, :medicaid, :age, :age2, :educyr, :actlim, :totchr];
+    twostep = true);
+```
+
+```{julia}
+#=
+* Test of overidentifying restriction following two-step GMM
+estat overid
+=#
+#=
+* Test of overidentifying restriction following two-step GMM
+estat overid
+=#
+
+# `estat overid` after two-step GMM — Hansen's J test (chunk-1
+# `stata_estat_overid_gmm` reads it from `gmm_ts17`). With 9
+# instruments and 8 parameters there is 1 overidentifying
+# restriction, so J ~ χ²(1). A small J / large p means the extra
+# instrument is consistent with the moment conditions (instruments
+# valid); a large J would flag instrument invalidity or
+# misspecification.
+stata_estat_overid_gmm(gmm_ts17);
+```

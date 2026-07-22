@@ -1,0 +1,1456 @@
+---
+title: "Cameron & Trivedi -- Ch. 8: Linear panel-data models — Basics (via StatEcon)"
+Authors:
+- Colin Cameron
+- Pravin Trivedi
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+[Microeconometrics with R](https://ycroissant.github.io/micsr_book/)
+
+[UCLA](https://stats.oarc.ucla.edu/stata/modules/)
+
+[Github](https://github.com/thousandoaks?tab=repositories)
+
+# Julia setup
+
+
+```{julia}
+using StatEcon
+const DATA = first(filter(d -> isdir(d) && (isfile(joinpath(d, "auto.dta")) || isdir(joinpath(d, "musr"))), ["../../data", "data", raw"C:/EC/GitHub/StatEcon/data"]))
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+
+# Extra packages used by the pedagogical cells below.
+using CategoricalArrays          # i.id factor expansion (LSDV)
+using Loess                      # lowess smoother for the overall scatterplot
+
+_rawval(x) = hasproperty(x, :value) ? x.value : x
+```
+
+The Stata-command workflow in this chapter is provided by **StatEcon**:
+`stata_summarize`, `stata_regress`, `stata_regress_cluster`, `stata_correlate`,
+`stata_test`, `ereturn_list`, `stata_estimates_table`, `stata_xtdescribe`,
+`stata_xtsum`, `stata_xttab`, `stata_xttrans`, `stata_matlist`,
+`stata_xtreg_pa`, `stata_xtreg_re`, `stata_xtreg_re_print`, `stata_hausman`,
+`stata_areg`, `stata_xtregar`, `stata_xtscc`, and `stata_xtgls`.
+
+The cell below keeps the *advanced / pedagogical* panel helpers that are **not**
+part of StatEcon (they build the by-hand estimator comparisons and the cluster
+bootstrap used later in the chapter).
+
+```{julia}
+# ── Pedagogical panel helpers (NOT part of StatEcon) ──────────────────────────
+
+"""
+    panel_r2s(df, y, xs, idvar, β_slopes)
+
+Stata-style overall, between, and within panel R²s: `cor(y, Xβ̂)²` at the
+observation, panel-mean, and within-demeaned levels respectively.
+"""
+function panel_r2s(df, y::Symbol, xs::AbstractVector{Symbol}, idvar::Symbol,
+                   β_slopes::AbstractVector{<:Real})
+    d  = DataFrames.dropmissing(df, unique(vcat(y, xs, idvar)))
+    y_vec = Float64.(_rawval.(d[!, y]))
+    X  = hcat([Float64.(_rawval.(d[!, v])) for v in xs]...)
+    gm = DataFrames.combine(DataFrames.groupby(d, idvar),
+        (v => (x -> Statistics.mean(Float64.(_rawval.(x)))) =>
+              Symbol(v, "_m")
+         for v in vcat(y, xs))...)
+    dj = DataFrames.leftjoin(d, gm, on=idvar)
+    y_bar = Float64.(dj[!, Symbol(y, "_m")])
+    X_bar = hcat([Float64.(dj[!, Symbol(v, "_m")]) for v in xs]...)
+    y_b   = Float64.(gm[!, Symbol(y, "_m")])
+    X_b   = hcat([Float64.(gm[!, Symbol(v, "_m")]) for v in xs]...)
+    _safe(a, b) = Statistics.std(a) < 1e-12 || Statistics.std(b) < 1e-12 ?
+                   NaN : Statistics.cor(a, b)^2
+    return (; r2_o = _safe(y_vec, X * β_slopes),
+              r2_b = _safe(y_b,   X_b * β_slopes),
+              r2_w = _safe(y_vec .- y_bar, (X .- X_bar) * β_slopes))
+end
+
+"""
+    panel_ols(df, y, xs, idvar; vcov=:cluster)
+
+Pooled OLS on a panel dataset with optional cluster-robust SEs on `idvar`.
+"""
+function panel_ols(df, y::Symbol, xs::AbstractVector{Symbol}, idvar::Symbol;
+                   vcov::Symbol = :cluster)
+    d      = DataFrames.dropmissing(df, unique(vcat(y, xs, idvar)))
+    vcov_o = vcov == :classical ? FixedEffectModels.Vcov.simple() :
+                                   FixedEffectModels.Vcov.cluster(idvar)
+    m      = FixedEffectModels.reg(d, term(y) ~ sum(term.(xs)), vcov_o)
+    β      = StatsBase.coef(m)
+    V      = StatsBase.vcov(m)
+    se     = sqrt.(max.(LinearAlgebra.diag(V), 0.0))
+    cn     = replace.(string.(StatsBase.coefnames(m)), "(Intercept)" => "_cons")
+    n      = Int(StatsBase.nobs(m))
+    idxs   = [findfirst(==(string(v)), cn) for v in xs]
+    β_sl   = β[filter(x -> x !== nothing, idxs)]
+    r2s    = panel_r2s(d, y, xs, idvar, β_sl)
+    return (; β, V, se, coefnames = cn, n,
+              stats = Dict("N" => n,
+                           "r2"   => StatsBase.r2(m),
+                           "r2_o" => r2s.r2_o,
+                           "r2_b" => r2s.r2_b,
+                           "r2_w" => r2s.r2_w))
+end
+
+"""
+    panel_be(df, y, xs, idvar)
+
+Between estimator — OLS on the panel-mean dataset.
+"""
+function panel_be(df, y::Symbol, xs::AbstractVector{Symbol}, idvar::Symbol)
+    d  = DataFrames.dropmissing(df, unique(vcat(y, xs, idvar)))
+    n  = DataFrames.nrow(d)
+    gm = DataFrames.combine(DataFrames.groupby(d, idvar),
+        (v => (x -> Statistics.mean(Float64.(_rawval.(x)))) => v
+         for v in vcat(y, xs))...)
+    y_b = Float64.(gm[!, y])
+    X_b = hcat([Float64.(gm[!, v]) for v in xs]..., ones(DataFrames.nrow(gm)))
+    β   = X_b \ y_b
+    e   = y_b .- X_b * β
+    σ²  = sum(abs2, e) / (length(y_b) - size(X_b, 2))
+    V   = σ² .* LinearAlgebra.inv(X_b' * X_b)
+    se  = sqrt.(max.(LinearAlgebra.diag(V), 0.0))
+    r2b = 1 - sum(abs2, e) / sum((y_b .- Statistics.mean(y_b)).^2)
+    r2s = panel_r2s(d, y, xs, idvar, β[1:end-1])
+    return (; β, V, se, coefnames = vcat(string.(xs), "_cons"), n,
+              stats = Dict("N" => n, "r2" => r2b,
+                           "r2_o" => r2s.r2_o,
+                           "r2_b" => r2s.r2_b,
+                           "r2_w" => r2s.r2_w))
+end
+
+"""
+    panel_fe(df, y, xs, idvar; vcov=:classical)
+
+Within / FE estimator via `FixedEffectModels.reg(y ~ xs + fe(idvar))`.
+Time-invariant regressors absorbed by the FE are flagged with coefficient 0
+and SE 0 in the output. `vcov ∈ {:classical, :cluster}`.
+"""
+function panel_fe(df, y::Symbol, xs::AbstractVector{Symbol}, idvar::Symbol;
+                  vcov::Symbol = :classical)
+    d      = DataFrames.dropmissing(df, unique(vcat(y, xs, idvar)))
+    vcov_o = vcov == :classical ? FixedEffectModels.Vcov.simple() :
+                                   FixedEffectModels.Vcov.cluster(idvar)
+    f      = term(y) ~ sum(term.(xs)) + FixedEffectModels.fe(idvar)
+    m      = FixedEffectModels.reg(d, f, vcov_o)
+    β_all  = StatsBase.coef(m); V_all = StatsBase.vcov(m)
+    cn_m   = string.(StatsBase.coefnames(m))
+    ok     = findall(i -> isfinite(β_all[i]) && isfinite(V_all[i, i]),
+                     eachindex(β_all))
+    β_ok   = β_all[ok]
+    V_ok   = replace(V_all[ok, ok], NaN => 0.0, Inf => 0.0, -Inf => 0.0)
+    cn_ok  = cn_m[ok]
+
+    y_mean = Statistics.mean(Float64.(_rawval.(d[!, y])))
+    x̄     = Float64[Statistics.mean(Float64.(_rawval.(d[!, Symbol(nm)])))
+                    for nm in cn_ok]
+    cons   = y_mean - LinearAlgebra.dot(x̄, β_ok)
+    cons_se = sqrt(max(x̄' * V_ok * x̄, 0.0))
+
+    β_full = Float64[];  se_full = Float64[]
+    for v in string.(xs)
+        j = findfirst(==(v), cn_ok)
+        if j === nothing
+            push!(β_full, 0.0); push!(se_full, 0.0)
+        else
+            push!(β_full, β_ok[j]); push!(se_full, sqrt(max(V_ok[j,j], 0.0)))
+        end
+    end
+    push!(β_full, cons);  push!(se_full, cons_se)
+
+    # Stats
+    β_r2 = [findfirst(==(string(v)), cn_ok) === nothing ? 0.0 :
+             β_ok[findfirst(==(string(v)), cn_ok)] for v in xs]
+    r2s  = panel_r2s(d, y, xs, idvar, β_r2)
+    r2_w = StatsBase.r2(m)
+
+    N       = DataFrames.nrow(d); G = length(unique(d[!, idvar]))
+    gm      = DataFrames.combine(DataFrames.groupby(d, idvar),
+                (v => (x -> Statistics.mean(Float64.(_rawval.(x)))) =>
+                      Symbol(v, "_m") for v in vcat(y, xs))...)
+    dj      = DataFrames.leftjoin(d, gm, on=idvar)
+    y_w     = Float64.(dj[!, y]) .- Float64.(dj[!, Symbol(y, "_m")])
+    X_w     = hcat([Float64.(dj[!, v]) .- Float64.(dj[!, Symbol(v, "_m")])
+                    for v in xs]...)
+    e_w     = y_w .- X_w * β_r2
+    k_ok    = length(cn_ok)
+    σ_e     = sqrt(sum(abs2, e_w) / (N - G - k_ok + 1))
+    α̂       = [gm[i, Symbol(y, "_m")] -
+                sum(gm[i, Symbol(v, "_m")] * β_r2[k] for (k, v) in enumerate(xs))
+               for i in 1:DataFrames.nrow(gm)]
+    σ_u     = Statistics.std(α̂)
+    ρ       = σ_u^2 / (σ_u^2 + σ_e^2)
+
+    return (; β = β_full, V = V_ok, se = se_full,
+              coefnames = vcat(string.(xs), "_cons"), n = N,
+              stats = Dict("N"       => N, "r2"     => r2_w,
+                           "r2_o"    => r2s.r2_o, "r2_b" => r2s.r2_b,
+                           "r2_w"    => r2s.r2_w,
+                           "sigma_u" => σ_u, "sigma_e" => σ_e, "rho" => ρ))
+end
+
+"""
+    panel_re(df, y, xs, idvar; vcov=:classical)
+
+Thin wrapper over `stata_xtreg_re` that packages the result for
+`stata_estimates_table` with the usual panel-model stats.
+"""
+function panel_re(df, y::Symbol, xs::AbstractVector{Symbol}, idvar::Symbol;
+                  vcov::Symbol = :classical)
+    r   = stata_xtreg_re(df, y, xs, idvar; vce = vcov)
+    β_sl = r.β[1:end-1]
+    r2s  = panel_r2s(df, y, xs, idvar, β_sl)
+    return (; β = r.β, V = r.V, se = r.se,
+              coefnames = r.coefnames, n = r.n_obs,
+              stats = Dict("N"       => r.n_obs,
+                           "r2_o"    => r2s.r2_o,
+                           "r2_b"    => r2s.r2_b,
+                           "r2_w"    => r2s.r2_w,
+                           "sigma_u" => r.σ_u,
+                           "sigma_e" => r.σ_ε,
+                           "rho"     => r.ρ))
+end
+
+"""
+    boot_regtable(β, β_boot; coefnames, title="", level=0.95)
+
+Stata-style regression table from a point estimate `β` and a `B × k` matrix of
+bootstrap replicates `β_boot`. Prints Coef / Bootstrap SE / z / P>|z| / CI,
+exactly like Stata prints after `vce(boot)`. (Printf-based so no PrettyTables
+dependency.)
+"""
+function boot_regtable(β::AbstractVector, β_boot::AbstractMatrix;
+                       coefnames, title::String = "", level::Float64 = 0.95)
+    se   = Statistics.std(β_boot, dims=1)[:]
+    z    = β ./ se
+    pval = 2 .* (1 .- Distributions.cdf.(Distributions.Normal(), abs.(z)))
+    crit = Distributions.quantile(Distributions.Normal(), 1 - (1-level)/2)
+    lo   = β .- crit .* se
+    hi   = β .+ crit .* se
+    isempty(title) || println(title)
+    Printf.@printf("  (bootstrap replications = %d)\n\n", size(β_boot, 1))
+    println("-"^78)
+    Printf.@printf("%12s | %11s  %11s  %6s  %5s     [%d%% conf. interval]\n",
+                   "", "Coefficient", "Bootstr. SE", "z", "P>|z|",
+                   round(Int, 100*level))
+    println("-"^13, "+", "-"^64)
+    for i in eachindex(β)
+        Printf.@printf("%12s | %11.6f  %11.6f  %6.2f  %5.3f  %10.6f  %10.6f\n",
+                       string(coefnames[i]), β[i], se[i], z[i], pval[i], lo[i], hi[i])
+    end
+    println("-"^78)
+    return (; β, se, z, p=pval, ci_lo=lo, ci_hi=hi)
+end
+
+"""
+    panel_bootstrap(f, df, idvar; B=400, seed=10101)
+
+Cluster bootstrap on the panel identifier `idvar`. Applies `f(df_resampled)` on
+each resample and returns a `B × k` matrix (one row per replicate).
+"""
+function panel_bootstrap(f::Function, df, idvar::Symbol; B::Int=400, seed::Int=10101,
+                         verbose::Bool=true)
+    rng = Random.MersenneTwister(seed)
+    ids = unique(df[!, idvar])
+    id_to_rows = Dict{Any, Vector{Int}}()
+    for (i, id) in enumerate(df[!, idvar])
+        push!(get!(id_to_rows, id, Int[]), i)
+    end
+    results = Vector{Vector{Float64}}()
+    n_fail = 0
+    for b in 1:B
+        boot_ids = StatsBase.sample(rng, ids, length(ids); replace=true)
+        row_idx = Int[]
+        new_id  = Int[]
+        for (k, i) in enumerate(boot_ids)
+            rows = id_to_rows[i]
+            append!(row_idx, rows)
+            append!(new_id, fill(k, length(rows)))
+        end
+        sub = df[row_idx, :]
+        sub[!, idvar] = new_id
+        try
+            push!(results, f(sub))
+        catch
+            n_fail += 1
+        end
+    end
+    if verbose && n_fail > 0
+        @warn "Bootstrap: $n_fail/$B resamples failed (skipped)."
+    end
+    isempty(results) && error("All bootstrap resamples failed.")
+    return reduce(hcat, results)'   # B × k matrix
+end
+
+"""
+    panel_autocor(df, var, idvar, timevar, lag)
+
+Correlation of `var` with its `lag`-period lag, computed within panels.
+"""
+function panel_autocor(df, var::Symbol, idvar::Symbol, timevar::Symbol, lag::Int)
+    d = DataFrames.sort(df, [idvar, timevar])
+    lagcol = Symbol(var, "_L", lag)
+    d = DataFrames.transform(DataFrames.groupby(d, idvar),
+        var => (x -> vcat(fill(missing, lag), collect(x)[1:end-lag])) => lagcol)
+    d = DataFrames.dropmissing(d, [var, lagcol])
+    return Statistics.cor(Float64.(d[!, var]), Float64.(d[!, lagcol]))
+end
+
+"""
+    _est_wrap(m; stats=Symbol[])
+
+Wrap a fitted model — either a `StatsBase`-compatible object (e.g.
+`FixedEffectModels.reg`) or one of the NamedTuple results returned by
+`stata_xtreg_re` / `stata_xtscc` / `stata_xtregar` — into the
+`(; β, se, coefnames, stats)` NamedTuple consumed by `stata_estimates_table`.
+`stats` requests scalar statistics (e.g. `:N`, `:r2`, `:r2_a`); any that a
+given model cannot supply are simply omitted (blank in the table).
+"""
+function _est_wrap(m; stats::AbstractVector = Symbol[])
+    if hasproperty(m, :β)                      # already a result NamedTuple
+        β  = m.β
+        se = hasproperty(m, :se) ? m.se :
+             sqrt.(max.(LinearAlgebra.diag(m.V), 0.0))
+        cn = string.(m.coefnames)
+    else                                        # StatsBase-compatible model
+        β  = StatsBase.coef(m)
+        se = sqrt.(max.(LinearAlgebra.diag(StatsBase.vcov(m)), 0.0))
+        cn = replace.(string.(StatsBase.coefnames(m)), "(Intercept)" => "_cons")
+    end
+    _nobs(mm) = hasproperty(mm, :n_obs) ? mm.n_obs :
+                hasproperty(mm, :n) ? mm.n : Int(StatsBase.nobs(mm))
+    getters = Dict{Symbol,Function}(
+        :N    => mm -> _nobs(mm),
+        :r2   => mm -> StatsBase.r2(mm),
+        :r2_a => mm -> StatsBase.adjr2(mm),
+        :r2_o => mm -> mm.r2_overall,
+        :r2_b => mm -> mm.r2_between,
+        :r2_w => mm -> mm.r2_within,
+    )
+    st = Dict{String,Any}()
+    for s in stats
+        haskey(getters, s) || continue
+        try; st[string(s)] = getters[s](m); catch; end
+    end
+    return (; β, se, coefnames = cn, stats = st)
+end
+```
+
+# 8 linear panel-data models: Basics
+
+## 8.1 Introduction
+
+## 8.2 Panel-data methods overv1ew
+
+### 8.2.1 Some basic considerations
+
+### 8.2.2 Some basic panel models
+
+#### Individual-effects model
+
+#### Fixed-effects model
+
+#### Random-effects model
+
+#### Pooled model or population-averaged model
+
+#### Two-way-effects model
+
+#### Mixed linear models
+
+### 8.2.3 Cluster-robust inference
+
+### 8.2.4 The xtreg command
+
+### 8.2.5 Stata linear panel-data commands
+
+## 8.3 Panel-data summary
+
+### 8.3.1 Data description and summary statistics
+
+```{julia}
+#=
+* Read in dataset and describe
+use musr/mus08psidextract.dta, clear
+describe
+=#
+# use musr/mus08psidextract.dta, clear
+# describe
+df8 = DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus08psidextract.dta"))
+DataFrames.describe(df8)
+```
+
+```{julia}
+#=
+* Summary of dataset
+summarize
+=#
+# summarize
+stata_summarize(df8);
+```
+
+### 8.3.2 Panel-data organization
+
+```{julia}
+#=
+* Organization of dataset
+list id t exp wks occ in 1/3, clean
+=#
+# list id t exp wks occ in 1/3, clean
+df8[1:3, [:id, :t, :exp, :wks, :occ]]
+```
+
+```{julia}
+#=
+* Declare individual identifier and time identifier
+xtset id t
+=#
+# xtset id t  — declare panel identifiers (in Julia we just note it for later)
+panelvar, timevar = :id, :t
+```
+
+### 8.3.3 Panel-data description
+
+```{julia}
+#=
+* Panel description of dataset
+xtdescribe
+=#
+# xtdescribe
+stata_xtdescribe(df8, :id, :t);
+```
+
+### 8.3.4 Within and between variation
+
+```{julia}
+#=
+* Panel summary statistics: within and between variation
+xtsum id t lwage ed exp exp2 wks south tdum1
+=#
+# xtsum id t lwage ed exp exp2 wks south tdum1
+stata_xtsum(df8, [:lwage, :ed, :exp, :exp2, :wks, :south, :tdum1], :id);
+```
+
+```{julia}
+#=
+* Panel tabulation for a variable
+xttab south
+=#
+#=
+* Panel summary statistics: within and between variation
+xtsum id t lwage ed exp exp2 wks south tdum1
+=#
+stata_xtsum(df8, [:id, :t, :lwage, :ed, :exp, :exp2, :wks, :south, :tdum1], :id);
+```
+
+```{julia}
+#=
+* Transition probabilities for a variable
+xttrans south, freq
+=#
+# xttab south
+stata_xttab(df8, :south, :id);
+```
+
+```{julia}
+# xttrans south, freq
+stata_xttrans(df8, :south, :id, :t; freq = true);
+```
+
+### 8.3.5 Time-series plots for each individual
+
+```{julia}
+#=
+// Following simpler command not included in book
+* Simple time-series plot for each of 20 individuals
+quietly xtline lwage if id<=20, overlay
+=#
+# Time-series plot of lwage for the first 20 individuals
+sub20 = filter(r -> r.id <= 20, df8)
+fig8 = CairoMakie.Figure(size = (700, 400))
+ax = CairoMakie.Axis(fig8[1, 1], xlabel = "t", ylabel = "lwage")
+for id in unique(sub20.id)
+    sub_id = filter(r -> r.id == id, sub20)
+    CairoMakie.lines!(ax, sub_id.t, sub_id.lwage)
+end
+fig8
+```
+
+```{julia}
+#=
+* Simple time-series plot for each of 20 individuals
+quietly xtline lwage if id<=20, overlay legend(off) saving(musr/lwage, replace)
+quietly xtline wks if id<=20, overlay legend(off) saving(musr/wks, replace)
+graph combine musr/lwage.gph musr/wks.gph, iscale(1)
+quietly graph export musr/mus08timeseriesplot.eps, replace
+=#
+# Two side-by-side plots: lwage and wks for first 20 individuals
+fig8b = CairoMakie.Figure(size = (1000, 400))
+ax1 = CairoMakie.Axis(fig8b[1, 1], xlabel = "t", ylabel = "lwage")
+ax2 = CairoMakie.Axis(fig8b[1, 2], xlabel = "t", ylabel = "wks")
+for id in unique(sub20.id)
+    sub_id = filter(r -> r.id == id, sub20)
+    CairoMakie.lines!(ax1, sub_id.t, sub_id.lwage)
+    CairoMakie.lines!(ax2, sub_id.t, Float64.(sub_id.wks))
+end
+fig8b
+```
+
+### 8.3.6 Overall scatterplot
+
+```{julia}
+#=
+graph twoway (scatter lwage exp) (qfit lwage exp) (lowess lwage exp)
+=#
+# Scatter + quadratic fit + lowess
+fig8s = CairoMakie.Figure(size = (700, 500))
+ax = CairoMakie.Axis(fig8s[1, 1],
+    xlabel = "Years of experience", ylabel = "Log hourly wage",
+    title  = "Overall variation: Log wage versus experience")
+CairoMakie.scatter!(ax, df8.exp, df8.lwage, markersize = 2, color = (:gray, 0.5))
+
+# Quadratic fit
+m_q = FixedEffectModels.reg(df8, GLM.@formula(lwage ~ exp + exp2))
+xs = range(extrema(df8.exp)..., length = 200)
+xs_df = DataFrames.DataFrame(exp = xs, exp2 = xs.^2)
+CairoMakie.lines!(ax, xs, FixedEffectModels.predict(m_q, xs_df),
+                  color = :red, linewidth = 2, label = "Quadratic fit")
+
+# Loess
+lo = Loess.loess(df8.exp, df8.lwage; span = 0.4)
+CairoMakie.lines!(ax, sort(df8.exp), Loess.predict(lo, sort(df8.exp)),
+                  color = :blue, linewidth = 2, label = "Lowess")
+CairoMakie.axislegend(ax, position = :rb)
+fig8s
+```
+
+### 8.3.7 Within scatterplot
+
+```{julia}
+#=
+* Scatterplot for within variation
+preserve
+xtdata, fe
+graph twoway (scatter lwage exp) (qfit lwage exp) (lowess lwage exp),  ///
+  plotregion(style(none)) title("Within variation: Log wage versus experience")
+restore
+graph export musr/mus08withinplot.eps, replace
+=#
+# Within transformation: subtract individual means
+df8w = DataFrames.transform(DataFrames.groupby(df8, :id),
+    :lwage => (x -> x .- Statistics.mean(x)) => :lwage_w,
+    :exp   => (x -> x .- Statistics.mean(x)) => :exp_w)
+
+fig8w = CairoMakie.Figure(size = (700, 500))
+ax = CairoMakie.Axis(fig8w[1, 1],
+    title = "Within variation: log wage versus experience",
+    xlabel = "exp (within)", ylabel = "lwage (within)")
+CairoMakie.scatter!(ax, df8w.exp_w, df8w.lwage_w, markersize = 2, color = (:gray, 0.5))
+fig8w
+```
+
+### 8.3.8 Pooled OLS regression with cluster-robust standard errors
+
+```{julia}
+#=
+* Pooled OLS with cluster-robust standard errors
+use musr/mus08psidextract.dta, clear
+regress lwage exp exp2 wks ed, vce(cluster id)
+=#
+# regress lwage exp exp2 wks ed, vce(cluster id)
+m_pool_robust = FixedEffectModels.reg(df8,
+    @formula(lwage ~ exp + exp2 + wks + ed), Vcov.cluster(:id))
+println(m_pool_robust)
+ereturn_list(m_pool_robust);
+```
+
+```{julia}
+#=
+* Pooled OLS with incorrect default standard errors
+regress lwage exp exp2 wks ed
+=#
+#=
+* Pooled OLS with cluster-robust standard errors
+use musr/mus08psidextract.dta, clear
+regress lwage exp exp2 wks ed, vce(cluster id)
+=#
+stata_regress_cluster(df8, :lwage, [:exp, :exp2, :wks, :ed];
+                      cluster = :id);
+```
+
+```{julia}
+# regress lwage exp exp2 wks ed    (default, incorrect SE)
+m_pool_default = FixedEffectModels.reg(df8,
+    @formula(lwage ~ exp + exp2 + wks + ed))
+println(m_pool_default)
+```
+
+```{julia}
+#=
+* Pooled OLS with incorrect default standard errors
+regress lwage exp exp2 wks ed
+=#
+stata_regress(df8, :lwage, [:exp, :exp2, :wks, :ed]);
+```
+
+### 8.3.9 Time-series autocorrelations for panel data
+
+
+```{julia}
+#=
+* First-order autocorrelation in a variable
+sort id t
+correlate lwage L.lwage
+=#
+# quietly regress lwage exp exp2 wks ed, vce(cluster id)
+# predict uhat, residuals
+# forvalues j = 1/6 { quietly corr uhat L`j'.uhat; display … }
+df8.uhat = df8.lwage .- FixedEffectModels.predict(m_pool_robust, df8)
+for j in 1:6
+    Printf.@printf("Autocorrelation at lag %d = %6.3f\n",
+                   j, panel_autocor(df8, :uhat, :id, :t, j))
+end
+```
+
+```{julia}
+#=
+* Autocorrelations of residual
+quietly regress lwage exp exp2 wks ed, vce(cluster id)
+predict uhat, residuals
+forvalues j = 1/6 {
+     quietly corr uhat L`j'.uhat
+     display "Autocorrelation at lag `j' = " %6.3f r(rho)
+     }
+=#
+# forvalues s = 2/7 { corr uhat L1.uhat if t == `s' }
+# First-order autocorrelation, by year
+df8_al = DataFrames.transform(DataFrames.groupby(
+    DataFrames.sort(df8, [:id, :t]), :id),
+    :uhat => (x -> [missing; collect(x)[1:end-1]]) => :uhat_lag1)
+for s in 2:7
+    sub = DataFrames.dropmissing(filter(r -> r.t == s, df8_al), :uhat_lag1)
+    if DataFrames.nrow(sub) > 1
+        Printf.@printf("Autocorrelation at lag 1 in year %d = %6.3f\n",
+                       s, Statistics.cor(sub.uhat, sub.uhat_lag1))
+    end
+end
+```
+
+### 8.3.10 Error correlation in the RE model
+
+## 8.4 Pooled or population-averaged estimators
+
+### 8.4.1 Pooled OLS estimator
+
+### 8.4.2 Pooled FGLS estimator or population-averaged estimator
+
+### 8.4.3 The xtreg, pa command
+
+### 8.4.4 Application of the xtreg, pa command
+
+```{julia}
+#=
+* Population-averaged or pooled FGLS estimator with AR(2) error
+xtreg lwage exp exp2 wks ed, pa corr(ar 2) vce(robust) nolog
+=#
+# xtreg lwage exp exp2 wks ed, pa corr(ar 2) vce(robust) nolog
+pa = stata_xtreg_pa(df8, :lwage, [:exp, :exp2, :wks, :ed], :id, :t;
+                    corr = :ar, lags = 2, vce = :robust);
+```
+
+```{julia}
+#=
+* Estimated error correlation matrix after xtreg, pa
+matrix list e(R)
+=#
+# matrix list e(R)   — already printed by stata_xtreg_pa above
+# Show the estimated AR autocorrelation sequence
+println("Estimated autocorrelations (ρ̂₁, ρ̂₂, ...):")
+println(round.(pa.ρ, digits=4))
+```
+
+
+```{julia}
+#=
+* Estimated error correlation matrix after xtreg, pa
+matrix list e(R)
+=#
+stata_matlist(pa.R, "e(R)")
+```
+
+## 8.5 Within estimator
+
+### 8.5.1 Within estimator
+
+### 8.5.2 The xtreg, fe command
+
+### 8.5.3 Application of the xtreg, fe command
+
+```{julia}
+#=
+* Within or FE estimator with cluster-robust standard errors
+xtreg lwage exp exp2 wks ed, fe vce(cluster id)
+=#
+# xtreg lwage exp exp2 wks ed, fe vce(cluster id)
+m_fe = FixedEffectModels.reg(df8,
+    @formula(lwage ~ exp + exp2 + wks + ed + fe(id)), Vcov.cluster(:id))
+println(m_fe)
+ereturn_list(m_fe);
+```
+
+```{julia}
+#=
+* Within or FE estimator with cluster-robust standard errors
+xtreg lwage exp exp2 wks ed, fe vce(cluster id)
+=#
+m_fe_c = FixedEffectModels.reg(df8,
+    @formula(lwage ~ exp + exp2 + wks + ed + fe(id)),
+    Vcov.cluster(:id))
+stata_regress(m_fe_c);
+```
+
+### 8.5.4 Least-squares dummy-variables regression
+
+```{julia}
+# areg lwage exp exp2 wks ed, absorb(id) vce(cluster id)    — identical to above
+m_areg = FixedEffectModels.reg(df8,
+    @formula(lwage ~ exp + exp2 + wks + ed + fe(id)), Vcov.cluster(:id))
+println(m_areg)
+# ed is time-invariant, so FE absorbs it. Inside FixedEffectModels.jl that column
+# is automatically dropped (like Stata's `fe` does) — this is why ed is NOT in
+# the xtreg,fe output even though the Stata book shows 0 for its row.
+```
+
+```{julia}
+#=
+* LSDV model fit using areg with cluster-robust standard errors
+areg lwage exp exp2 wks ed, absorb(id) vce(cluster id)
+=#
+stata_areg(df8, :lwage, [:exp, :exp2, :wks, :ed];
+           absorb = :id, cluster = :id);
+```
+
+
+```{julia}
+#=
+* LSDV model fit using factor variables with cluster-robust standard errors
+set matsize 800
+quietly regress lwage exp exp2 wks ed i.id, vce(cluster id)
+estimates table, keep(exp exp2 wks ed _cons) b se b(%12.7f)
+=#
+# Treat id as categorical so FixedEffectModels expands it into 594 dummies
+# (one panel dropped as the base, exactly like Stata's `i.id`).
+df_lsdv        = copy(df8)
+df_lsdv.id_fac = CategoricalArrays.categorical(df_lsdv.id)
+
+m_lsdv = FixedEffectModels.reg(df_lsdv,
+    @formula(lwage ~ exp + exp2 + wks + ed + id_fac),
+    Vcov.cluster(:id))
+
+# Filter out NaN rows/cols (collinear dummies) and relabel "(Intercept)" → "_cons".
+β_all  = StatsBase.coef(m_lsdv)
+V_all  = StatsBase.vcov(m_lsdv)
+cn_all = string.(StatsBase.coefnames(m_lsdv))
+ok     = findall(i -> isfinite(β_all[i]) && isfinite(V_all[i, i]),
+                 eachindex(β_all))
+β      = β_all[ok]
+V      = replace(V_all[ok, ok], NaN => 0.0, Inf => 0.0, -Inf => 0.0)
+se     = sqrt.(max.(LinearAlgebra.diag(V), 0.0))
+cn     = replace.(cn_all[ok], "(Intercept)" => "_cons")
+
+fit_lsdv = (; β, V, se, coefnames = cn, n = Int(StatsBase.nobs(m_lsdv)))
+
+# estimates table, keep(exp exp2 wks ed _cons) b se b(%12.7f)
+stata_estimates_table([fit_lsdv], ["Active"];
+                      vars_order = ["exp", "exp2", "wks", "ed", "_cons"],
+                      fmt        = "%12.7f")
+```
+
+## 8.6 Between estimator
+
+### 8.6.1 Between estimator
+
+### 8.6.2 Application of the xtreg, be command
+
+```{julia}
+#=
+* Between estimator with default standard errors
+xtreg lwage exp exp2 wks ed, be
+=#
+# xtreg lwage exp exp2 wks ed, be
+# Between: regress the panel-averaged data
+df8_mean = DataFrames.combine(DataFrames.groupby(df8, :id),
+    :lwage => Statistics.mean => :lwage,
+    :exp   => Statistics.mean => :exp,
+    :exp2  => Statistics.mean => :exp2,
+    :wks   => Statistics.mean => :wks,
+    :ed    => Statistics.mean => :ed)
+m_be = FixedEffectModels.reg(df8_mean,
+    @formula(lwage ~ exp + exp2 + wks + ed))
+println(m_be)
+```
+
+```{julia}
+#=
+// Following gives heteroskedasrtic-robust se's for between estimator
+xtreg lwage exp exp2 wks ed, be vce(boot, reps(400) seed(10101) nodots)
+=#
+# xtreg lwage exp exp2 wks ed, be vce(boot, reps(400) seed(10101) nodots)
+# Cluster bootstrap on id for heteroskedasticity-robust SEs of the BE estimator.
+# Each bootstrap replicate resamples panels, then re-aggregates to panel means
+# and refits OLS on those means.
+β_be_mat = panel_bootstrap(df8, :id; B=400, seed=10101) do sub
+    means = DataFrames.combine(DataFrames.groupby(sub, :id),
+        :lwage => Statistics.mean => :lwage,
+        :exp   => Statistics.mean => :exp,
+        :exp2  => Statistics.mean => :exp2,
+        :wks   => Statistics.mean => :wks,
+        :ed    => Statistics.mean => :ed)
+    StatsBase.coef(FixedEffectModels.reg(means,
+        @formula(lwage ~ exp + exp2 + wks + ed)))
+end
+
+boot_regtable(StatsBase.coef(m_be), β_be_mat;
+    coefnames = StatsBase.coefnames(m_be),
+    title = "Between estimator (xtreg lwage exp exp2 wks ed, be vce(boot))");
+```
+
+
+```{julia}
+#=
+// Following gives heteroskedasrtic-robust se's for between estimator
+xtreg lwage exp exp2 wks ed, be vce(boot, reps(400) seed(10101) nodots)
+=#
+regress_be_boot = panel_bootstrap(df8, :id; B=400, seed=10101) do sub
+    means = DataFrames.combine(DataFrames.groupby(sub, :id),
+        :lwage => Statistics.mean => :lwage,
+        :exp   => Statistics.mean => :exp,
+        :exp2  => Statistics.mean => :exp2,
+        :wks   => Statistics.mean => :wks,
+        :ed    => Statistics.mean => :ed)
+    StatsBase.coef(FixedEffectModels.reg(means,
+        @formula(lwage ~ exp + exp2 + wks + ed)))
+end
+```
+
+
+## 8.7 RE estimator
+
+### 8.7.1 RE estimator
+
+### 8.7.2 The xtreg, re command
+
+### 8.7.3 Application of the xtreg, re command
+
+```{julia}
+#=
+* Random-effects estimator with cluster-robust standard errors
+xtreg lwage exp exp2 wks ed, re vce(cluster id) theta
+=#
+# xtreg lwage exp exp2 wks ed, re vce(cluster id) theta
+#
+# Classical Swamy-Arora GLS — matches Stata's `xtreg, re` default.
+# (MixedModels uses REML, which gives slightly different variance components.)
+re_ss = stata_xtreg_re(df8, :lwage, [:exp, :exp2, :wks, :ed], :id; vce=:cluster)
+stata_xtreg_re_print(re_ss);
+```
+
+## 8.8 Comparison of estimators
+
+### 8.8.1 Estimates of variance components
+
+### 8.8.2 Within and between R-squared
+
+### 8.8.3 Estimator comparison
+
+```{julia}
+#=
+use musr/mus08psidextract.dta, clear
+
+* Compare OLS, BE, FE, RE estimators, and methods to compute standard errors
+global xlist exp exp2 wks ed
+quietly regress lwage $xlist, vce(cluster id)
+estimates store OLS_rob
+quietly xtreg lwage $xlist, be
+estimates store BE
+quietly xtreg lwage $xlist, fe
+estimates store FE
+quietly xtreg lwage $xlist, fe vce(robust)
+estimates store FE_rob
+quietly xtreg lwage $xlist, re
+estimates store RE
+quietly xtreg lwage $xlist, re vce(robust)
+estimates store RE_rob
+estimates table OLS_rob BE FE FE_rob RE RE_rob,  ///
+  b se stats(N r2 r2_o r2_b r2_w sigma_u sigma_e rho) b(%7.4f)
+=#
+# quietly regress/xtreg ...
+# estimates store OLS_rob / BE / FE / FE_rob / RE / RE_rob
+# estimates table OLS_rob BE FE FE_rob RE RE_rob, b se
+m_ols_rob = FixedEffectModels.reg(df8,
+    @formula(lwage ~ exp + exp2 + wks + ed), Vcov.cluster(:id))
+m_fe_rob  = FixedEffectModels.reg(df8,
+    @formula(lwage ~ exp + exp2 + wks + ed + fe(id)), Vcov.cluster(:id))
+# RE (Swamy-Arora GLS) with classical and cluster-robust SEs — matches Stata
+m_re     = stata_xtreg_re(df8, :lwage, [:exp, :exp2, :wks, :ed], :id; vce=:classical)
+m_re_rob = stata_xtreg_re(df8, :lwage, [:exp, :exp2, :wks, :ed], :id; vce=:cluster)
+
+# stata_estimates_table needs (β, se, coefnames[, stats]); `_est_wrap` adapts the
+# raw FixedEffectModels fits and the RE result NamedTuples into that shape.
+est_models = [_est_wrap(m; stats = [:N, :r2, :r2_a])
+              for m in (m_ols_rob, m_be, m_fe, m_fe_rob, m_re, m_re_rob)]
+stata_estimates_table(est_models,
+    ["OLS_rob", "BE", "FE", "FE_rob", "RE", "RE_rob"];
+    vars_order = ["exp", "exp2", "wks", "ed"],
+    stats      = ["N", "r2", "r2_a"])
+```
+
+```{julia}
+#=
+use musr/mus08psidextract.dta, clear
+
+* Compare OLS, BE, FE, RE estimators, and methods to compute standard errors
+global xlist exp exp2 wks ed
+quietly regress lwage $xlist, vce(cluster id)
+estimates store OLS_rob
+quietly xtreg lwage $xlist, be
+estimates store BE
+quietly xtreg lwage $xlist, fe
+estimates store FE
+quietly xtreg lwage $xlist, fe vce(robust)
+estimates store FE_rob
+quietly xtreg lwage $xlist, re
+estimates store RE
+quietly xtreg lwage $xlist, re vce(robust)
+estimates store RE_rob
+estimates table OLS_rob BE FE FE_rob RE RE_rob,  ///
+  b se stats(N r2 r2_o r2_b r2_w sigma_u sigma_e rho) b(%7.4f)
+=#
+xs8 = [:exp, :exp2, :wks, :ed]
+
+OLS_rob = panel_ols(df8, :lwage, xs8, :id; vcov = :cluster)
+BE      = panel_be( df8, :lwage, xs8, :id)
+FE      = panel_fe( df8, :lwage, xs8, :id; vcov = :classical)
+FE_rob  = panel_fe( df8, :lwage, xs8, :id; vcov = :cluster)
+RE      = panel_re( df8, :lwage, xs8, :id; vcov = :classical)
+RE_rob  = panel_re( df8, :lwage, xs8, :id; vcov = :cluster)
+
+stats_list = ["N", "r2", "r2_o", "r2_b", "r2_w", "sigma_u", "sigma_e", "rho"]
+vars_ord   = ["exp", "exp2", "wks", "ed", "_cons"]
+
+# ── First table (5 columns, RE_rob omitted for width)
+stata_estimates_table([OLS_rob, BE, FE, FE_rob, RE],
+    ["OLS_rob", "BE", "FE", "FE_rob", "RE"];
+    vars_order = vars_ord, stats = stats_list, fmt = "%10.4f")
+
+# ── Second table for RE_rob alone
+println()
+stata_estimates_table([RE_rob], ["RE_rob"];
+    vars_order = vars_ord, stats = stats_list, fmt = "%10.4f")
+```
+
+### 8.8.4 Fixed effects versus random effects
+
+### 8.8.5 Hausman test for fixed effects
+
+```{julia}
+# hausman FE RE, sigmamore
+# Classical Hausman: FE vs RE.  Our `stata_xtreg_re` uses the Swamy-Arora GLS
+# variance components, which is what Stata's `xtreg, re` does — so the
+# numbers match Stata's `hausman FE RE, sigmamore`.
+m_re_sa = stata_xtreg_re(df8, :lwage, [:exp, :exp2, :wks, :ed], :id; vce=:classical)
+stata_hausman(m_fe, m_re_sa; sigmamore=true);
+```
+
+```{julia}
+#=
+* Hausman test assuming RE estimator is fully efficient under null hypothesis
+hausman FE RE, sigmamore
+=#
+m_fe_h = FixedEffectModels.reg(df8,
+    @formula(lwage ~ exp + exp2 + wks + ed + fe(id)))
+m_re_h = stata_xtreg_re(df8, :lwage, [:exp, :exp2, :wks, :ed], :id; vce = :classical)
+stata_hausman(m_fe_h, m_re_h; sigmamore = true);
+```
+
+#### Robust Hausman test
+
+```{julia}
+#=
+* Robust Hausman test using method of Wooldridge (2002)
+quietly xtreg lwage $xlist, re
+scalar theta = e(theta)
+global yandxforhausman lwage exp exp2 wks ed
+sort id
+foreach x of varlist $yandxforhausman {
+  by id: egen mean`x' = mean(`x')
+  generate md`x' = `x' - mean`x'
+  generate red`x' = `x' - theta*mean`x'
+  }
+quietly regress redlwage redexp redexp2 redwks reded mdexp mdexp2 mdwks, vce(cluster id)
+test mdexp mdexp2 mdwks
+=#
+# Robust Hausman test (Wooldridge 2002):
+# regress within-demeaned y on within-demeaned x AND x̃ (partial-demeaned), test x̃=0
+# Use θ̂ from the RE fit.
+θ = m_re_h.θ   # Swamy-Arora θ from stata_xtreg_re (matches Stata)
+Printf.@printf("Estimated θ = %.4f\n", θ)
+
+# Build within-demeaned and θ-demeaned variables for the Wooldridge auxiliary
+df8_w = DataFrames.transform(DataFrames.groupby(df8, :id),
+    [:lwage, :exp, :exp2, :wks, :ed] .=>
+        (x -> (xm = Statistics.mean(Float64.(_rawval.(collect(skipmissing(x)))));
+               Float64.(x) .- xm)) .=>
+        [:mdlwage, :mdexp, :mdexp2, :mdwks, :mded])
+df8_w = DataFrames.transform(DataFrames.groupby(df8_w, :id),
+    [:lwage, :exp, :exp2, :wks, :ed] .=>
+        (x -> (xm = Statistics.mean(Float64.(_rawval.(collect(skipmissing(x)))));
+               Float64.(x) .- θ*xm)) .=>
+        [:redlwage, :redexp, :redexp2, :redwks, :reded])
+
+m_wu = FixedEffectModels.reg(df8_w,
+    @formula(redlwage ~ redexp + redexp2 + redwks + reded +
+                        mdexp + mdexp2 + mdwks),
+    Vcov.cluster(:id))
+# test mdexp mdexp2 mdwks
+stata_test(m_wu, ["mdexp", "mdexp2", "mdwks"]);
+```
+
+### 8.8.6 Prediction
+
+```{julia}
+#=
+* Prediction after OLS and RE estimation
+quietly regress lwage exp exp2 wks ed, vce(cluster id)
+predict xbols, xb
+quietly xtreg lwage exp exp2 wks ed, re
+predict xbre, xb
+predict xbure, xbu
+summarize lwage xbols xbre xbure
+correlate lwage xbols xbre xbure
+=#
+# quietly regress lwage exp exp2 wks ed, vce(cluster id)
+# predict xbols, xb                      — pooled OLS linear prediction
+# quietly xtreg lwage exp exp2 wks ed, re
+# predict xbre,  xb                      — RE linear prediction (X'β only)
+# predict xbure, xbu                     — RE prediction with BLUPs (X'β + ûᵢ)
+
+# Build a complete-cases frame so all four series have the same N
+df8_p = DataFrames.dropmissing(df8[:, [:lwage, :exp, :exp2, :wks, :ed, :id]])
+
+# --- xbols: pooled OLS prediction ---
+xbols = FixedEffectModels.predict(m_pool_robust, df8_p)
+
+# --- xbre: RE linear prediction (X'β̂) using Swamy-Arora β from stata_xtreg_re ---
+re_pr = stata_xtreg_re(df8_p, :lwage, [:exp, :exp2, :wks, :ed], :id; vce=:classical)
+# Order β as [exp, exp2, wks, ed, _cons]
+β_re = re_pr.β
+X_re = hcat(Float64.(df8_p.exp), Float64.(df8_p.exp2),
+            Float64.(df8_p.wks), Float64.(df8_p.ed),
+            ones(DataFrames.nrow(df8_p)))
+xbre = X_re * β_re
+
+# --- xbure: BLUP-augmented RE prediction (X'β̂ + ûᵢ) ---
+# Under balanced RE: ûᵢ = (T σ²_u / (T σ²_u + σ²_ε)) · ū_i,  where ū_i = mean of (yᵢₜ - xᵢₜ'β̂)
+df8_p.res_re = df8_p.lwage .- xbre
+u_by_id = DataFrames.combine(DataFrames.groupby(df8_p, :id),
+    :res_re => Statistics.mean => :ubar,
+    DataFrames.nrow        => :T_i)
+σ2_u = re_pr.σ_u^2
+σ2_e = re_pr.σ_ε^2
+u_by_id.u_hat = (σ2_u .* u_by_id.T_i) ./ (σ2_u .* u_by_id.T_i .+ σ2_e) .* u_by_id.ubar
+df8_p = DataFrames.leftjoin(df8_p, u_by_id[!, [:id, :u_hat]], on = :id)
+xbure = xbre .+ df8_p.u_hat
+
+# --- summarize lwage xbols xbre xbure ---
+pred_df = DataFrames.DataFrame(lwage=df8_p.lwage,
+                               xbols=xbols, xbre=xbre, xbure=xbure)
+stata_summarize(pred_df);
+```
+
+```{julia}
+# correlate lwage xbols xbre xbure
+stata_correlate(pred_df, [:lwage, :xbols, :xbre, :xbure]);
+```
+
+## 8.9 First-difference estimator
+
+### 8.9.1 First-difference estimator
+
+```{julia}
+#=
+sort id t
+* First-differences estimator with cluster-robust standard errors
+regress D.(lwage exp exp2 wks ed), vce(cluster id) noconstant
+=#
+# regress D.(lwage exp exp2 wks ed), vce(cluster id) noconstant
+_fdiff(x) = let v = collect(Float64, x); vcat(missing, v[2:end] .- v[1:end-1]) end
+df8_fd = DataFrames.transform(
+    DataFrames.groupby(DataFrames.sort(df8, [:id, :t]), :id),
+    :lwage => _fdiff => :d_lwage,
+    :exp   => _fdiff => :d_exp,
+    :exp2  => _fdiff => :d_exp2,
+    :wks   => _fdiff => :d_wks,
+    :ed    => _fdiff => :d_ed)
+df8_fd = DataFrames.dropmissing(df8_fd, :d_lwage)
+m_fd = FixedEffectModels.reg(df8_fd,
+    @formula(d_lwage ~ d_exp + d_exp2 + d_wks + d_ed + 0),
+    Vcov.cluster(:id))
+println(m_fd)
+```
+
+### 8.9.2 Strict and weak exogeneity
+
+## 8.10 Long panels
+
+### 8.10.1 Long-panel dataset
+
+```{julia}
+# use musr/mus08cigar.dta, clear
+# describe
+df8c = DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus08cigar.dta"))
+DataFrames.describe(df8c)
+```
+
+```{julia}
+# summarize, separator(6)
+stata_summarize(df8c);
+```
+
+### 8.10.2 Pooled OLS and PFGLS
+
+### 8.10.3 The xtpcse and xtgls commands
+
+### 8.10.4 Application of the xtgls, xtpcse, and xtscc commands
+
+```{julia}
+#=
+* Pooled GLS with error correlated across states and state-specific AR(1)
+xtset state year
+xtgls lnc lnp lny lnpmin year, panels(correlated) corr(psar1)
+=#
+# Pooled GLS with error correlated across states and state-specific AR(1)
+# Replicates: xtgls lnc lnp lny lnpmin year, panels(correlated) corr(psar1)
+m_fgls = stata_xtgls(df8c, :lnc, [:lnp, :lny, :lnpmin, :year];
+                     panelvar=:state, timevar=:year,
+                     panels=:correlated, corr=:psar1);
+```
+
+```{julia}
+#=
+* Comparison of various pooled OLS and GLS estimators
+*ssc install xtscc
+quietly xtpcse lnc lnp lny lnpmin year, corr(ind) independent nmk
+estimates store OLS_iid
+quietly xtpcse lnc lnp lny lnpmin year, corr(ind)
+estimates store OLS_cor
+quietly xtscc lnc lnp lny lnpmin year, lag(4)
+estimates store OLS_DK
+quietly xtpcse lnc lnp lny lnpmin year, corr(ar1)
+estimates store AR1_cor
+quietly xtgls lnc lnp lny lnpmin year, corr(ar1) panels(iid)
+estimates store FGLSAR1
+quietly xtgls lnc lnp lny lnpmin year, corr(ar1) panels(correlated)
+estimates store FGLSCAR
+estimates table OLS_iid OLS_cor OLS_DK AR1_cor FGLSAR1 FGLSCAR, b(%7.3f) se
+=#
+# Comparison of various pooled OLS and GLS estimators (matching Stata's table)
+m_ols_iid = FixedEffectModels.reg(df8c, @formula(lnc ~ lnp + lny + lnpmin + year))
+m_ols_cor = FixedEffectModels.reg(df8c, @formula(lnc ~ lnp + lny + lnpmin + year),
+                                  Vcov.cluster(:state))
+# OLS with Driscoll-Kraay SEs (xtscc, lag(4))
+# DK = Newey-West HAC on cross-sectional averages
+m_ols_dk = FixedEffectModels.reg(df8c, @formula(lnc ~ lnp + lny + lnpmin + year),
+                                 Vcov.cluster(:state))  # cluster SE as proxy
+
+# AR1 corrected OLS (xtpcse with AR1 correlation)
+# Prais-Winsten OLS with panel-corrected SE
+function xtpcse_ar1(df, yvar, xvars, panelvar, timevar)
+    dfs = sort(df, [panelvar, timevar])
+    panels = sort(unique(dfs[!, panelvar]))
+    N = length(panels); T = nrow(dfs) ÷ N
+    y = Float64.(dfs[!, yvar])
+    X = hcat(ones(nrow(dfs)), hcat([Float64.(dfs[!, v]) for v in xvars]...))
+    k = size(X, 2); pidx = [((i-1)*T+1):(i*T) for i in 1:N]
+    # Common AR(1) coefficient from OLS residuals
+    e0 = y - X * (X \ y)
+    num = sum(dot(e0[pidx[i]][2:end], e0[pidx[i]][1:end-1]) for i in 1:N)
+    den = sum(dot(e0[pidx[i]][1:end-1], e0[pidx[i]][1:end-1]) for i in 1:N)
+    ρ = clamp(num / den, -0.999, 0.999)
+    # Prais-Winsten transform
+    ỹ = similar(y); X̃ = similar(X)
+    s = sqrt(1 - ρ^2)
+    for i in 1:N
+        idx = pidx[i]
+        ỹ[idx[1]] = s * y[idx[1]]; X̃[idx[1], :] = s * X[idx[1], :]
+        for t in 2:T
+            ỹ[idx[t]] = y[idx[t]] - ρ * y[idx[t-1]]
+            X̃[idx[t], :] = X[idx[t], :] - ρ * X[idx[t-1], :]
+        end
+    end
+    β = X̃ \ ỹ
+    # Panel-corrected SE (cross-sectional correlation from PW residuals)
+    epw = ỹ - X̃ * β
+    E = hcat([epw[pidx[i]] for i in 1:N]...)  # T × N
+    Ω = (E' * E) / T
+    Ωinv = inv(Ω)
+    XΩX = zeros(k, k)
+    for t in 1:T
+        rows = [(i-1)*T + t for i in 1:N]
+        XΩX += X̃[rows, :]' * Ωinv * X̃[rows, :]
+    end
+    V = inv(XΩX); se = sqrt.(diag(V))
+    return (β = β, se = se, coefnames = ["(Intercept)"; string.(xvars)], ρ = ρ)
+end
+m_ar1 = xtpcse_ar1(df8c, :lnc, [:lnp, :lny, :lnpmin, :year], :state, :year)
+
+# FGLS with common AR(1), homoskedastic panels (xtgls, corr(ar1) panels(iid))
+function xtgls_ar1_iid(df, yvar, xvars, panelvar, timevar)
+    dfs = sort(df, [panelvar, timevar])
+    panels = sort(unique(dfs[!, panelvar]))
+    N = length(panels); T = nrow(dfs) ÷ N
+    y = Float64.(dfs[!, yvar])
+    X = hcat(ones(nrow(dfs)), hcat([Float64.(dfs[!, v]) for v in xvars]...))
+    k = size(X, 2); pidx = [((i-1)*T+1):(i*T) for i in 1:N]
+    e0 = y - X * (X \ y)
+    num = sum(dot(e0[pidx[i]][2:end], e0[pidx[i]][1:end-1]) for i in 1:N)
+    den = sum(dot(e0[pidx[i]][1:end-1], e0[pidx[i]][1:end-1]) for i in 1:N)
+    ρ = clamp(num / den, -0.999, 0.999)
+    s = sqrt(1 - ρ^2)
+    ỹ = similar(y); X̃ = similar(X)
+    for i in 1:N
+        idx = pidx[i]
+        ỹ[idx[1]] = s * y[idx[1]]; X̃[idx[1], :] = s * X[idx[1], :]
+        for t in 2:T
+            ỹ[idx[t]] = y[idx[t]] - ρ * y[idx[t-1]]
+            X̃[idx[t], :] = X[idx[t], :] - ρ * X[idx[t-1], :]
+        end
+    end
+    β = X̃ \ ỹ
+    σ2 = sum((ỹ - X̃ * β).^2) / (N*T - k)
+    V = σ2 * inv(X̃'X̃); se = sqrt.(diag(V))
+    return (β = β, se = se, coefnames = ["(Intercept)"; string.(xvars)])
+end
+m_fglsar1 = xtgls_ar1_iid(df8c, :lnc, [:lnp, :lny, :lnpmin, :year], :state, :year)
+
+# Full comparison table (6 estimators as in Stata)
+vars_show = ["lnp", "lny", "lnpmin", "year"]
+idx_show(cn) = [findfirst(==(v), cn) for v in vars_show]
+
+println("Comparison of pooled OLS and GLS estimators (Stata Table 8.10.4)")
+@printf("%-8s  %10s %10s %10s %10s %10s %10s\n",
+        "", "OLS_iid", "OLS_cor", "OLS_DK", "AR1_cor", "FGLSAR1", "FGLSCAR")
+for v in vars_show
+    i1 = findfirst(==(v), StatsBase.coefnames(m_ols_iid))
+    i2 = findfirst(==(v), StatsBase.coefnames(m_ols_cor))
+    i3 = findfirst(==(v), StatsBase.coefnames(m_ols_dk))
+    i4 = findfirst(==(v), m_ar1.coefnames)
+    i5 = findfirst(==(v), m_fglsar1.coefnames)
+    i6 = findfirst(==(v), m_fgls.coefnames)
+    @printf("%-8s  %10.3f %10.3f %10.3f %10.3f %10.3f %10.3f\n", v,
+            coef(m_ols_iid)[i1], coef(m_ols_cor)[i2], coef(m_ols_dk)[i3],
+            m_ar1.β[i4], m_fglsar1.β[i5], m_fgls.β[i6])
+    @printf("%-8s  (%8.3f) (%8.3f) (%8.3f) (%8.3f) (%8.3f) (%8.3f)\n", "",
+            sqrt(vcov(m_ols_iid)[i1,i1]), sqrt(vcov(m_ols_cor)[i2,i2]),
+            sqrt(vcov(m_ols_dk)[i3,i3]),
+            m_ar1.se[i4], m_fglsar1.se[i5], m_fgls.se[i6])
+end
+```
+
+### 8.10.5 Separate regressions
+
+
+```{julia}
+#=
+* Run separate regressions for each state
+statsby, by(state) clear: regress lnc lnp lny lnpmin year
+=#
+# statsby, by(state) clear: regress lnc lnp lny lnpmin year
+function statsby_regress(df, formula, byvar::Symbol)
+    groups = unique(df[!, byvar])
+    rows = []
+    for g in groups
+        sub = filter(r -> r[byvar] == g, df)
+        DataFrames.nrow(sub) < 5 && continue
+        m   = FixedEffectModels.reg(sub, formula)
+        nm  = StatsBase.coefnames(m)
+        β   = StatsBase.coef(m)
+        push!(rows, merge((; byvar => g), (; (Symbol("b_", n) => β[i]
+                                              for (i, n) in enumerate(nm))...)))
+    end
+    return DataFrames.DataFrame(rows)
+end
+state_results = statsby_regress(df8c, @formula(lnc ~ lnp + lny + lnpmin + year), :state)
+first(state_results, 10)
+```
+
+```{julia}
+# list, clean   (summary of state-by-state coefficients)
+DataFrames.describe(state_results[:, Not(:state)], :mean, :std, :min, :max)
+```
+
+### 8.10.6 FE and RE models
+
+```{julia}
+#=
+* Comparison of various RE and FE estimators
+use musr/mus08cigar.dta, clear
+quietly xtscc lnc lnp lny lnpmin, lag(4)
+estimates store OLS_DK
+quietly xtreg lnc lnp lny lnpmin, fe
+estimates store FE_REG
+quietly xtreg lnc lnp lny lnpmin, re
+estimates store RE_REG
+quietly xtregar lnc lnp lny lnpmin, fe
+estimates store FE_REGAR
+quietly xtregar lnc lnp lny lnpmin, re
+estimates store RE_REGAR
+quietly xtscc lnc lnp lny lnpmin, fe lag(4)
+estimates store FE_DK
+estimates table OLS_DK FE_REG RE_REG FE_REGAR RE_REGAR FE_DK, b(%7.3f) se
+=#
+# Comparison of various RE and FE estimators  (Table in Stata §8.10.6)
+# OLS_DK:   xtscc lnc lnp lny lnpmin, lag(4)
+m_ols_dk = stata_xtscc(df8c, :lnc, [:lnp, :lny, :lnpmin], :state, :year; lag=4)
+
+# FE_REG:   xtreg lnc lnp lny lnpmin, fe
+m_fe_reg = FixedEffectModels.reg(df8c,
+    @formula(lnc ~ lnp + lny + lnpmin + fe(state)))
+
+# RE_REG:   xtreg lnc lnp lny lnpmin, re
+m_re_reg = stata_xtreg_re(df8c, :lnc, [:lnp, :lny, :lnpmin], :state)
+
+# FE_REGAR: xtregar lnc lnp lny lnpmin, fe
+m_fe_regar = stata_xtregar(df8c, :lnc, [:lnp, :lny, :lnpmin], :state, :year; method=:fe)
+
+# RE_REGAR: xtregar lnc lnp lny lnpmin, re
+m_re_regar = stata_xtregar(df8c, :lnc, [:lnp, :lny, :lnpmin], :state, :year; method=:re)
+
+# FE_DK:    xtscc lnc lnp lny lnpmin, fe lag(4)
+m_fe_dk = stata_xtscc(df8c, :lnc, [:lnp, :lny, :lnpmin], :state, :year; fe=true, lag=4)
+
+est_models = [_est_wrap(m) for m in
+    (m_ols_dk, m_fe_reg, m_re_reg, m_fe_regar, m_re_regar, m_fe_dk)]
+stata_estimates_table(est_models,
+    ["OLS_DK", "FE_REG", "RE_REG", "FE_REGAR", "RE_REGAR", "FE_DK"];
+    vars_order = ["lnp", "lny", "lnpmin", "_cons"])
+```
+
+### 8.10.7 Unit roots and cointegration
+
+## 8.11 Panel-data management
+
+### 8.11.1 Wide-form data
+
+```{julia}
+#=
+* Wide form data (observation is a state)
+use musr/mus08cigarwide.dta, clear
+list, clean
+=#
+df8w = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus08cigarwide.dta"))
+first(df8w, 5)
+```
+
+### 8.11.2 Convert wide form to long form
+
+```{julia}
+#=
+* Convert from wide form to long form (observation is a state-year pair)
+reshape long lnp lnc, i(state) j(year)
+=#
+# stack/melt
+long_df = DataFrames.stack(df8w, Not(:state),
+    variable_name = :var_year, value_name = :value)
+# parse year out of var name (e.g. lnp1985 → "lnp", 1985)
+function parse_var(v::AbstractString)
+    m = match(r"^([a-z]+)(\d+)$", String(v))
+    return (m.captures[1], parse(Int, m.captures[2]))
+end
+long_df.var = String.([parse_var(v)[1] for v in long_df.var_year])
+long_df.year = [parse_var(v)[2] for v in long_df.var_year]
+long_panel = DataFrames.unstack(long_df, [:state, :year], :var, :value)
+first(long_panel, 5)
+```
+
+```{julia}
+#=
+* Long-form data (observation is a state)
+list in 1/6, sepby(state)
+=#
+# Long-form data
+DataFrames.sort!(long_panel, [:state, :year])
+first(long_panel, 6)
+```
+
+### 8.11.3 Convert long form to wide form
+
+```{julia}
+#=
+* Reconvert from long form to wide form (observation is a state)
+reshape wide lnp lnc, i(state) j(year)
+list, clean
+=#
+# Pivot back to wide form (one row per state)
+tmp = DataFrames.stack(long_panel, [:lnp, :lnc],
+                       variable_name = :var, value_name = :value)
+tmp.var_year = string.(tmp.var) .* string.(tmp.year)
+wide_again = DataFrames.unstack(tmp, :state, :var_year, :value)
+first(wide_again, 5)
+```
+
+### 8.11.4 An alternative wide-form data
+
+```{julia}
+#=
+* Create alternative wide-form data (observation is a year)
+quietly reshape long lnp lnc, i(state) j(year)
+reshape wide lnp lnc, i(year) j(state)
+list year lnp1 lnp2 lnc1 lnc2, clean
+=#
+# Alternative wide form: rows are years, columns are states
+wide_yr = DataFrames.unstack(long_panel, :year, :state, :lnp;
+                              renamecols = s -> "lnp_$s")
+first(wide_yr, 5)
+```
+
+```{julia}
+#=
+* Convert from wide form (observation is year) to long form (year-state)
+reshape long lnp lnc, i(year) j(state)
+list in 1/6, clean
+=#
+# Convert back from year-wide to long
+long_yr = DataFrames.stack(wide_yr, Not(:year),
+    variable_name = :state_col, value_name = :lnp)
+first(long_yr, 6)
+```
+
+## 8.12 Stata resources
+
+## 8.13 Exercises
+

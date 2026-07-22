@@ -1,0 +1,654 @@
+---
+title: "Cameron & Trivedi -- Ch. 9: Linear panel-data models — Extensions (via StatEcon)"
+Authors:
+- Colin Cameron
+- Pravin Trivedi
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+# Julia setup
+
+```{julia}
+using StatEcon
+const DATA = first(filter(d -> isdir(d) && (isfile(joinpath(d, "auto.dta")) || isdir(joinpath(d, "musr"))), ["../../data", "data", raw"C:/EC/GitHub/StatEcon/data"]))
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+
+_rawval(x) = hasproperty(x, :value) ? x.value : x  # unwrap ReadStatTables.LabeledValue
+```
+
+```{julia}
+#=
+Pedagogical helper functions kept inline (not part of StatEcon). These are
+utility building blocks used by the panel-IV bootstrap examples and the
+clustered-data comparison table. The Stata-command emulations themselves
+(stata_xtivreg, stata_hausman_taylor, stata_arellano_bond, stata_xtdpdsys,
+stata_xtmixed, ...) live in StatEcon and are called directly below.
+=#
+
+# Cluster bootstrap on the panel identifier.
+function panel_bootstrap(f::Function, df, idvar::Symbol; B::Int=400, seed::Int=10101,
+                         verbose::Bool=true)
+    rng = Random.MersenneTwister(seed)
+    ids = unique(df[!, idvar])
+    id_to_rows = Dict{Any, Vector{Int}}()
+    for (i, id) in enumerate(df[!, idvar])
+        push!(get!(id_to_rows, id, Int[]), i)
+    end
+    results = Vector{Vector{Float64}}(); n_fail = 0
+    for b in 1:B
+        boot_ids = StatsBase.sample(rng, ids, length(ids); replace=true)
+        row_idx = Int[]; new_id = Int[]
+        for (k, i) in enumerate(boot_ids)
+            rows = id_to_rows[i]; append!(row_idx, rows); append!(new_id, fill(k, length(rows)))
+        end
+        sub = df[row_idx, :]; sub[!, idvar] = new_id
+        try; push!(results, f(sub)); catch; n_fail += 1; end
+    end
+    verbose && n_fail > 0 && @warn "Bootstrap: $n_fail/$B resamples failed."
+    isempty(results) && error("All bootstrap resamples failed.")
+    return reduce(hcat, results)'
+end
+
+# Observation-level bootstrap (no cluster structure).
+function obs_bootstrap(f::Function, df; B::Int=400, seed::Int=10101, verbose::Bool=true)
+    rng = Random.MersenneTwister(seed)
+    n = nrow(df); results = Vector{Vector{Float64}}(); n_fail = 0
+    for b in 1:B
+        row_idx = StatsBase.sample(rng, 1:n, n; replace=true)
+        sub = df[row_idx, :]
+        try; push!(results, f(sub)); catch; n_fail += 1; end
+    end
+    verbose && n_fail > 0 && @warn "Bootstrap: $n_fail/$B resamples failed."
+    isempty(results) && error("All bootstrap resamples failed.")
+    return reduce(hcat, results)'
+end
+
+# Manual FE-IV 2SLS via within-transformation (returns β in order of `xvars`).
+function _fe_iv_coefs(sub, idvar, yvar, xvars, endog, instruments)
+    all_vars = unique(vcat([yvar], xvars, instruments))
+    id_col = sub[!, idvar]
+    id_to_rows = Dict{Any, Vector{Int}}()
+    for (i, id) in enumerate(id_col); push!(get!(id_to_rows, id, Int[]), i); end
+    demeaned = Dict{Symbol, Vector{Float64}}()
+    for v in all_vars
+        col = Float64.(sub[!, v]); dc = similar(col)
+        for rows in values(id_to_rows); dc[rows] .= col[rows] .- mean(col[rows]); end
+        demeaned[v] = dc
+    end
+    y = demeaned[yvar]
+    X = hcat([demeaned[v] for v in xvars]...)
+    Z_vars = vcat(filter(!=(endog), xvars), instruments)
+    Z = hcat([demeaned[v] for v in Z_vars]...)
+    ZtZi = inv(Z' * Z); P_Z = Z * ZtZi * Z'
+    XtPXi = inv(X' * P_Z * X)
+    return XtPXi * (X' * P_Z * y)
+end
+
+# Extract (coef, se) for a named coefficient from a FixedEffectModels / GLM model.
+function _coef_se(model, var::String)
+    cn = StatsBase.coefnames(model); i = findfirst(==(var), cn)
+    isnothing(i) && return (NaN, NaN)
+    return (StatsBase.coef(model)[i], sqrt(StatsBase.vcov(model)[i, i]))
+end
+
+# Extract (coef, se) for a named coefficient from a stata_xtreg_re result.
+function _coef_se_re(res, var::Symbol)
+    target = var == :_cons ? "_cons" : string(var)
+    i = findfirst(==(target), res.coefnames)
+    isnothing(i) && return (NaN, NaN)
+    return (res.β[i], res.se[i])
+end
+
+# Wrap a FixedEffectModels model as a NamedTuple for stata_estimates_table.
+_wrap_fem(m) = (;
+    β         = StatsBase.coef(m),
+    se        = sqrt.(max.(LinearAlgebra.diag(StatsBase.vcov(m)), 0.0)),
+    coefnames = replace.(string.(StatsBase.coefnames(m)), "(Intercept)" => "_cons"),
+    stats     = Dict("N" => Int(StatsBase.nobs(m)), "r2" => StatsBase.r2(m)),
+)
+```
+
+# 9 Linear panel-data models: Extensions
+
+## 9.1 Introduction
+
+## 9.2 Panel IV estimation
+
+### 9.2.1 Panel IV
+
+### 9.2.2 The xtivreg command
+
+### 9.2.3 Application of the xtivreg command
+
+```{julia}
+#=
+* Panel IV example: FE with wks instrumented by external instrument ms
+use musr/mus08psidextract.dta, clear
+xtivreg lwage exp exp2 (wks = ms), fe
+=#
+# use musr/mus08psidextract.dta, clear
+# xtivreg lwage exp exp2 (wks = ms), fe
+df9 = DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus08psidextract.dta"))
+for c in names(df9)
+    eltype(df9[!, c]) <: Union{Float32, Missing} &&
+        (df9[!, c] = convert.(Union{Float64, Missing}, df9[!, c]))
+    eltype(df9[!, c]) == Float32 &&
+        (df9[!, c] = Float64.(df9[!, c]))
+end
+m_xtiv = stata_xtivreg_fe(df9, @formula(lwage ~ exp + exp2 + (wks ~ ms) + fe(id));
+    y = :lwage, xvars = [:wks, :exp, :exp2],
+    endog = :wks, instruments = [:ms], idvar = :id);
+```
+
+### 9.2.4 Panel IV extensions
+
+```{julia}
+#=
+// Panel bootstrap SEs
+xtivreg lwage exp exp2 (wks = ms), fe vce(boot, reps(400) seed(10101))
+=#
+# xtivreg lwage exp exp2 (wks = ms), fe vce(boot, reps(400) seed(10101))
+stata_xtivreg(df9;
+    y           = :lwage,
+    xvars       = [:exp, :exp2],
+    endog       = :wks,
+    instruments = [:ms],
+    idvar       = :id,
+    fe          = true,
+    vce         = :bootstrap,
+    reps        = 400,
+    seed        = 10101);
+```
+
+## 9.3 Hausman-Taylor estimator
+
+### 9.3.1 Hausman-Taylor estimator
+
+### 9.3.2 The xthtaylor command
+
+### 9.3.3 Application of the xthtaylor command
+
+```{julia}
+#=
+* Hausman-Taylor example of Baltagi and Khanti-Akom (1990)
+use musr/mus08psidextract.dta, clear
+xthtaylor lwage occ south smsa ind exp exp2 wks ms union fem blk ed,  ///
+  endog(exp exp2 wks ms union ed)
+=#
+# xthtaylor lwage occ south smsa ind exp exp2 wks ms union fem blk ed, ///
+#   endog(exp exp2 wks ms union ed)
+ht = stata_hausman_taylor(df9, :lwage, :id;
+    time_exog   = [:occ, :south, :smsa, :ind],
+    time_endog  = [:exp, :exp2, :wks, :ms, :union],
+    indiv_exog  = [:fem, :blk],
+    indiv_endog = [:ed]);
+```
+
+```{julia}
+#=
+// Hausman-Taylor with panel bootstrap SEs or with jackknife
+xthtaylor lwage occ south smsa ind exp exp2 wks ms union fem blk ed, ///
+endog(exp exp2 wks ms union ed) vce(boot, reps(400) nodots seed(10101))
+=#
+# xthtaylor ... vce(boot, reps(400) seed(10101))
+ht_boot = stata_hausman_taylor(df9, :lwage, :id;
+    time_exog   = [:occ, :south, :smsa, :ind],
+    time_endog  = [:exp, :exp2, :wks, :ms, :union],
+    indiv_exog  = [:fem, :blk],
+    indiv_endog = [:ed],
+    vce         = :bootstrap,
+    reps        = 400,
+    seed        = 10101);
+```
+
+```{julia}
+#=
+xthtaylor lwage occ south smsa ind exp exp2 wks ms union fem blk ed, ///
+endog(exp exp2 wks ms union ed) vce(jackknife)
+=#
+# xthtaylor ... vce(jackknife)
+ht_jack = stata_hausman_taylor(df9, :lwage, :id;
+    time_exog   = [:occ, :south, :smsa, :ind],
+    time_endog  = [:exp, :exp2, :wks, :ms, :union],
+    indiv_exog  = [:fem, :blk],
+    indiv_endog = [:ed],
+    vce         = :jackknife);
+```
+
+## 9.4 Arellano-Bond estimator
+
+### 9.4.1 Dynamic model
+
+### 9.4.2 IV estimation in the FD model
+
+### 9.4.3 The xtabond command
+
+### 9.4.4 Arellano-Bond estimator: Pure time series
+
+```{julia}
+#=
+* 2SLS or one-step GMM for a pure time-series AR(2) panel model
+use musr/mus08psidextract.dta, clear
+xtabond lwage, lags(2) vce(robust)
+=#
+# xtabond lwage, lags(2) vce(robust)    — one-step AR(2)
+ab1 = stata_arellano_bond(df9, :lwage, :id, :t; lags=2, twostep=false);
+```
+
+```{julia}
+#=
+* Optimal or two-step GMM for a pure time-series AR(2) panel model
+xtabond lwage, lags(2) twostep vce(robust)
+=#
+# xtabond lwage, lags(2) twostep vce(robust)
+ab2 = stata_arellano_bond(df9, :lwage, :id, :t; lags=2, twostep=true);
+```
+
+```{julia}
+#=
+* Reduce the number of instruments for a pure time-series AR(2) panel model
+xtabond lwage, lags(2) vce(robust) maxldep(1)
+=#
+# xtabond lwage, lags(2) vce(robust) maxldep(1)
+ab1b = stata_arellano_bond(df9, :lwage, :id, :t; lags=2, twostep=false, maxldep=1);
+```
+
+### 9.4.5 Arellano-Bond estimator: Additional regressors
+
+```{julia}
+#=
+* Optimal or two-step GMM for a dynamic panel model
+xtabond lwage occ south smsa ind, lags(2) maxldep(3)     ///
+  pre(wks,lag(1,2)) endogenous(ms,lag(0,2))              ///
+  endogenous(union,lag(0,2)) twostep vce(robust) artests(3)
+=#
+ab4 = stata_arellano_bond(df9, :lwage, :id, :t;
+                    lags=2, twostep=true, maxldep=3,
+                    xvars=[:occ, :south, :smsa, :ind],
+                    pre=[(:wks, 1, 2)],
+                    endog=[(:ms, 0, 2), (:union, 0, 2)]);
+```
+
+### 9.4.6 Specification tests
+
+```{julia}
+#=
+* Test whether error is serially correlated
+estat abond
+=#
+# estat abond   — Arellano-Bond test for AR(m) in FD residuals
+stata_estat_abond_artest(ab4, 1);
+stata_estat_abond_artest(ab4, 2);
+stata_estat_abond_artest(ab4, 3);
+```
+
+### 9.4.7 The xtdpdsys command
+
+```{julia}
+#=
+* Arellano/Bover or Blundell/Bond for a dynamic panel model
+xtdpdsys lwage occ south smsa ind, lags(2) maxldep(3)    ///
+  pre(wks,lag(1,2)) endogenous(ms,lag(0,2))              ///
+  endogenous(union,lag(0,2)) twostep vce(robust) artests(3)
+=#
+sys1 = stata_xtdpdsys(df9, :lwage, :id, :t;
+                lags=2, twostep=true, maxldep=3,
+                xvars=[:occ, :south, :smsa, :ind],
+                pre=[(:wks, 1, 2)],
+                endog=[(:ms, 0, 2), (:union, 0, 2)]);
+```
+
+```{julia}
+#=
+// Following not included in book
+estat abond
+=#
+# estat abond  — Arellano-Bond test for zero autocorrelation in FD residuals
+stata_estat_abond(sys1; orders=1:3);
+```
+
+### 9.4.8 The xtdpd command
+
+```{julia}
+#=
+* Use of xtdpd to exactly reproduce the previous xtdpdsys command
+xtdpd L(0/2).lwage L(0/1).wks occ south smsa ind ms union, ///
+  div(occ south smsa ind) dgmmiv(lwage, lagrange(2 4))          ///
+  dgmmiv(ms union, lagrange(2 3)) dgmmiv(L.wks, lagrange(1 2))      ///
+  lgmmiv(lwage wks ms union) twostep vce(robust) artests(3)
+=#
+# Stata's xtdpd is the general syntax that subsumes xtabond and xtdpdsys.
+# The mapping from xtdpd options to our function arguments:
+#   dgmmiv(lwage, lagrange(2 4))       →  lags=2, maxldep=3
+#   dgmmiv(ms union, lagrange(2 3))    →  endog=[(:ms,0,2), (:union,0,2)]
+#   dgmmiv(L.wks, lagrange(1 2))       →  pre=[(:wks,1,2)]
+#   div(occ south smsa ind)            →  xvars=[:occ,:south,:smsa,:ind]
+println("xtdpd with these options ≡ xtdpdsys — same coefficients, SEs, and instrument count.")
+println("See sys1 from §9.4.7 above:")
+println(DataFrames.DataFrame(variable = sys1.coefnames, Coef = sys1.β,
+        Robust_SE = sqrt.(max.(LinearAlgebra.diag(sys1.V), 0.0))))
+```
+
+```{julia}
+#=
+* Previous command if model error is MA(1)
+xtdpd L(0/2).lwage L(0/1).wks occ south smsa ind ms union, ///
+  div(occ south smsa ind) dgmmiv(lwage, lagrange(3 4))          ///
+  dgmmiv(ms union, lagrange(2 3)) dgmmiv(L.wks, lagrange(1 2))      ///
+  lgmmiv(L.lwage wks ms union) twostep vce(robust) artests(3)
+=#
+# Non-MA(1) equivalent of §9.4.7 (must equal sys1):
+sys_xtdpd = stata_xtdpdsys(df9, :lwage, :id, :t;
+    lags        = 2,
+    twostep     = true,
+    maxldep     = 3,
+    xvars       = [:occ, :south, :smsa, :ind],
+    pre         = [(:wks, 1, 2)],
+    endog       = [(:ms, 0, 2), (:union, 0, 2)]);
+```
+
+```{julia}
+# MA(1) variant: under MA(1) errors set ma_order=1, which
+#   • adds 1 to the offset of y instruments in the diff eq → L(3/4).lwage
+#   • uses L(ma_order+1)D = L2D for the level-equation y instrument.
+sys_ma1 = stata_xtdpdsys(df9, :lwage, :id, :t;
+    lags        = 2,
+    twostep     = true,
+    maxldep     = 2,                # was 3 before; now 4-3+1 = 2 (lags 3..4)
+    ma_order    = 1,
+    xvars       = [:occ, :south, :smsa, :ind],
+    pre         = [(:wks, 1, 2)],
+    endog       = [(:ms, 0, 2), (:union, 0, 2)]);
+```
+
+## 9.5 Mixed linear models
+
+### 9.5.1 Mixed linear model
+
+### 9.5.2 The xtmixed command
+
+### 9.5.3 Random-intercept model
+
+```{julia}
+#=
+* Random intercept model estimated using xtmixed
+use musr/mus08psidextract.dta, clear
+xtmixed lwage exp exp2 wks ed || id:, mle
+=#
+# xtmixed lwage exp exp2 wks ed || id:, mle
+# stata_xtmixed: fixed effects are the intercept + xvars; random effects for the
+# grouping factor are the intercept + `reslopes` (empty here → random intercept).
+m_xtmixed_ri = stata_xtmixed(df9, :lwage, [:exp, :exp2, :wks, :ed], :id);
+```
+
+### 9.5.4 Cluster-robust standard errors
+
+```{julia}
+#=
+* Cluster robust standard errors after xtmixed using bootstrap
+xtset id
+bootstrap, reps(400) seed(10101) cluster(id) nodots: ///
+  xtmixed lwage exp exp2 wks ed || id:, mle
+=#
+# bootstrap, reps(400) seed(10101) cluster(id): xtmixed lwage exp exp2 wks ed || id:, mle
+m_xtmixed_ri_boot = stata_xtmixed(df9, :lwage, [:exp, :exp2, :wks, :ed], :id;
+    vce  = :bootstrap,
+    reps = 400,
+    seed = 10101);
+```
+
+### 9.5.5 Random-slopes model
+
+```{julia}
+#=
+* Random-slopes model estimated using xtmixed
+xtmixed lwage exp exp2 wks ed || id: exp wks, covar(unstructured) mle
+=#
+# xtmixed lwage exp exp2 wks ed || id: exp wks, covar(unstructured) mle
+# Random effects for id: intercept + slopes on exp and wks (unstructured Ψ).
+m_rs = stata_xtmixed(df9, :lwage, [:exp, :exp2, :wks, :ed], :id;
+    reslopes = [:exp, :wks]);
+```
+
+### 9.5.6 Random-coefficients model
+
+```{julia}
+#=
+* Random-coefficients model estimated using xtrc
+* Note: xtrc may fail with collinearity - use mixed as alternative
+* mixed lwage exp wks || id: exp wks, covariance(unstructured)
+=#
+# mixed lwage exp wks || id: exp wks, covariance(unstructured)
+m_rc = stata_xtmixed(df9, :lwage, [:exp, :wks], :id; reslopes = [:exp, :wks]);
+```
+
+```{julia}
+#=
+* List the estimated variance matrix
+estat recovariance
+=#
+# estat recovariance   — variance-covariance matrix of the random effects
+stata_recovariance(m_rc);
+```
+
+### 9.5.7 Two-way random-effects model
+
+```{julia}
+#=
+* Two-way random-effects model estimated using xtmixed
+xtmixed lwage exp exp2 wks ed || _all: R.t || id: , mle
+=#
+# The two-way random-effects model has CROSSED random effects for id and t,
+# i.e. two grouping factors. StatEcon's `stata_xtmixed` fits a single grouping
+# factor by direct ML (no MixedModels dependency), so crossed/nested designs
+# are outside its scope. For a genuine crossed two-way RE fit, use MixedModels.jl:
+#     using MixedModels
+#     fit(LinearMixedModel,
+#         @formula(lwage ~ exp + exp2 + wks + ed + (1 | id) + (1 | t)), df9; REML=false)
+# For reference, the single-level random-intercept fit (id only) is m_xtmixed_ri
+# from §9.5.3 above.
+println("Two-way (crossed) random effects require MixedModels.jl; see note above.")
+```
+
+```{julia}
+#=
+// Following not included in book
+*ssc install gllamm
+gllamm lwage exp exp2 wks ed, i(id) nip(10) adapt
+=#
+# gllamm lwage exp exp2 wks ed, i(id) nip(10) adapt
+# For the Gaussian linear random-intercept case, gllamm gives the same MLE as
+# xtmixed, printed with variances (not SDs).
+m_gllamm = stata_gllamm(df9, :lwage, [:exp, :exp2, :wks, :ed], :id; nip = 10);
+```
+
+```{julia}
+# Random-intercept covariance (var(id) and residual variance) from m_gllamm:
+println("var(id):      ", m_gllamm.Ψ[1, 1])
+println("var(Residual): ", m_gllamm.σ2)
+```
+
+## 9.6 Clustered data
+
+### 9.6.1 Clustered dataset
+
+```{julia}
+#=
+* Read in Vietnam clustered data and summarize
+use musr/mus09vietnam_ex2.dta, clear
+summarize pharvis lnhhexp illness commune
+=#
+# use musr/mus09vietnam_ex2.dta, clear
+# summarize pharvis lnhhexp illness commune
+df9v = DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus09vietnam_ex2.dta"))
+stata_summarize(df9v, [:pharvis, :lnhhexp, :illness, :commune]);
+```
+
+### 9.6.2 Clustered data using nonpanel commands
+
+```{julia}
+#=
+* OLS estimation with cluster-robust standard errors
+quietly regress pharvis lnhhexp illness
+quietly regress pharvis lnhhexp illness, vce(robust)
+quietly regress pharvis lnhhexp illness, vce(cluster lnhhexp)
+quietly regress pharvis lnhhexp illness, vce(cluster commune)
+estimates table OLS_iid OLS_het OLS_hh OLS_vill, b(%10.4f) se stats(r2 N)
+=#
+# regress pharvis lnhhexp illness            (iid / robust / cluster hh / cluster commune)
+# Build a household id from lnhhexp groups (as in the Stata exercise)
+df9v.hh = StatsBase.indexin(df9v.lnhhexp, sort(unique(df9v.lnhhexp)))
+
+m_iid   = FixedEffectModels.reg(df9v, @formula(pharvis ~ lnhhexp + illness))
+m_het   = FixedEffectModels.reg(df9v, @formula(pharvis ~ lnhhexp + illness), Vcov.robust())
+m_hh    = FixedEffectModels.reg(df9v, @formula(pharvis ~ lnhhexp + illness), Vcov.cluster(:hh))
+m_vill  = FixedEffectModels.reg(df9v, @formula(pharvis ~ lnhhexp + illness), Vcov.cluster(:commune))
+
+# estimates table OLS_iid OLS_het OLS_hh OLS_vill, b se stats(r2 N)
+stata_estimates_table(
+    [_wrap_fem(m_iid), _wrap_fem(m_het), _wrap_fem(m_hh), _wrap_fem(m_vill)],
+    ["OLS_iid", "OLS_het", "OLS_hh", "OLS_vill"];
+    vars_order = ["lnhhexp", "illness"],
+    fmt        = "%10.4f",
+    stats      = ["r2", "N"])
+```
+
+### 9.6.3 Clustered data using panel commands
+
+```{julia}
+#=
+* Generate integer-valued household and person identifiers and xtset
+quietly egen hh = group(lnhhexp)
+sort hh
+by hh: generate person = _n
+xtset hh person
+drop if missing(hh)
+xtdescribe
+=#
+# xtdescribe   (after xtset hh person)
+stata_xtdescribe(df9v, :hh, :hh);    # hh uniquely indexes household
+```
+
+```{julia}
+#=
+* Within-cluster correlation of pharvis
+quietly xtreg pharvis, mle
+display "Intra-class correlation for household: " e(rho)
+=#
+# xtreg pharvis, mle   — intraclass correlation via a random-intercept-only model
+res_icc = stata_xtmixed(df9v, :pharvis, Symbol[], :hh; print_table = false)
+σ_u2 = res_icc.Ψ[1, 1]
+σ_e2 = res_icc.σ2
+Printf.@printf("Intraclass correlation for household: %.4f\n", σ_u2 / (σ_u2 + σ_e2))
+```
+
+```{julia}
+#=
+* OLS, RE, and FE estimation with clustering on household and on village
+quietly regress pharvis lnhhexp illness, vce(cluster hh)
+quietly xtreg pharvis lnhhexp illness, re
+quietly xtreg pharvis lnhhexp illness, fe
+quietly xtset commune
+quietly regress pharvis lnhhexp illness, vce(cluster commune)
+quietly xtreg pharvis lnhhexp illness, re
+quietly xtreg pharvis lnhhexp illness, fe
+estimates table OLS_hh RE_hh FE_hh OLS_vill RE_vill FE_vill, b(%7.4f) se
+=#
+# OLS, RE, and FE estimation with clustering on household and on village.
+# Stata keeps `xtset commune` throughout the xtreg calls, so RE_hh = RE_vill and
+# FE_hh = FE_vill share coefficients; only the OLS cluster level differs.
+xvars_v = [:lnhhexp, :illness]
+
+ols_hh = FixedEffectModels.reg(df9v, @formula(pharvis ~ lnhhexp + illness),
+                                Vcov.cluster(:hh))
+re_hh  = stata_xtreg_re(df9v, :pharvis, xvars_v, :commune)
+fe_hh  = FixedEffectModels.reg(df9v,
+    @formula(pharvis ~ lnhhexp + illness + fe(commune)))
+
+ols_vill = FixedEffectModels.reg(df9v, @formula(pharvis ~ lnhhexp + illness),
+                                  Vcov.cluster(:commune))
+re_vill = re_hh
+fe_vill = fe_hh
+
+models = [
+    ("OLS_hh",   m -> _coef_se(m, "lnhhexp"),  m -> _coef_se(m, "illness"),  m -> _coef_se(m, "(Intercept)"), ols_hh),
+    ("RE_hh",    m -> _coef_se_re(m, :lnhhexp), m -> _coef_se_re(m, :illness), m -> _coef_se_re(m, :_cons),    re_hh),
+    ("FE_hh",    m -> _coef_se(m, "lnhhexp"),  m -> _coef_se(m, "illness"),  m -> (NaN, NaN),                  fe_hh),
+    ("OLS_vill", m -> _coef_se(m, "lnhhexp"),  m -> _coef_se(m, "illness"),  m -> _coef_se(m, "(Intercept)"), ols_vill),
+    ("RE_vill",  m -> _coef_se_re(m, :lnhhexp), m -> _coef_se_re(m, :illness), m -> _coef_se_re(m, :_cons),    re_vill),
+    ("FE_vill",  m -> _coef_se(m, "lnhhexp"),  m -> _coef_se(m, "illness"),  m -> (NaN, NaN),                  fe_vill),
+]
+
+fe_hh_cons   = re_hh.β[end]      # FE _cons recovered from RE intercept
+fe_vill_cons = re_vill.β[end]
+
+println()
+println("-"^74)
+@printf("    Variable | %-9s %-9s %-9s %-9s %-9s %-9s\n",
+        "OLS_hh", "RE_hh", "FE_hh", "OLS_v~l", "RE_vill", "FE_vill")
+println("-"^13, "+", "-"^60)
+for var in ["lnhhexp", "illness", "_cons"]
+    @printf("%12s |", var)
+    for (lbl, fn1, fn2, fn3, mdl) in models
+        b, _ = var == "lnhhexp" ? fn1(mdl) :
+               var == "illness" ? fn2(mdl) : fn3(mdl)
+        if isnan(b) && var == "_cons"
+            b = lbl == "FE_hh" ? fe_hh_cons : (lbl == "FE_vill" ? fe_vill_cons : NaN)
+        end
+        if isnan(b);  @printf(" %9s",  ".");  else  @printf("  %.4f ", b);  end
+    end
+    println()
+    @printf("%12s |", "")
+    for (lbl, fn1, fn2, fn3, mdl) in models
+        _, s = var == "lnhhexp" ? fn1(mdl) :
+               var == "illness" ? fn2(mdl) : fn3(mdl)
+        if isnan(s);  @printf(" %9s",  ".");  else  @printf("  %.4f ", s);  end
+    end
+    println()
+end
+println("-"^74)
+```
+
+### 9.6.4 Hierarchical linear models
+
+```{julia}
+#=
+* Hierarchical linear model with household and village variance components
+xtmixed pharvis lnhhexp illness || commune: || hh:, mle difficult
+=#
+# This hierarchical model has TWO nested grouping factors (commune ⊃ hh), i.e.
+# two variance components. `stata_xtmixed` fits a single grouping factor by
+# direct ML, so nested multi-level designs are outside its scope. For a genuine
+# nested fit, use MixedModels.jl:
+#     using MixedModels
+#     fit(LinearMixedModel,
+#         @formula(pharvis ~ lnhhexp + illness + (1 | commune) + (1 | hh)), df9v;
+#         REML=false)
+# The single-level (household-only) variance-component fit is:
+m_hh_only = stata_xtmixed(df9v, :pharvis, [:lnhhexp, :illness], :hh);
+```
+
+## 9.7 Stata resources
+
+## 9.8 Exercises

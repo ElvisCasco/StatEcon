@@ -1,6 +1,18 @@
 Manifest.toml
 /docs/build/
+
+# per-chapter porting scratch (build scripts, frozen source copies)
+_ch*
+
+# Quarto render outputs & cache (notebooks are the source; .html are generated)
+*.html
+.quarto/
+**/*_files/
+
 *.jl.cov
 *.jl.*.cov
 *.jl.mem
 .DS_Store
+
+# downloaded dataset cache (ch02 fetches from stata-press)
+census.dta

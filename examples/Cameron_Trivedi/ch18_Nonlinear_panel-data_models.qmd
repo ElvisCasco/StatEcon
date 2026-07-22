@@ -1,0 +1,1683 @@
+---
+title: "Cameron & Trivedi -- Ch. 18: Nonlinear panel-data models (via StatEcon)"
+Authors:
+- Colin Cameron
+- Pravin Trivedi
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+# Julia setup
+
+```{julia}
+using StatEcon
+const DATA = first(filter(d -> isdir(d) && (isfile(joinpath(d, "auto.dta")) || isdir(joinpath(d, "musr"))), ["../../data", "data", raw"C:/EC/GitHub/StatEcon/data"]))
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+_rawval(x) = hasproperty(x, :value) ? x.value : x
+```
+
+The panel nonlinear estimators used in this chapter now live in `StatEcon`
+(one file per Stata command: `stata_xtlogit_pa`, `stata_xtlogit_re`,
+`stata_xtlogit_fe`, `stata_xtpoisson_pa`, `stata_xtpoisson_re`,
+`stata_xtpoisson_re_normal`, `stata_xtnbreg_pa`, `stata_xtnbreg_re`,
+`stata_xtnbreg_fe`, `stata_xttobit_re`, `stata_xtmelogit`,
+`stata_estimates_table_se`) and are called directly below, alongside the
+already-available `stata_poisson`, `stata_nbreg`, `stata_logit`,
+`stata_summarize`, `stata_correlate`, `stata_xtdescribe`, `stata_xtsum`,
+`stata_xttrans`. The small pedagogical helpers `panel_bootstrap`, `meddiff`,
+`meddiff_return`, `myols`, `time_now2` are kept inline below.
+
+```{julia}
+# Pedagogical helpers kept inline (Appendix A / cluster-bootstrap demo).
+import Dates
+time_now2() = println(Dates.now())
+
+function meddiff(a, b)
+    diff = a .- b
+    md = Statistics.median(skipmissing(diff))
+    @printf("Median difference = %.4f\n", md)
+    return md
+end
+
+meddiff_return(y, x) = Statistics.median(skipmissing(y .- x))
+
+function myols(df, fml; vce = nothing)
+    if vce === nothing
+        return FixedEffectModels.reg(df, fml)
+    elseif vce == "robust"
+        return FixedEffectModels.reg(df, fml, Vcov.robust())
+    else
+        return FixedEffectModels.reg(df, fml, vce)
+    end
+end
+
+# Cluster bootstrap on the panel id: applies `f(df_resampled)` on each of B
+# resamples (each sampled cluster gets a fresh unique id so panel estimators
+# do not merge duplicates) and returns a B x k matrix of the returned vectors.
+function panel_bootstrap(f::Function, df, idvar::Symbol; B::Int=400, seed::Int=10101,
+                         verbose::Bool=true)
+    rng = Random.MersenneTwister(seed)
+    ids = unique(df[!, idvar])
+    id_to_rows = Dict{Any, Vector{Int}}()
+    for (i, id) in enumerate(df[!, idvar])
+        push!(get!(id_to_rows, id, Int[]), i)
+    end
+    results = Vector{Vector{Float64}}()
+    n_fail = 0
+    for b in 1:B
+        boot_ids = StatsBase.sample(rng, ids, length(ids); replace=true)
+        row_idx = Int[]
+        new_id  = Int[]
+        for (k, i) in enumerate(boot_ids)
+            rows = id_to_rows[i]
+            append!(row_idx, rows)
+            append!(new_id, fill(k, length(rows)))
+        end
+        sub = df[row_idx, :]
+        sub[!, idvar] = new_id
+        try
+            push!(results, f(sub))
+        catch
+            n_fail += 1
+        end
+    end
+    if verbose && n_fail > 0
+        @warn "Bootstrap: $n_fail/$B resamples failed (skipped)."
+    end
+    isempty(results) && error("All bootstrap resamples failed.")
+    return reduce(hcat, results)'
+end
+```
+
+# 18 Nonlinear panel-data models
+
+## 18.1 Introduction
+
+## 18.2 Nonlinear panel-data overview
+
+### 18.2.1 Some basic nonlinear panel models
+
+#### FE models
+
+#### RE models
+
+#### Pooled models / population-averaged models
+
+#### Comparison of models
+
+### 18.2.2 Dynamic Models
+
+### 18.2.3 Julia equivalents
+
+The Julia ecosystem covers nonlinear panel models partially:
+- **Pooled** Poisson / logit / probit / NB: `GLM.jl` with cluster-robust SEs from
+  `FixedEffectModels.jl` (linear), or manual sandwich for `GLM.jl` fits.
+- **Fixed-effects Poisson**: `FixedEffectModels.jl` does not support nonlinear
+  models. Implement manually via the conditional Poisson MLE.
+- **Random-effects logit / probit / Poisson**: use `MixedModels.jl`
+  (`fit(GeneralizedLinearMixedModel, ...)`).
+- **Population-averaged (GEE)**: not directly available; use clustered SEs as a
+  pragmatic substitute.
+
+## 18.3 Nonlinear panel-data example
+
+### 18.3.1 Data description and summary statistics
+
+```{julia}
+#=
+********** DATA DESCRIPTION **********
+
+* mus18data.dta    
+* Rand Health Insurance Experiment data 
+* Essentially same data as in P. Deb and P.K. Trivedi (2002)
+* "The Structure of Demand for Medical Care: Latent Class versus
+* Two-Part Models", Journal of Health Economics, 21, 601-625
+* except that paper used different outcome (counts rather than $)
+* Each observation is for an individual over a year.
+* Individuals may appear in up to five years.
+* All available sample is used except only fee for service plans included.
+* If panel data used then clustering is on id (person id)
+=#
+#=
+********** DATA DESCRIPTION **********
+
+* mus18data.dta    
+* Rand Health Insurance Experiment data 
+* Essentially same data as in P. Deb and P.K. Trivedi (2002)
+* "The Structure of Demand for Medical Care: Latent Class versus
+* Two-Part Models", Journal of Health Economics, 21, 601-625
+* except that paper used different outcome (counts rather than $)
+* Each observation is for an individual over a year.
+* Individuals may appear in up to five years.
+* All available sample is used except only fee for service plans included.
+* If panel data used then clustering is on id (person id)
+=#
+```
+
+```{julia}
+#=
+* Describe dependent variables and regressors
+use musr/mus18data.dta, clear
+describe dmdu med mdu lcoins ndisease female age lfam child id year
+=#
+#=
+* Describe dependent variables and regressors
+use musr/mus18data.dta, clear
+describe dmdu med mdu lcoins ndisease female age lfam child id year
+=#
+
+# Load mus18data.dta into df18 (with Float32→Float64 promotion so
+# downstream OLS / GLM helpers don't trip on float-precision mismatches),
+# then `DataFrames.describe` prints the per-variable summary (`describe` in
+# StatEcon has no dedicated Stata printer; use `DataFrames.describe` /
+# `stata_summarize`).
+df18 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus18data.dta"))
+for c in DataFrames.names(df18)
+    if eltype(df18[!, c]) <: Union{Missing, Float32}
+        df18[!, c] = convert.(Union{Missing, Float64}, df18[!, c])
+    end
+end
+
+DataFrames.describe(df18[:, [:dmdu, :med, :mdu, :lcoins, :ndisease, :female,
+     :age, :lfam, :child, :id, :year]])
+```
+
+```{julia}
+#=
+* Summarize dependent variables and regressors
+summarize dmdu med mdu lcoins ndisease female age lfam child id year
+=#
+#=
+* Summarize dependent variables and regressors
+summarize dmdu med mdu lcoins ndisease female age lfam child id year
+=#
+
+# Same variable list as the previous `describe`, fed to
+# `stata_summarize` (chunk 1) for the Stata `summarize` block (Obs /
+# Mean / Std. dev. / Min / Max).
+stata_summarize(df18,
+    [:dmdu, :med, :mdu, :lcoins, :ndisease, :female,
+     :age, :lfam, :child, :id, :year]);
+```
+
+### 18.3.2 Panel-data organization
+
+```{julia}
+#=
+* Panel description of dataset 
+xtset id year
+xtdescribe
+=#
+#=
+* Panel description of dataset
+xtset id year
+xtdescribe
+=#
+
+# `xtdescribe` (chunk 1) prints both Stata blocks: the `xtset` preamble
+# (Panel variable / Time variable / Delta) and the full `xtdescribe`
+# detail (id range + n, time range + T, Delta/Span/uniqueness, the
+# Distribution of T_i quantiles row, and the Frequency/Percent/Cum./
+# Pattern table). `(unbalanced)` and `but with gaps` are auto-detected.
+stata_xtdescribe(df18, :id, :year);
+```
+
+### 18.3.3 Within and between variation
+
+```{julia}
+#=
+* Panel summary of time-varying regressors
+xtsum age lfam child
+=#
+#=
+* Panel summary of time-varying regressors
+xtsum age lfam child
+=#
+
+# `xtsum` (chunk 1) prints Stata's per-variable overall / between /
+# within decomposition. Right column header switches between `T = <T>`
+# (balanced) and `T-bar = <N/n>` (unbalanced) — auto-detected.
+stata_xtsum(df18, [:age, :lfam, :child], :id);
+```
+
+### 18.3.4 FE or RE model for these data?
+
+## 18.4 Binary outcome models
+
+### 18.4.1 Panel summary of the dependent variable
+
+```{julia}
+#=
+* Panel summary of dependent variable
+xtsum dmdu
+=#
+#=
+* Panel summary of dependent variable
+xtsum dmdu
+=#
+
+# Same `xtsum` (chunk 1) helper, applied to the binary dependent
+# variable `dmdu = 1{med > 0}` to get its overall / between / within
+# decomposition.
+stata_xtsum(df18, [:dmdu], :id);
+```
+
+```{julia}
+#=
+* Year-to-year transitions in whether visit doctor
+xttrans dmdu
+=#
+#=
+* Year-to-year transitions in whether visit doctor
+xttrans dmdu
+=#
+
+# `xttrans` (chunk 1) — one-period transition matrix of `dmdu` within
+# each panel. Default = row percentages only (matches Stata's default).
+# Pass `varlabel = "any MD visit = 1 if mdu > 0"` so the wrapped header
+# matches Stata's display label for `dmdu`.
+stata_xttrans(df18, :dmdu, :id, :year;
+        varlabel = "any MD visit = 1 if mdu > 0");
+```
+
+```{julia}
+#=
+* Correlations in the dependent variable
+corr dmdu l.dmdu l2.dmdu
+=#
+#=
+* Correlations in the dependent variable
+corr dmdu l.dmdu l2.dmdu
+=#
+
+# Build the within-panel lags `L.dmdu` and `L2.dmdu` (set to `missing`
+# at the panel boundary), then call `stata_correlate` (chunk 1) on the
+# three columns. `stata_correlate` does listwise deletion across the
+# variable list, matching Stata's `corr` default.
+# `_lag_n(x, k)` returns a vector of length `length(x)` whose first k
+# entries are `missing` and the rest are `x[1:end-k]`. Clipping by
+# `min(k, length(x))` handles 1-obs panels correctly.
+_lag_n(x, k) = vcat(fill(missing, min(k, length(x))),
+                    collect(x)[1:max(0, length(x) - k)])
+
+df18s = DataFrames.sort(df18, [:id, :year])
+df18s = DataFrames.transform(DataFrames.groupby(df18s, :id),
+    :dmdu => (x -> _lag_n(x, 1)) => :L_dmdu,
+    :dmdu => (x -> _lag_n(x, 2)) => :L2_dmdu)
+stata_correlate(df18s, [:dmdu, :L_dmdu, :L2_dmdu]);
+```
+
+### 18.4.2 Pooled logit estimator
+
+```{julia}
+#=
+* Logit cross-section with panel-robust standard errors
+logit dmdu lcoins ndisease female age lfam child, vce(cluster id) nolog
+=#
+#=
+* Logit cross-section with panel-robust standard errors
+logit dmdu lcoins ndisease female age lfam child, vce(cluster id) nolog
+=#
+
+# Pooled logit with cluster-robust SEs at the panel level. `stata_logit`
+# (chunk 1) now supports `vce = :cluster` with a `cluster_var` keyword:
+# the meat of the sandwich is summed over panels (per-cluster aggregated
+# scores), with Stata's `G/(G-1)` cluster correction. The header
+# switches to "Wald chi2" and "Log pseudolikelihood" and the
+# "(Std. err. adjusted for <G> clusters in <var>)" sub-note appears.
+stata_logit(df18,
+    GLM.@formula(dmdu ~ lcoins + ndisease + female + age + lfam + child);
+    vce         = :cluster,
+    cluster_var = :id);
+```
+
+### 18.4.3 The MixedModels.jl equivalent
+
+### 18.4.4 GEE notes
+
+### 18.4.5 PA logit estimator
+
+```{julia}
+#=
+* Pooled logit cross-section with exchangeable errors and panel-robust VCE
+xtlogit dmdu lcoins ndisease female age lfam child, pa corr(exch) vce(robust) nolog
+=#
+#=
+* Pooled logit cross-section with exchangeable errors and panel-robust VCE
+xtlogit dmdu lcoins ndisease female age lfam child, pa corr(exch) vce(robust) nolog
+=#
+
+# `stata_xtlogit_pa` (chunk 1) is the population-averaged GEE logit
+# (Liang & Zeger 1986). It alternates: (1) compute Pearson residuals,
+# (2) estimate the exchangeable correlation α from cross-time products,
+# (3) Newton update of β via  Σ X_i' A_i V_i⁻¹ A_i X_i ; with
+# Liang-Zeger sandwich SEs at convergence. Output mirrors Stata's
+# `xtlogit, pa` block: full GEE header (Number of obs / groups / Family
+# / Link / Correlation / Obs per group / Wald / Scale parameter), the
+# clustering footer note, and the coefficient table with "Robust"
+# sub-banner.
+stata_xtlogit_pa(df18;
+    depvar = :dmdu,
+    regs   = [:lcoins, :ndisease, :female, :age, :lfam, :child],
+    idvar  = :id,
+    corr   = :exchangeable);
+```
+
+### 18.4.6 RE logit estimator
+
+```{julia}
+#=
+* Logit random-effects estimator
+xtlogit dmdu lcoins ndisease female age lfam child, re nolog
+=#
+#=
+* Logit random-effects estimator
+xtlogit dmdu lcoins ndisease female age lfam child, re nolog
+=#
+
+# `stata_xtlogit_re` (chunk 1) is the random-effects logit MLE:
+#   y_it = 1{x_it'β + u_i + ε_it > 0},  u_i ~ N(0, σ_u²),
+#   ε_it ~ logistic(0, 1).
+# Per-panel likelihood is integrated out by 12-point Gauss-Hermite
+# quadrature (Stata default). LBFGS + ForwardDiff autodiff for joint
+# MLE in (β, lnσ_u²); finite-difference Hessian for OIM SEs.
+# Output mirrors Stata: header (Number of obs / groups / Random effects
+# u_i ~ Gaussian / Obs per group / Integration method / Wald / Log
+# likelihood / Prob > chi²), coefficient table for β, /lnsig2u row,
+# auxiliary sigma_u / rho rows with delta-method CIs, and the trailing
+# `LR test of rho=0: chibar2(01)` half-mixture test.
+stata_xtlogit_re(df18;
+    depvar = :dmdu,
+    regs   = [:lcoins, :ndisease, :female, :age, :lfam, :child],
+    idvar  = :id,
+    integration_pts = 12);
+```
+
+### 18.4.7 FE logit estimator
+
+```{julia}
+#=
+* Logit fixed-effects estimator
+xtlogit dmdu lcoins ndisease female age lfam child, fe nolog 
+=#
+#=
+* Logit fixed-effects estimator
+xtlogit dmdu lcoins ndisease female age lfam child, fe nolog
+=#
+
+# `stata_xtlogit_fe` (chunk 1) — Chamberlain (1980) conditional FE
+# logit. Conditions on the panel sufficient statistic Σ_t y_it to
+# eliminate the individual FEs; panels with all-0 or all-1 outcomes
+# are dropped (uninformative). Time-invariant regressors get reported
+# as `0  (omitted)` and don't enter estimation. The conditional log-
+# likelihood sums over all C(T_i, c_i) binary sequences. LR test:
+# `LR = 2·(LL − LL_null)` ~ χ²(k_kept) where LL_null = -Σ log C(T_i, c_i).
+stata_xtlogit_fe(df18;
+    depvar = :dmdu,
+    regs   = [:lcoins, :ndisease, :female, :age, :lfam, :child],
+    idvar  = :id);
+```
+
+### 18.4.8 Panel logit estimator comparison
+
+```{julia}
+#=
+* Logit mixed-effects estimator (same as xtlogit, re)
+*xtmelogit dmdu lcoins ndisease female age lfam child || id:
+=#
+#=
+* Logit mixed-effects estimator (same as xtlogit, re)
+xtmelogit dmdu lcoins ndisease female age lfam child || id:
+=#
+
+# Stata's `xtmelogit ... || id:` is the same random-intercept logit
+# model as `xtlogit, re`, but uses a different output layout
+# ("Mixed-effects logistic regression" header + `Random-effects
+# parameters` block) and defaults to 7 integration points (Stata's
+# default for `xtmelogit`/`meqrlogit`/`melogit`). `stata_xtmelogit`
+# (chunk 1) is a thin wrapper that calls `stata_xtlogit_re` and
+# re-prints in the mixed-effects format.
+stata_xtmelogit(df18;
+    depvar = :dmdu,
+    regs   = [:lcoins, :ndisease, :female, :age, :lfam, :child],
+    idvar  = :id,
+    integration_pts = 7);
+```
+
+```{julia}
+#=
+* Panel logit estimator comparison
+global xlist lcoins ndisease female age lfam child
+quietly logit dmdu $xlist, vce(cluster id)
+estimates store POOLED
+quietly xtlogit dmdu $xlist, pa corr(exch) vce(robust)
+estimates store PA
+quietly xtlogit dmdu $xlist, re     // SEs are not cluster-robust
+estimates store RE
+quietly xtlogit dmdu $xlist, fe     // SEs are not cluster-robust
+estimates store FE
+estimates table POOLED PA RE FE, equations(1) se b(%8.4f) stats(N ll) stfmt(%8.0f)
+=#
+#=
+* Panel logit estimator comparison
+global xlist lcoins ndisease female age lfam child
+quietly logit dmdu $xlist, vce(cluster id)
+estimates store POOLED
+quietly xtlogit dmdu $xlist, pa corr(exch) vce(robust)
+estimates store PA
+quietly xtlogit dmdu $xlist, re     // SEs are not cluster-robust
+estimates store RE
+quietly xtlogit dmdu $xlist, fe     // SEs are not cluster-robust
+estimates store FE
+estimates table POOLED PA RE FE, equations(1) se b(%8.4f) stats(N ll) stfmt(%8.0f)
+=#
+
+# Fit four panel-logit estimators quietly, then `stata_estimates_table_se`
+# (chunk 1) prints the side-by-side comparison with SEs below estimates,
+# `(omitted)` cells for FE's time-invariant regressors, a separate
+# `/lnsig2u` aux row for RE only, and a blank `ll` cell for PA (GEE has
+# no likelihood). Single equation block labeled `#1`.
+xlist18 = [:lcoins, :ndisease, :female, :age, :lfam, :child]
+fml18   = GLM.@formula(dmdu ~ lcoins + ndisease + female + age + lfam + child)
+
+fit_pooled = stata_logit(df18, fml18; vce = :cluster, cluster_var = :id,
+                                       quiet = true)
+fit_pa     = stata_xtlogit_pa(df18; depvar = :dmdu, regs = xlist18,
+                                    idvar = :id, corr = :exchangeable,
+                                    quiet = true)
+fit_re     = stata_xtlogit_re(df18; depvar = :dmdu, regs = xlist18,
+                                    idvar = :id, integration_pts = 12,
+                                    quiet = true)
+fit_fe     = stata_xtlogit_fe(df18; depvar = :dmdu, regs = xlist18,
+                                    idvar = :id, quiet = true)
+
+specs_pl = [
+    (name = "POOLED", β = fit_pooled.β, se = fit_pooled.se,
+                      coefnames = fit_pooled.coefnames,
+                      n = fit_pooled.n, ll = fit_pooled.ll),
+    (name = "PA",     β = fit_pa.β,     se = fit_pa.se,
+                      coefnames = fit_pa.coefnames,
+                      n = fit_pa.n,     ll = NaN),
+    (name = "RE",     β = fit_re.β,     se = fit_re.se,
+                      coefnames = fit_re.coefnames,
+                      n = fit_re.n,     ll = fit_re.ll),
+    (name = "FE",     β = fit_fe.β,     se = fit_fe.se,
+                      coefnames = fit_fe.coefnames_kept,
+                      n = fit_fe.n,     ll = fit_fe.ll),
+]
+
+stata_estimates_table_se(specs_pl;
+    eq_label   = "#1",
+    aux_rows   = [(var_name = "/lnsig2u",
+                   values   = Dict("RE" => (fit_re.ln_σ2u,
+                                            fit_re.se_ln_σ2u)))],
+    omitted_per_spec = Dict("FE" => Set(fit_fe.omitted)),
+    stats_skip = Dict("PA" => Set([:ll])),
+    b_fmt      = "%.4f",
+    se_fmt     = "%.4f",
+    stat_fmt   = "%.0f");
+```
+
+### 18.4.9 Prediction and marginal effects
+
+### 18.4.10 Mixed-effects logit estimator
+
+```{julia}
+#=
+*xtmelogit dmdu lcoins ndisease female age lfam child || id:
+=#
+#=
+xtmelogit dmdu lcoins ndisease female age lfam child || id:
+=#
+
+# Same `stata_xtmelogit` (chunk 1) call as §18.4.8 — Stata's
+# `xtmelogit ... || id:` random-intercept logit. Default 7 integration
+# points (Stata's default for `xtmelogit`/`meqrlogit`/`melogit`). Output
+# in the "Mixed-effects logistic regression" layout.
+stata_xtmelogit(df18;
+    depvar = :dmdu,
+    regs   = [:lcoins, :ndisease, :female, :age, :lfam, :child],
+    idvar  = :id,
+    integration_pts = 7);
+```
+
+## 18.5 Tobit model
+
+### 18.5.1 Panel summary of dependent variable
+
+```{julia}
+#=
+* Panel summary of dependent variable
+xtsum med
+=#
+# Same `xtsum` (chunk 1) helper, applied to the dependent variable `med` to
+# get its overall / between / within decomposition. The header switches between `T = <T>` (balanced) and `T-bar = <N/n>` (unbalanced) — auto-detected.
+stata_xtsum(df18, [:med], :id);
+```
+
+### 18.5.2 RE tobit model
+
+```{julia}
+#=
+* Tobit random-effects estimator
+xttobit med lcoins ndisease female age lfam child, ll(0) nolog
+=#
+#=
+* Tobit random-effects estimator
+xttobit med lcoins ndisease female age lfam child, ll(0) nolog
+=#
+
+# `stata_xttobit_re` (chunk 1) — random-effects Tobit with left-
+# censoring at `ll_lower=0`. Joint MLE in (β, lnσ_e², lnσ_u²) by LBFGS
+# + ForwardDiff autodiff. Per-panel likelihood integrates u_i out by
+# 12-point Gauss-Hermite quadrature. OIM SEs from finite-difference
+# Hessian; σ_u, σ_e and ρ via delta method.
+# Output mirrors Stata: header (Number of obs / Uncensored / Limits /
+# Left-/Right-censored / groups / Random effects / Obs per group /
+# Integration method / Wald / Log likelihood / Prob > chi²),
+# coefficient table, /sigma_u / /sigma_e / rho aux block, and the
+# trailing `LR test of sigma_u=0: chibar2(01)` half-mixture line.
+stata_xttobit_re(df18;
+    depvar = :med,
+    regs   = [:lcoins, :ndisease, :female, :age, :lfam, :child],
+    idvar  = :id,
+    ll_lower = 0.0,
+    integration_pts = 12);
+```
+
+### 18.5.3 Generalized tobit models
+
+### 18.5.4 Parametric nonlinear panel models
+
+## 18.6 Count-data models
+
+### 18.6.1 Pooled / FE / RE Poisson in Julia
+
+### 18.6.2 Panel summary of dependent variable
+
+```{julia}
+#=
+* Panel summary of dependent variable
+xtsum mdu
+=#
+# Same `xtsum` (chunk 1) helper, applied to the count dependent variable `mdu` to get its overall / between / within decomposition. The header switches between `T = <T>` (balanced) and `T-bar = <N/n>` (unbalanced) — auto-detected.
+stata_xtsum(df18, [:mdu], :id);
+```
+
+```{julia}
+#=
+* Year-to-year transitions in doctor visits
+generate mdushort = mdu
+replace mdushort = 4 if mdu >= 4
+xttrans mdushort
+=#
+
+# Build `mdushort = min(mdu, 4)` (Stata's `replace mdushort = 4 if mdu >= 4`),
+# then `xttrans` (chunk 1) prints Stata's default row-percentage transition
+# matrix with the variable name auto-displayed both as the centered
+# column label on line 1 and as the row label on line 2.
+df18.mdushort = [min(Int(round(_rawval(x))), 4) for x in df18.mdu]
+stata_xttrans(df18, :mdushort, :id, :year);
+```
+
+```{julia}
+#=
+// Not included in book
+corr mdu L.mdu
+=#
+# Build the within-panel lag `L.mdu` (set to `missing` at the panel boundary), then call `stata_correlate` (chunk 1) on the two columns. `stata_correlate` does listwise deletion across the variable list, matching Stata's `corr` default.
+df18s = DataFrames.sort(df18, [:id, :year])
+df18s = DataFrames.transform(DataFrames.groupby(df18s, :id),
+    :mdu => (x -> _lag_n(x, 1)) => :L_mdu)
+stata_correlate(df18s, [:mdu, :L_mdu]);
+```
+
+### 18.6.3 Pooled Poisson estimator
+
+```{julia}
+#=
+* Pooled Poisson estimator with cluster-robust standard errors
+poisson mdu lcoins ndisease female age lfam child, vce(cluster id)
+=#
+#=
+* Pooled Poisson estimator with cluster-robust standard errors
+poisson mdu lcoins ndisease female age lfam child, vce(cluster id)
+=#
+
+# Pooled Poisson with cluster-robust SE at the panel level. `stata_poisson`
+# (chunk 1) supports `vce = :cluster` with a `cluster_var` keyword: per-
+# cluster aggregated scores feed the meat of the sandwich, with Stata's
+# `G/(G-1)` cluster correction. Header switches to "Wald chi2" / "Log
+# pseudolikelihood" and prints the "(Std. err. adjusted for G clusters
+# in <var>)" sub-note.
+stata_poisson(df18,
+    GLM.@formula(mdu ~ lcoins + ndisease + female + age + lfam + child);
+    vce         = :cluster,
+    cluster_var = :id);
+```
+
+### 18.6.4 PA Poisson estimator
+
+```{julia}
+#=
+* Poisson PA estimator with unstructured error correlation and robust VCE
+xtpoisson mdu lcoins ndisease female age lfam child, pa corr(unstr) vce(robust)
+=#
+
+# `stata_xtpoisson_pa` (chunk 1) — population-averaged GEE Poisson with
+# unstructured working correlation. The full T×T R matrix is estimated
+# from cross-time products of Pearson residuals, with each panel using
+# its own sub-matrix of R based on the observed time slots (so unbalanced
+# panels are handled). `timevar = :year` is required for `:unstructured`.
+# Output mirrors Stata: `Group and time vars: id year` header, the
+# `(Std. err. adjusted for clustering on id)` sub-note, and the
+# coefficient table with "Robust" sub-banner.
+stata_xtpoisson_pa(df18;
+    depvar  = :mdu,
+    regs    = [:lcoins, :ndisease, :female, :age, :lfam, :child],
+    idvar   = :id,
+    timevar = :year,
+    corr    = :unstructured);
+```
+
+```{julia}
+#=
+// Not included in book
+* Poisson random-effects estimator with default standard errors
+xtpoisson mdu lcoins ndisease female age lfam child, re
+=#
+
+# `stata_xtpoisson_re` (chunk 1) — Hausman-Hall-Griliches Gamma random-
+# effects Poisson with closed-form panel likelihood (no Gauss-Hermite
+# needed). Joint MLE in (β, lnα) by LBFGS + ForwardDiff autodiff;
+# OIM SEs from finite-difference Hessian. The LR test of α=0 uses the
+# half-mixture chibar²(01) since α=0 is on the boundary.
+stata_xtpoisson_re(df18;
+    depvar = :mdu,
+    regs   = [:lcoins, :ndisease, :female, :age, :lfam, :child],
+    idvar  = :id);
+```
+
+### 18.6.5 RE Poisson estimators
+
+```{julia}
+#=
+* Poisson random-effects estimator with cluster-robust standard errors
+*xtpoisson mdu lcoins ndisease female age lfam child, re vce(boot, reps(400) seed(10101) nodots)
+=#
+#=
+* Poisson random-effects estimator with cluster-robust standard errors
+*xtpoisson mdu lcoins ndisease female age lfam child, re vce(boot, reps(400) seed(10101) nodots)
+=#
+
+# RE Poisson with cluster-bootstrap SEs (panels resampled with
+# replacement). Uses `panel_bootstrap` (chunk 1) to draw 400 panel-
+# resamples, refits `stata_xtpoisson_re` (quietly) on each, and
+# replaces the OIM SEs with the bootstrap SD across replicates.
+# Layout follows the standard `xtpoisson, re` block but with the
+# "Bootstrap" sub-banner. RNG note: Julia's MersenneTwister differs
+# from Stata's MT64, so SEs will not match Stata exactly.
+#=
+regs_re = [:lcoins, :ndisease, :female, :age, :lfam, :child]
+
+re_full = stata_xtpoisson_re(df18;
+    depvar = :mdu, regs = regs_re, idvar = :id, quiet = true)
+
+β_boot = panel_bootstrap(df18, :id; B = 400, seed = 10101, verbose = false) do sub
+    fit = stata_xtpoisson_re(sub;
+        depvar = :mdu, regs = regs_re, idvar = :id, quiet = true)
+    vcat(fit.β, fit.lnα)
+end
+se_boot = vec(Statistics.std(β_boot, dims = 1))
+
+# Print Stata-style block with bootstrap SEs.
+let β = re_full.β, lnα = re_full.lnα, α = re_full.α,
+    cnames = re_full.coefnames, n = re_full.n, n_pan = re_full.n_panels,
+    se_β = se_boot[1:length(β)], se_lnα = se_boot[end],
+    crit = Distributions.quantile(Distributions.Normal(), 0.975)
+    se_α = α * se_lnα
+    z    = β ./ se_β
+    pv   = 2 .* (1 .- Distributions.cdf.(Distributions.Normal(), abs.(z)))
+    ci_lo = β .- crit .* se_β
+    ci_hi = β .+ crit .* se_β
+    lnα_lo, lnα_hi = lnα - crit*se_lnα, lnα + crit*se_lnα
+    αlo, αhi = exp(lnα_lo), exp(lnα_hi)
+    Wald   = β[1:end-1]' * LinearAlgebra.inv(LinearAlgebra.diagm(se_β[1:end-1].^2)) *
+             β[1:end-1]   # naive Wald using diag(SE²); cluster-bootstrap V is non-diag
+    Wald_p = 1 - Distributions.cdf(Distributions.Chisq(length(β)-1), Wald)
+
+    g9(x; w=10) = (s = Printf.@sprintf("%.7g", x);
+                   0 < abs(x) < 1 && (s = replace(s, r"^(-?)0\." => s"\1."));
+                   lpad(s, w))
+    println()
+    Printf.@printf("%-53s%-17s= %6s\n",
+        "Random-effects Poisson regression", "Number of obs", string(n))
+    Printf.@printf("%-53s%-17s= %6s\n",
+        "Group variable: id", "Number of groups", string(n_pan))
+    println()
+    Printf.@printf("%-53s%s\n", "Random effects u_i ~ Gamma", "Obs per group:")
+    Printf.@printf("%-53s%18s = %6d\n", "", "min", re_full.T_min)
+    Printf.@printf("%-53s%18s = %6.1f\n", "", "avg", re_full.T_avg)
+    Printf.@printf("%-53s%18s = %6d\n", "", "max", re_full.T_max)
+    println()
+    Printf.@printf("%-53s%-17s= %6s\n", "",
+        "Wald chi2($(length(β)-1))", Printf.@sprintf("%.2f", Wald))
+    Printf.@printf("%-53s%-17s= %6s\n",
+        "Log pseudolikelihood = " * Printf.@sprintf("%.3f", re_full.ll),
+        "Prob > chi2", Printf.@sprintf("%.4f", Wald_p))
+    println()
+    println(lpad("(Replications based on $n_pan clusters in id)", 78))
+    println("-"^78)
+    println("             |              Bootstrap")
+    println("         mdu | Coefficient  std. err.      z    P>|z|     [95% conf. interval]")
+    println("-"^13, "+", "-"^64)
+    for i in eachindex(β)
+        label = i == length(β) ? "_cons" : cnames[i]
+        Printf.@printf("%12s | %s  %s  %s   %s    %s  %s\n",
+            label, g9(β[i]; w=10), g9(se_β[i]; w=9),
+            Printf.@sprintf("%7.2f", z[i]), Printf.@sprintf("%.3f", pv[i]),
+            g9(ci_lo[i]; w=9), g9(ci_hi[i]; w=10))
+    end
+    println("-"^13, "+", "-"^64)
+    Printf.@printf("%12s | %s  %s%26s%s  %s\n",
+        "/lnalpha", g9(lnα; w=10), g9(se_lnα; w=9), "",
+        g9(lnα_lo; w=9), g9(lnα_hi; w=10))
+    println("-"^13, "+", "-"^64)
+    Printf.@printf("%12s | %s  %s%26s%s  %s\n",
+        "alpha", g9(α; w=10), g9(se_α; w=9), "",
+        g9(αlo; w=9), g9(αhi; w=10))
+    println("-"^78)
+end
+=#
+```
+
+```{julia}
+#=
+// Not included in book
+* Poisson random-effects estimator with normal intercept and default standard errors
+xtpoisson mdu lcoins ndisease female age lfam child, re normal
+*estimates store poisrenormal
+=#
+#=
+// Not included in book
+* Poisson random-effects estimator with normal intercept and default standard errors
+xtpoisson mdu lcoins ndisease female age lfam child, re normal
+estimates store poisrenormal
+=#
+
+# `stata_xtpoisson_re_normal` (chunk 1) — random-effects Poisson with
+# **Gaussian** random intercept (vs the default Gamma RE in
+# `xtpoisson, re`). Per-panel likelihood is integrated by Gauss-
+# Hermite quadrature (default 12 nominal pts, 32 internally for
+# accuracy). Joint MLE in (β, lnσ_u²) by LBFGS + ForwardDiff. Output
+# matches Stata's `xtpoisson, re normal`: header with "Random effects
+# u_i ~ Gaussian", coefficient table, /lnsig2u + sigma_u rows, and
+# the half-mixture LR test of σ_u=0.
+stata_xtpoisson_re_normal(df18;
+    depvar = :mdu,
+    regs   = [:lcoins, :ndisease, :female, :age, :lfam, :child],
+    idvar  = :id,
+    integration_pts = 12);
+```
+
+### 18.6.6 FE Poisson estimator
+
+```{julia}
+#=
+* Poisson fixed-effects estimator with default standard errors
+*xtpoisson mdu lcoins ndisease female age lfam child, fe i(id)
+*mepoisson mdu lcoins ndisease female age lfam child, fe i(id) 
+=#
+#=
+%%stata
+* Poisson fixed-effects estimator with default standard errors
+*xtpoisson mdu lcoins ndisease female age lfam child, fe i(id)
+*mepoisson mdu lcoins ndisease female age lfam child, fe i(id) 
+=#
+```
+
+```{julia}
+#=
+* Poisson fixed-effects estimator with cluster-robust standard errors
+*xtpoisson mdu lcoins ndisease female age lfam child, fe vce(boot, reps(400) seed(10101) nodots)
+=#
+#=
+%%stata
+* Poisson fixed-effects estimator with cluster-robust standard errors
+*xtpoisson mdu lcoins ndisease female age lfam child, fe vce(boot, reps(400) seed(10101) nodots)
+=#
+```
+
+### 18.6.7 Panel Poisson estimators comparison
+
+```{julia}
+#=
+/*
+* Comparison of Poisson panel estimators
+quietly xtpoisson mdu lcoins ndisease female age lfam child, pa corr(unstr) vce(robust)
+estimates store PPA_ROB
+quietly xtpoisson mdu lcoins ndisease female age lfam child, re
+estimates store PRE
+quietly xtpoisson mdu lcoins ndisease female age lfam child, re normal
+estimates store PRE_NORM
+quietly xtpoisson mdu lcoins ndisease female age lfam child, fe
+estimates store PFE
+estimates table PPA_ROB PRE PRE_NORM PFE, equations(1) b(%8.4f) se stats(N ll) stfmt(%8.0f)
+*/
+=#
+#=
+%%stata
+/*
+* Comparison of Poisson panel estimators
+quietly xtpoisson mdu lcoins ndisease female age lfam child, pa corr(unstr) vce(robust)
+estimates store PPA_ROB
+quietly xtpoisson mdu lcoins ndisease female age lfam child, re
+estimates store PRE
+quietly xtpoisson mdu lcoins ndisease female age lfam child, re normal
+estimates store PRE_NORM
+quietly xtpoisson mdu lcoins ndisease female age lfam child, fe
+estimates store PFE
+estimates table PPA_ROB PRE PRE_NORM PFE, equations(1) b(%8.4f) se stats(N ll) stfmt(%8.0f)
+*/
+=#
+```
+
+```{julia}
+#=
+// Not included in book
+* Negative binomial pooled estimator with default standard errors
+nbreg mdu lcoins ndisease female age lfam child
+=#
+#=
+// Not included in book
+* Negative binomial pooled estimator with default standard errors
+nbreg mdu lcoins ndisease female age lfam child
+=#
+
+# Pooled negative binomial regression (NB2 / dispersion: mean) via the
+# chunk-1 helper. `stata_nbreg` jointly estimates β and lnα by MLE and
+# prints Stata's exact `nbreg` output: header (Number of obs / LR chi2 /
+# Pseudo R²), coefficient table, /lnalpha + alpha aux rows, and the
+# trailing `LR test of alpha=0: chibar2(01)` half-mixture line.
+stata_nbreg(df18,
+    GLM.@formula(mdu ~ lcoins + ndisease + female + age + lfam + child));
+```
+
+```{julia}
+#=
+* Negative binomial pooled estimator with het robust standard errors
+nbreg mdu lcoins ndisease female age lfam child, vce(robust)
+=#
+#=
+* Negative binomial pooled estimator with het robust standard errors
+nbreg mdu lcoins ndisease female age lfam child, vce(robust)
+=#
+
+# Same NB2 model as above, but with `vce = :robust` for the sandwich SEs.
+# `stata_nbreg` (chunk 1) computes the per-obs scores by central finite
+# differences (gamma_inc-safe) and assembles  V = A⁻¹ B A⁻¹ · n/(n-1).
+# Header switches to `Wald chi2` / `Log pseudolikelihood`, the table
+# gets the `Robust` sub-banner with lowercase `std. err.`, and the
+# `LR test of alpha=0` footer is dropped (LR isn't valid under
+# misspecification, mirroring Stata's behavior).
+stata_nbreg(df18,
+    GLM.@formula(mdu ~ lcoins + ndisease + female + age + lfam + child);
+    vce = :robust);
+```
+
+```{julia}
+#=
+* Negative binomial pooled estimator with cluster-robust standard errors
+nbreg mdu lcoins ndisease female age lfam child, cluster(id)
+=#
+#=
+* Negative binomial pooled estimator with cluster-robust standard errors
+nbreg mdu lcoins ndisease female age lfam child, cluster(id)
+=#
+
+# Same NB2 model as above, with cluster-robust SEs at the panel level.
+# `stata_nbreg` (chunk 1) now supports `vce = :cluster` with a
+# `cluster_var` keyword: per-cluster aggregated scores feed the meat
+# of the sandwich, with Stata's `G/(G-1)` cluster correction. Header
+# adds the `(Std. err. adjusted for G clusters in <var>)` sub-note.
+stata_nbreg(df18,
+    GLM.@formula(mdu ~ lcoins + ndisease + female + age + lfam + child);
+    vce         = :cluster,
+    cluster_var = :id);
+```
+
+```{julia}
+#=
+* Negative binomial population-averaged estimator with equicorrelated errors
+xtnbreg lcoins ndisease female age lfam child, pa corr(exch) vce(robust)
+=#
+#=
+* Negative binomial population-averaged estimator with equicorrelated errors
+xtnbreg lcoins ndisease female age lfam child, pa corr(exch) vce(robust)
+=#
+
+# `stata_xtnbreg_pa` (chunk 1) — GEE population-averaged Negative
+# Binomial with exchangeable working correlation. Same Liang-Zeger
+# pipeline as `stata_xtpoisson_pa` but with the NB variance function
+# V(μ) = μ + μ²/k_disp (k_disp = 1 by default, matching Stata's
+# `family(nbinomial 1)`). Output adds `Family: Negative binomial(k=1)`
+# and a `Semirobust` sub-banner above the coefficient table.
+# Stata's command takes `lcoins` as the dependent variable here.
+stata_xtnbreg_pa(df18;
+    depvar = :lcoins,
+    regs   = [:ndisease, :female, :age, :lfam, :child],
+    idvar  = :id,
+    corr   = :exchangeable);
+```
+
+```{julia}
+#=
+* Negative binomial random-effects estimator with default standard errors
+xtnbreg mdu ndisease female age lfam child, re i(id) 
+=#
+#=
+* Negative binomial random-effects estimator with default standard errors
+xtnbreg mdu ndisease female age lfam child, re i(id)
+=#
+
+# `stata_xtnbreg_re` (chunk 1) — Hausman-Hall-Griliches (1984) random-
+# effects Negative Binomial. The RE is parameterized via a Beta(r, s)
+# distribution on ν_i/(1+ν_i), giving a closed-form panel likelihood
+# (no Gauss-Hermite needed). Joint MLE in (β, ln_r, ln_s) by Nelder-
+# Mead (loggamma is already FD-friendly but staying derivative-free
+# is consistent with `stata_nbreg`). Output mirrors Stata's `xtnbreg,
+# re` block: header with `Random effects u_i ~ Beta`, coefficient
+# table, /ln_r + /ln_s + r + s aux rows, and the half-mixture LR test
+# vs the pooled NB.
+stata_xtnbreg_re(df18;
+    depvar = :mdu,
+    regs   = [:ndisease, :female, :age, :lfam, :child],
+    idvar  = :id);
+```
+
+```{julia}
+#=
+* Negative binomial fixed-effects estimator with default standard errors
+xtnbreg mdu ndisease female age lfam child, fe i(id) 
+=#
+#=
+* Negative binomial fixed-effects estimator with default standard errors
+xtnbreg mdu ndisease female age lfam child, fe i(id)
+=#
+
+# `stata_xtnbreg_fe` (chunk 1) — Hausman-Hall-Griliches conditional
+# fixed-effects NB. Closed-form panel likelihood conditional on Σ_t y_it.
+# Drops panels with T_i < 2 or all-zero outcomes (uninformative under
+# the conditioning), so the sample size shrinks to those that
+# contribute information. Output mirrors Stata's `xtnbreg, fe`:
+# `Conditional FE negative binomial regression` header, coefficient
+# table (intercept retained), no random-effects auxiliary block.
+stata_xtnbreg_fe(df18;
+    depvar = :mdu,
+    regs   = [:ndisease, :female, :age, :lfam, :child],
+    idvar  = :id);
+```
+
+### 18.6.8 Negative binomial estimators
+
+```{julia}
+#=
+* Comparison of negative binomial panel estimators
+quietly xtpoisson mdu lcoins ndisease female age lfam child, pa corr(exch) vce(robust)
+estimates store PPA_ROB
+quietly xtnbreg mdu lcoins ndisease female age lfam child, pa corr(exch) vce(robust)
+estimates store NBPA_ROB
+quietly xtnbreg mdu lcoins ndisease female age lfam child, re
+estimates store NBRE
+quietly xtnbreg mdu lcoins ndisease female age lfam child, fe
+estimates store NBFE
+estimates table PPA_ROB NBPA_ROB NBRE NBFE, equations(1) b(%8.4f) se stats(N ll) stfmt(%8.0f)
+=#
+#=
+* Comparison of negative binomial panel estimators
+quietly xtpoisson mdu lcoins ndisease female age lfam child, pa corr(exch) vce(robust)
+estimates store PPA_ROB
+quietly xtnbreg mdu lcoins ndisease female age lfam child, pa corr(exch) vce(robust)
+estimates store NBPA_ROB
+quietly xtnbreg mdu lcoins ndisease female age lfam child, re
+estimates store NBRE
+quietly xtnbreg mdu lcoins ndisease female age lfam child, fe
+estimates store NBFE
+estimates table PPA_ROB NBPA_ROB NBRE NBFE, equations(1) b(%8.4f) se stats(N ll) stfmt(%8.0f)
+=#
+
+# Fit the four panel count estimators quietly, then `stata_estimates_table_se`
+# (chunk 1) prints the side-by-side comparison with SEs below estimates.
+# `PPA_ROB` and `NBPA_ROB` are GEE — `ll` is blank for both (no likelihood).
+# `NBRE` contributes the `/ln_r` and `/ln_s` aux rows. `NBFE` keeps `_cons`
+# and runs on the conditional-likelihood subsample (T_i ≥ 2 with non-zero
+# panel total), so its `N` is smaller. Single equation block labeled `#1`.
+xlist18nb = [:lcoins, :ndisease, :female, :age, :lfam, :child]
+
+fit_ppa  = stata_xtpoisson_pa(df18; depvar = :mdu, regs = xlist18nb,
+                                    idvar = :id, corr = :exchangeable,
+                                    quiet = true)
+fit_nbpa = stata_xtnbreg_pa(df18;   depvar = :mdu, regs = xlist18nb,
+                                    idvar = :id, corr = :exchangeable,
+                                    quiet = true)
+fit_nbre = stata_xtnbreg_re(df18;   depvar = :mdu, regs = xlist18nb,
+                                    idvar = :id, quiet = true)
+fit_nbfe = stata_xtnbreg_fe(df18;   depvar = :mdu, regs = xlist18nb,
+                                    idvar = :id, quiet = true)
+
+specs_nb = [
+    (name = "PPA_ROB",  β = fit_ppa.β,  se = fit_ppa.se,
+                        coefnames = fit_ppa.coefnames,
+                        n = fit_ppa.n,  ll = NaN),
+    (name = "NBPA_ROB", β = fit_nbpa.β, se = fit_nbpa.se,
+                        coefnames = fit_nbpa.coefnames,
+                        n = fit_nbpa.n, ll = NaN),
+    (name = "NBRE",     β = fit_nbre.β, se = fit_nbre.se,
+                        coefnames = fit_nbre.coefnames,
+                        n = fit_nbre.n, ll = fit_nbre.ll),
+    (name = "NBFE",     β = fit_nbfe.β, se = fit_nbfe.se,
+                        coefnames = fit_nbfe.coefnames,
+                        n = fit_nbfe.n, ll = fit_nbfe.ll),
+]
+
+stata_estimates_table_se(specs_nb;
+    eq_label   = "#1",
+    aux_rows   = [(var_name = "/ln_r",
+                   values   = Dict("NBRE" => (fit_nbre.ln_r,
+                                              fit_nbre.se_ln_r))),
+                  (var_name = "/ln_s",
+                   values   = Dict("NBRE" => (fit_nbre.ln_s,
+                                              fit_nbre.se_ln_s)))],
+    stats_skip = Dict("PPA_ROB"  => Set([:ll]),
+                      "NBPA_ROB" => Set([:ll])),
+    b_fmt      = "%.4f",
+    se_fmt     = "%.4f",
+    stat_fmt   = "%.0f");
+```
+
+## 18.7 Stata resources
+
+## 18.8 Exercises
+
+# A Programming in Julia (was: in Stata)
+
+## A.1 Matrix operations
+
+### A.1.1 Overview
+
+### A.1.2 Matrix input and output
+
+#### Matrix input by hand
+
+```{julia}
+#=
+* Define a matrix explicitly and list the matrix
+matrix define A = (1,2,3 \ 4,5,6)
+matrix list A
+=#
+# Define a matrix explicitly and display
+A = [1.0 2.0 3.0; 4.0 5.0 6.0]
+display(A)
+```
+
+```{julia}
+#=
+* Matrix row and column names
+matrix rownames A = one two
+matrix list A
+=#
+# Row and column names: use NamedArrays.jl or DataFrames for labelled matrices
+A_named = DataFrames.DataFrame(A, [:c1, :c2, :c3])
+A_named.row = ["one", "two"]
+A_named[:, [:row, :c1, :c2, :c3]]
+```
+
+#### Matrix input from estimation results
+
+```{julia}
+# Read in data, run a regression, then extract V from the model
+df_a = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus03data.dta"))
+df_a = first(DataFrames.dropmissing(df_a, [:ltotexp, :totchr]), 100)
+DataFrames.describe(df_a[:, [:ltotexp, :totchr]])
+m_ax = FixedEffectModels.reg(df_a, GLM.@formula(ltotexp ~ totchr))
+```
+
+```{julia}
+# Variance-covariance matrix from a fitted model
+vbols = FixedEffectModels.vcov(m_ax)
+display(vbols)
+```
+
+### A.1.3 Subscripts and combining matrices
+
+```{julia}
+# Create a matrix from DataFrame columns
+y_vec = Float64.(df_a.ltotexp)
+X_mat = hcat(Float64.(df_a.totchr), ones(DataFrames.nrow(df_a)))
+display(X_mat[1:5, :])
+```
+
+```{julia}
+# Convert a matrix back into a DataFrame
+DataFrames.DataFrame(X_mat, [:totchr, :intercept]) |> DataFrames.describe
+```
+
+```{julia}
+# Change value of an entry
+X2 = copy(X_mat)
+X2[1, 1] = X2[1, 2]
+display(X2[1:3, :])
+```
+
+```{julia}
+# Select column 2 (all rows)
+B_col = X_mat[:, 2:2]
+display(B_col[1:5, :])
+```
+
+```{julia}
+# Combine columns
+C_mat = hcat(B_col, B_col)
+display(C_mat[1:5, :])
+```
+
+### A.1.4 Matrix operators
+
+```{julia}
+#=
+* Matrix operators
+matrix D = C + 3*C
+matrix list D
+=#
+# Element-wise matrix arithmetic
+D_mat = C_mat .+ 3 .* C_mat
+display(D_mat[1:5, :])
+```
+
+### A.1.5 Matrix functions
+
+```{julia}
+#=
+* Matrix functions
+matrix r = rowsof(D)
+matrix list r
+=#
+# Number of rows
+r = size(D_mat, 1)
+println("rows(D) = ", r)
+```
+
+```{julia}
+#=
+* Can use scalar if 1x1 matrix
+scalar ralt = rowsof(D)
+display ralt
+=#
+# Same as a scalar
+ralt = size(D_mat, 1)
+println("ralt = ", ralt)
+```
+
+```{julia}
+#=
+* Inverse of nonsymmetric square matrix
+* Create a square matrix from X'X
+matrix XtX = X'*X
+matrix XtXinv = inv(XtX)
+matrix list XtXinv
+=#
+# Inverse of X'X
+XtX = X_mat' * X_mat
+XtX_inv = LinearAlgebra.inv(XtX)
+display(XtX_inv)
+```
+
+### A.1.6 Matrix accumulation
+
+```{julia}
+# OLS estimator: β̂ = (X'X)⁻¹ X'y
+b_ols = XtX_inv * (X_mat' * y_vec)
+display(b_ols)
+```
+
+### A.1.7 OLS using matrix commands
+
+```{julia}
+# OLS using matrix multiplication
+XTX = X_mat' * X_mat
+yTX = (y_vec' * X_mat)'    # column vector
+β   = LinearAlgebra.inv(XTX) * yTX
+display(β)
+```
+
+```{julia}
+# OLS with full output
+XTX = X_mat' * X_mat
+yTX = (y_vec' * X_mat)'
+β   = LinearAlgebra.inv(XTX) * yTX
+yTy = y_vec' * y_vec
+k   = size(X_mat, 2)
+n   = length(y_vec)
+s2  = (yTy - β' * XTX * β) / (n - k)
+V   = s2 * LinearAlgebra.inv(XTX)
+println("β =")
+display(β)
+println("V =")
+display(V)
+```
+
+```{julia}
+# Standard errors and t-statistics
+se = sqrt.(LinearAlgebra.diag(V))
+t  = vec(β) ./ se
+results = DataFrames.DataFrame(coeff = vec(β), sterror = se, tratio = t)
+display(results)
+```
+
+```{julia}
+# Pretty-print results table
+println("─" ^ 50)
+@printf("%-12s %12s %12s %10s\n", "Var", "Coef", "Std.Err", "t")
+println("─" ^ 50)
+for (i, n) in enumerate(["totchr", "_cons"])
+    @printf("%-12s %12.6f %12.6f %10.3f\n",
+            n, vec(β)[i], se[i], t[i])
+end
+println("─" ^ 50)
+```
+
+## A.2 Functions (Julia equivalent of Stata programs)
+
+### A.2.1 Simple functions with no arguments
+
+
+```{julia}
+# Run the function
+time_now2()
+```
+
+### A.2.2 Modifying a function
+
+
+### A.2.3 Functions with positional arguments
+
+
+```{julia}
+# Run with two arguments
+meddiff(df_a.ltotexp, Float64.(df_a.totchr))
+```
+
+### A.2.4 Local (temporary) variables
+
+In Julia, all variables inside a function are local by default — no need for
+`tempvar`. Globals are explicit (`global`).
+
+### A.2.5 Functions with named positional arguments
+
+
+### A.2.6 Storing and retrieving program results
+
+
+```{julia}
+#=
+* Program with results stored in r()
+capture program drop meddiff
+program meddiff, rclass
+  args y x
+  tempvar diff
+  generate `diff' = `y' - `x'
+  _pctile `diff', p(50)
+  return scalar medylx = r(r1)
+end
+=#
+# Use the returned value directly
+medylx = meddiff_return(df_a.ltotexp, Float64.(df_a.totchr))
+println("medylx = ", medylx)
+```
+
+### A.2.7 Functions with formula and option arguments
+
+```{julia}
+# Wrapper around FixedEffectModels.reg with optional Vcov
+FixedEffectModels.reg(first(df_a, 100),
+    GLM.@formula(ltotexp ~ totchr), Vcov.robust())
+```
+
+```{julia}
+# Same call (commented in original)
+println("(see above)")
+```
+
+
+```{julia}
+# Use the wrapper
+myols(first(df_a, 100), GLM.@formula(ltotexp ~ totchr); vce = "robust")
+```
+
+### A.2.8 Reusable code (modules / files)
+
+```{julia}
+# Julia equivalent of an ado-file: put functions in a .jl file and
+# `include("myfile.jl")`. Or organize them in a module:
+#
+#   module MyMod
+#       function meddiff(y, x)
+#           ...
+#       end
+#   end
+println("In Julia, save reusable functions in .jl files or in a module.")
+```
+
+```{julia}
+# Run the function
+meddiff_return(df_a.ltotexp, Float64.(df_a.totchr))
+```
+
+## A.3 Debugging
+
+### A.3.1 Some simple tips
+
+```{julia}
+#=
+* Display intermediate output to aid debugging
+matrix accum XTX = totchr            // Recall constant is added
+matrix list XTX                      // Should be 2 x 2 
+matrix vecaccum yTX = ltotexp totchr
+matrix list yTX                      // Should be 1 x 2
+matrix bOLS = invsym(XTX)*(yTX)'
+matrix list bOLS                     // Should be 2 x 1
+=#
+# Display intermediate output to aid debugging
+XTX = X_mat' * X_mat
+println("XTX (should be ", size(XTX), "):")
+display(XTX)
+
+yTX = (y_vec' * X_mat)'
+println("yTX (should be ", size(yTX), "):")
+display(yTX)
+
+bOLS = LinearAlgebra.inv(XTX) * yTX
+println("bOLS (should be ", size(bOLS), "):")
+display(bOLS)
+```
+
+### A.3.2 Error messages and exception handling
+
+```{julia}
+# Same calculation as a non-function script
+y_v = df_a.ltotexp
+x_v = Float64.(df_a.totchr)
+diff = y_v .- x_v
+medylx = Statistics.median(skipmissing(diff))
+@printf("Median = %.4f\n", medylx)
+```
+
+### A.3.3 Tracing / logging
+
+```{julia}
+# Julia: use `@info`, `@debug` from the Logging stdlib
+import Logging
+println("Use @info, @debug, @warn from Logging.jl for tracing.")
+```
+
+# B Native Julia matrix algebra (was: Mata)
+
+Mata is Stata's matrix programming language. In Julia, all of these operations
+are part of the base language plus `LinearAlgebra`. This appendix translates
+Mata idioms to native Julia.
+
+## B.1 How to run "Mata"
+
+### B.1.1 Julia commands in Julia
+
+```{julia}
+# Read in data
+df_b = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus03data.dta"))
+df_b = first(DataFrames.dropmissing(df_b, [:ltotexp, :totchr]), 100)
+df_b.cons = ones(DataFrames.nrow(df_b))
+DataFrames.describe(df_b[:, [:ltotexp, :totchr, :cons]])
+```
+
+```{julia}
+# 2x2 identity matrix
+I2 = LinearAlgebra.I(2)
+display(Matrix(I2))
+```
+
+### B.1.2 Inline matrix expressions
+
+```{julia}
+# Same — Julia is a single language; no need to switch contexts
+I2 = LinearAlgebra.I(2)
+display(Matrix(I2))
+```
+
+### B.1.3 Calling functions from data
+
+```{julia}
+# DataFrame summarisation: equivalent of `stata("summarize ltotexp")`
+DataFrames.describe(df_b[:, [:ltotexp]])
+```
+
+### B.1.4 Interactive vs batch use
+
+### B.1.5 Help
+
+```{julia}
+# `?det`, `?Matrix`, `?LinearAlgebra` in the Julia REPL
+println("Use ? in the REPL or type LinearAlgebra. + TAB for completions.")
+```
+
+## B.2 Native matrix commands
+
+### B.2.1 Matrix input
+
+#### Matrix by hand
+
+```{julia}
+# Create a matrix
+A = [1.0 2.0 3.0; 4.0 5.0 6.0]
+display(A)
+```
+
+#### Identity matrices, unit vectors, and constant matrices
+
+```{julia}
+# 2×2 identity
+I2 = Matrix(LinearAlgebra.I, 2, 2)
+display(I2)
+
+# 1×5 unit row vector with 1 in position 2
+e = zeros(1, 5); e[1, 2] = 1
+display(e)
+
+# 2×5 matrix of 3's
+J = fill(3.0, 2, 5)
+display(J)
+
+# Row vector 8..15
+a = collect(8:15)'
+display(a)
+```
+
+#### Matrix input from a DataFrame
+
+```{julia}
+# Bind columns of df_b to Julia variables
+y_b = Float64.(df_b.ltotexp)
+X_b = hcat(Float64.(df_b.totchr), df_b.cons)
+
+# Or with named extraction
+Xloaded = Matrix(df_b[:, [:totchr, :cons]])
+display(Xloaded[1:5, :])
+```
+
+#### From a different matrix
+
+```{julia}
+# Build B and copy it
+B_mat = Matrix(LinearAlgebra.I, 2, 2)
+C_mat = copy(B_mat)
+display(C_mat)
+```
+
+#### Native interface (no need for st_matrix)
+
+### B.2.2 Matrix operators
+
+#### Element-by-element operations
+
+```{julia}
+# Element-by-element multiplication of a matrix by a column vector
+b_vec = [2.0; 3.0]
+J = fill(3.0, 2, 5)
+display(b_vec .* J)
+```
+
+### B.2.3 Matrix functions
+
+#### Scalar and matrix functions
+
+```{julia}
+#=
+mata
+// Matrix function that returns scalar
+r = rows(A)
+r
+
+// Matrix function that returns matrix by element-by-element transformation
+D = sqrt(A)
+D
+
+// Calculate eigenvalues and eigenvectors
+E = (1, 2 \ 4, 3)
+lambda = .
+eigvecs = .
+eigensystem(E,eigvecs,lambda)
+lambda
+eigvecs
+end
+=#
+# Number of rows
+r = size(A, 1); println("rows(A) = ", r)
+
+# Element-wise sqrt
+display(sqrt.(A))
+
+# Eigenvalues / eigenvectors
+E = [1.0 2.0; 4.0 3.0]
+λ, V = LinearAlgebra.eigen(E)
+println("eigenvalues = ", λ)
+println("eigenvectors:")
+display(V)
+```
+
+#### Matrix inversion
+
+```{julia}
+#=
+mata
+// Matrix inversion: Use of makesymmetric() before cholinv()
+F = 0.5*I(2)
+G = makesymmetric(cholinv(F'F))
+G
+end
+=#
+# Use Symmetric() to ensure positive-definite Cholesky
+F = 0.5 .* Matrix(LinearAlgebra.I, 2, 2)
+G = LinearAlgebra.inv(LinearAlgebra.cholesky(LinearAlgebra.Symmetric(F' * F)))
+display(G)
+```
+
+### B.2.4 Cross products
+
+```{julia}
+# β̂ = (X'X)⁻¹ X'y via cross-product
+β_b = LinearAlgebra.inv(LinearAlgebra.cholesky(LinearAlgebra.Symmetric(X_b' * X_b))) *
+      (X_b' * y_b)
+display(β_b)
+```
+
+### B.2.5 Subscripts and combining matrices
+
+```{julia}
+# Subscript assignment
+A2 = copy(A); A2[1, 2] = A2[1, 1]
+display(A2)
+
+# Combine columns
+M = hcat(A, A); display(M)
+
+# Combine rows
+N = vcat(A, A); display(N)
+
+# Submatrix via list indexing
+O = M[1:2, 5:6]
+display(O)
+
+# Range submatrix
+P = M[1:2, 5:6]
+display(P)
+```
+
+### B.2.6 Returning matrices to the caller
+
+
+#### Adding a column to a DataFrame
+
+```{julia}
+# Compute predictions and add to DataFrame
+yhat = X_b * β_b
+df_b.ltotexphat = yhat
+DataFrames.describe(df_b[:, [:ltotexp, :ltotexphat]])
+```
+
+## B.3 Programming in native Julia
+
+### B.3.1 Type-annotated function declarations
+
+
+### B.3.2 Plain Julia function
+
+
+### B.3.3 Function returning a result via return value
+
+
+### B.3.4 Higher-level wrapper that calls the helper
+
+
+### B.3.5 Sharing code between scripts
+
+```{julia}
+# Place your functions in a `.jl` file, then `include("myfuncs.jl")` from any
+# notebook or script. For larger projects, use Julia modules / packages.
+println("In Julia: `include(\"file.jl\")` or organize into a module/package.")
+```
+
+
+
+
+
+
+
+

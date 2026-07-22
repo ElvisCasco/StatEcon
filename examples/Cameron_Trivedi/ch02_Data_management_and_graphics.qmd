@@ -1,0 +1,1366 @@
+---
+title: "Cameron & Trivedi — Ch. 2: Data management and graphics (via StatEcon)"
+Authors:
+- Colin Cameron
+- Pravin Trivedi
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+Translation of *Microeconometrics Using Stata* Chapter 2, routed through
+[`StatEcon`](https://github.com/ElvisCasco/StatEcon): the Stata `summarize`
+and `kdensity` commands are single calls to `stata_summarize` / `kdensity`
+from the package, while data manipulation and graphs stay in plain Julia.
+
+[Microeconometrics with R](https://ycroissant.github.io/micsr_book/)
+· [UCLA Stata modules](https://stats.oarc.ucla.edu/stata/modules/)
+· [Github](https://github.com/thousandoaks?tab=repositories)
+
+# Julia setup
+
+```{julia}
+using StatEcon                # stata_summarize, kdensity, stata_regress, ...
+const DATA = first(filter(d -> isdir(d) && (isfile(joinpath(d, "auto.dta")) || isdir(joinpath(d, "musr"))), ["../../data", "data", raw"C:/EC/GitHub/StatEcon/data"]))
+using DataFrames
+using ReadStatTables
+using CSV
+using Downloads
+using Statistics, StatsBase
+using FixedEffectModels
+using LinearAlgebra
+using KernelDensity, Loess
+using CairoMakie
+CairoMakie.activate!(type = "png")
+
+# Tiny helper: unwrap a ReadStatTables.LabeledValue -> its underlying number.
+_rawval(x) = hasproperty(x, :value) ? x.value : x
+```
+
+# 2 Data management and graphics
+
+## 2.1 Introduction
+
+## 2.2 Types of data
+
+### 2.2.1 Text or ASCII data
+
+### 2.2.2 Internal numeric data
+
+### 2.2.3 String data
+
+### 2.2.4 Formats for displaying numeric data
+
+## 2.3 Inputting data
+
+### 2.3.1 General principles
+
+```{julia}
+#=
+* Remove current dataset from memory
+clear
+=#
+# Remove current dataset from memory (in Julia, just reassign or let GC handle it)
+# Nothing needed; Julia garbage collects unused DataFrames
+```
+
+```{julia}
+#=
+* Set memory to 100 mb
+*set memory 100m
+=#
+# Set memory -- not needed in Julia (automatic memory management)
+```
+
+```{julia}
+#=
+* Save data as a Stata dataset
+*save mydata.dta, replace
+=#
+# Save data as a Stata dataset -- not directly applicable
+# Use CSV.write("mydata.csv", df) or similar
+```
+
+```{julia}
+#=
+sysuse auto.dta
+* Quick check that data are read in correctly
+list in 1/5 // list the first five observations
+=#
+# sysuse auto.dta equivalent
+auto = DataFrame(ReadStatTables.readstat("$(DATA)/auto.dta"))
+# Quick check - list first 5 observations
+first(auto, 5)
+```
+
+```{julia}
+#=
+* describe the variables
+describe 
+=#
+# describe the variables
+DataFrames.describe(auto)
+```
+
+```{julia}
+#=
+summarize 
+* descriptive statistics for the variables
+=#
+# descriptive statistics for the variables
+DataFrames.describe(auto, :mean, :std, :min, :max, :nmissing)
+```
+
+```{julia}
+stata_summarize(auto)
+```
+
+### 2.3.2 Inputting data already in Stata format
+
+```{julia}
+#=
+* Read in existing Stata dataset
+use "mus2/mus202psid92m.dta", clear
+=#
+# Read in existing Stata dataset
+psid = DataFrame(ReadStatTables.readstat("$(DATA)/mus2/mus202psid92m.dta"))
+```
+
+```{julia}
+#=
+* Read i n dataset from an Internet web site
+use http://www.stata-press.com/data/r10/census.dta, clear
+=#
+# Read in dataset from an Internet web site.
+# Cache locally to skip the download if `census.dta` already exists, and
+# fall back gracefully when offline (the rest of this chapter doesn't
+# depend on `census`, so skipping is safe).
+const _CENSUS_URL  = "https://www.stata-press.com/data/r10/census.dta"
+const _CENSUS_FILE = "census.dta"
+census = try
+    if !isfile(_CENSUS_FILE)
+        Downloads.download(_CENSUS_URL, _CENSUS_FILE)
+    end
+    DataFrames.DataFrame(ReadStatTables.readstat(_CENSUS_FILE))
+catch err
+    @warn "Could not load $_CENSUS_FILE (offline or host unreachable). " *
+          "Skipping this chunk; downstream chapters do not depend on it." err
+    nothing
+end
+```
+
+```{julia}
+#=
+clear
+=#
+# clear -- just reassign
+```
+
+```{julia}
+#=
+* Data input froo keyboard
+input str20 name age female income
+    "Barry" 25 0 4 0 . 9 9 0
+    "Carrie" 30 1 37.000
+    "Gary" 31 0 48. 000
+end
+=#
+# Data input from keyboard
+df_input = DataFrame(
+    name   = ["Barry", "Carrie", "Gary"],
+    age    = [25, 30, 31],
+    female = [0, 1, 0],
+    income = [40990.0, 37000.0, 48000.0]
+)
+```
+
+```{julia}
+#=
+list, clean
+=#
+# list, clean
+println(df_input)
+```
+
+### 2.3.3 Inputting data from the keyboard
+
+### 2.3.4 Inputting nontext data
+
+### 2.3.5 Inputting text data from a spreadsheet
+
+```{julia}
+#=
+* Read data from a csv file that includes variable names using insheet
+clear
+insheet using "mus2/mus202file1.csv"
+=#
+# Read data from a csv file that includes variable names
+df_csv1 = CSV.read("$(DATA)/mus2/mus202file1.csv", DataFrame)
+```
+
+```{julia}
+#=
+list, clean
+=#
+println(df_csv1)
+```
+
+```{julia}
+#=
+* Read data from a csv file without variable names and assign names
+clear
+insheet name age female income using mus2/mus202file2.csv
+=#
+# Read data from a csv file without variable names and assign names
+df_csv2 = CSV.read("$(DATA)/mus2/mus202file2.csv", DataFrame; header=[:name, :age, :female, :income])
+```
+
+### 2.3.6 Inputting text data 1n free format
+
+```{julia}
+#=
+* Read data from free-format text file using infile
+clear
+infile str20 name age female income using mus2/mus202file2.csv
+list, clean
+=#
+# Read data from free-format text file
+df_csv2b = CSV.read("$(DATA)/mus2/mus202file2.csv", DataFrame; header=[:name, :age, :female, :income])
+println(df_csv2b)
+```
+
+### 2.3.7 Inputting text data in fixed format
+
+```{julia}
+#=
+* Read data from fixed-format text file using infix
+clear
+infix str20 name 1-10 age 11-12 female 13 income 14-20 using mus2/mus202file3.txt
+list, clean
+=#
+# Read data from fixed-format text file using custom parsing
+lines = readlines("$(DATA)/mus2/mus202file3.txt")
+df_fixed = DataFrame(
+    name   = [strip(l[1:min(10,length(l))]) for l in lines],
+    age    = [parse(Int, strip(l[11:min(12,length(l))])) for l in lines],
+    female = [parse(Int, strip(l[13:min(13,length(l))])) for l in lines],
+    income = [parse(Float64, strip(l[14:min(20,length(l))])) for l in lines]
+)
+println(df_fixed)
+```
+
+```{julia}
+#=
+* Read data using infix where an observation spans more than one line
+clear
+infix str20 name 1-10 age 11-12 female 13 2: income 1-7 using mus2/mus202file4.txt
+=#
+# Read data where an observation spans more than one line
+# Custom parsing needed for multi-line observations
+# lines = readlines("$(DATA)/mus2/mus202file4.txt")
+# Parse pairs of lines as single observations
+```
+
+### 2.3.8 Dictionary files
+
+```{julia}
+#=
+* Read in data with dictionary file
+*infile using mus02dict
+=#
+# Read in data with dictionary file -- not directly applicable in Julia
+# Use CSV.read or custom parsing instead
+```
+
+### 2.3.9 Common pitfalls
+
+## 2.4 Data management
+
+### 2.4.1 PSiD example
+
+```{julia}
+#=
+* mus02psid92m.do
+clear
+#delimit ;
+*  PSID DATA CENTER *****************************************************
+   JOBID            : 10654                             
+   DATA_DOMAIN      : PSID                              
+   USER_WHERE       : ER32000=1 and ER30736 ge 30 and ER
+   FILE_TYPE        : All Individuals Data              
+   OUTPUT_DATA_TYPE : ASCII Data File                   
+   STATEMENTS       : STATA Statements                  
+   CODEBOOK_TYPE    : PDF                               
+   N_OF_VARIABLES   : 12                                
+   N_OF_OBSERVATIONS: 4290                              
+   MAX_REC_LENGTH   : 56                                
+   DATE & TIME      : November 3, 2003 @ 0:28:35
+*************************************************************************
+;
+insheet 
+   ER30001 ER30002 ER32000 ER32022 ER32049 ER30733 ER30734 ER30735 ER30736
+    ER30748 ER30750 ER30754
+using musr/mus02psid92m.txt, delim("^") clear 
+;
+destring, replace ;
+label variable er30001  "1968 INTERVIEW NUMBER"  ;
+label variable er30002  "PERSON NUMBER                 68"  ;
+label variable er32000  "SEX OF INDIVIDUAL"  ;
+label variable er32022  "# LIVE BIRTHS TO THIS INDIVIDUAL"  ;
+label variable er32049  "LAST KNOWN MARITAL STATUS"  ;
+label variable er30733  "1992 INTERVIEW NUMBER"  ;
+label variable er30734  "SEQUENCE NUMBER               92"  ;
+label variable er30735  "RELATION TO HEAD              92"  ;
+label variable er30736  "AGE OF INDIVIDUAL             92"  ;
+label variable er30748  "COMPLETED EDUCATION           92"  ;
+label variable er30750  "TOT LABOR INCOME              92"  ;
+label variable er30754  "ANN WORK HRS                  92"  ;
+
+#delimit cr;    //  Change delimiter to default cr
+=#
+# mus02psid92m.do equivalent - Read the PSID data
+psid_raw = CSV.read("$(DATA)/musr/mus02psid92m.txt", DataFrame; delim='^',
+    header=[:er30001, :er30002, :er32000, :er32022, :er32049, :er30733,
+            :er30734, :er30735, :er30736, :er30748, :er30750, :er30754])
+
+# Variable labels (as comments for reference):
+# er30001 = "1968 INTERVIEW NUMBER"
+# er30002 = "PERSON NUMBER 68"
+# er32000 = "SEX OF INDIVIDUAL"
+# er32022 = "# LIVE BIRTHS TO THIS INDIVIDUAL"
+# er32049 = "LAST KNOWN MARITAL STATUS"
+# er30733 = "1992 INTERVIEW NUMBER"
+# er30734 = "SEQUENCE NUMBER 92"
+# er30735 = "RELATION TO HEAD 92"
+# er30736 = "AGE OF INDIVIDUAL 92"
+# er30748 = "COMPLETED EDUCATION 92"
+# er30750 = "TOT LABOR INCOME 92"
+# er30754 = "ANN WORK HRS 92"
+```
+
+```{julia}
+#=
+* Data description
+describe
+=#
+# Data description
+DataFrames.describe(psid_raw)
+```
+
+```{julia}
+#=
+* Data summary
+summarize
+=#
+# Data summary
+DataFrames.describe(psid_raw, :mean, :std, :min, :max, :nmissing)
+```
+
+### 2.4.2 Naming and labeling variables
+
+```{julia}
+#=
+* Rename variables
+rename er32000 sex
+rename er30736 age
+rename er30748 education
+rename er30750 earnings
+rename er30754 hours
+=#
+# Rename variables
+psid = copy(psid_raw)
+rename!(psid,
+    :er32000 => :sex,
+    :er30736 => :age,
+    :er30748 => :education,
+    :er30750 => :earnings,
+    :er30754 => :hours
+)
+```
+
+```{julia}
+#=
+* Relabel some of the variables
+label variable age "AGE OF INDIVIDUAL"
+label variable education "COMPLETED EDUCATION"
+label variable earnings "TOT LABOR INCOME"
+label variable hours "ANN WORK HRS"
+=#
+# Relabel -- Julia DataFrames don't have built-in labels
+# We use a dictionary for reference
+labels = Dict(
+    :age       => "AGE OF INDIVIDUAL",
+    :education => "COMPLETED EDUCATION",
+    :earnings  => "TOT LABOR INCOME",
+    :hours     => "ANN WORK HRS"
+)
+```
+
+```{julia}
+#=
+* Define the label gender for the values taken by variable sex
+label define gender 1 male 2 female
+label values sex gender
+list sex in 1/2, clean
+=#
+# Define the label gender for the values taken by variable sex
+sex_labels = Dict(1 => "male", 2 => "female")
+println("First 2 observations of sex:")
+for i in 1:2
+    println("  $(i): $(get(sex_labels, psid.sex[i], "unknown"))")
+end
+```
+
+```{julia}
+#=
+* Data summary of key variables after renaming
+summarize sex age education earnings hours
+=#
+stata_summarize(psid, [:sex, :age, :education, :earnings, :hours])
+```
+
+### 2.4.3 Viewing data
+
+```{julia}
+#=
+* List first 2 observations of two of the variables
+list age hours in 1/2, clean
+=#
+# List first 2 observations of two of the variables
+println(psid[1:2, [:age, :hours]])
+```
+
+```{julia}
+#=
+* Tabulate all values taken by a single variable
+tabulate education
+=#
+# Tabulate all values taken by a single variable
+edu_tab = combine(groupby(psid, :education), nrow => :Freq)
+sort!(edu_tab, :education)
+println(edu_tab)
+```
+
+### 2.4.4 Using original documentation
+
+### 2.4.5 Missing values
+
+```{julia}
+#=
+* Replace missing values with missing-data code
+replace education = . if education == 0 | education == 99
+=#
+# Replace missing values with missing-data code
+psid.education = convert(Vector{Union{Missing, eltype(psid.education)}}, psid.education)
+psid.education[coalesce.((psid.education .== 0) .| (psid.education .== 99), false)] .= missing
+```
+
+```{julia}
+#=
+* Listing of variable including missing value
+list education in 46/48, clean
+=#
+# Listing of variable including missing value
+println(psid[46:48, [:education]])
+```
+
+```{julia}
+#=
+* Example of data analysis with some missing values
+summarize education age
+=#
+stata_summarize(psid, [:education, :age])
+```
+
+```{julia}
+#=
+* Replace missing values with missing-data code
+replace earnings = . if education >= .
+replace hours = . if education >= .
+=#
+# Replace earnings and hours to missing where education is missing
+psid.earnings = convert(Vector{Union{Missing, eltype(psid.earnings)}}, psid.earnings)
+psid.hours    = convert(Vector{Union{Missing, eltype(psid.hours)}}, psid.hours)
+psid.earnings[ismissing.(psid.education)] .= missing
+psid.hours[ismissing.(psid.education)]    .= missing
+```
+
+```{julia}
+#=
+* Assign more than one missing code
+replace education = .a if education == 0
+replace education = .b if education == 99
+=#
+# Assign more than one missing code
+# Julia has a single `missing` type; use separate flag columns if needed
+# psid.education_miss_a = psid_raw.er30748 .== 0
+# psid.education_miss_b = psid_raw.er30748 .== 99
+```
+
+```{julia}
+#=
+* This command will include missing values
+list education in 40/60 if education > 16, clean
+=#
+# This command will include missing values
+sub_gt16 = psid[40:60, :]
+sub_gt16 = sub_gt16[coalesce.(sub_gt16.education .> 16, true), [:education]]
+println(sub_gt16)
+```
+
+```{julia}
+#=
+* This command will not include missing values
+list education in 40/60 if education > 16 & education < . , clean
+=#
+# This command will not include missing values
+sub_gt16_nomiss = psid[40:60, :]
+sub_gt16_nomiss = sub_gt16_nomiss[
+    coalesce.(sub_gt16_nomiss.education .> 16, false) .& .!ismissing.(sub_gt16_nomiss.education),
+    [:education]]
+println(sub_gt16_nomiss)
+```
+
+```{julia}
+#=
+* Replace missing values 1o1ith missing-data code
+replace earnings = . if education >= .
+replace hours = . if education >= .
+=#
+# Replace earnings and hours to missing where education is missing
+psid.earnings[ismissing.(psid.education)] .= missing
+psid.hours[ismissing.(psid.education)]    .= missing
+```
+
+### 2.4.6 imputing missing data
+
+### 2.4.7 Transforming data (generate, replace, egen, recode)
+
+```{julia}
+#=
+* Summarize cleaned up data
+summarize sex age education earnings
+=#
+stata_summarize(psid, [:sex, :age, :education, :earnings])
+```
+
+#### The generate and replace commands
+
+```{julia}
+#=
+* Create identifier using generate command
+generate id = _n
+=#
+# Create identifier using generate command
+psid.id = 1:nrow(psid)
+```
+
+```{julia}
+#=
+* Create new variable using generate command
+generate lnearns = ln(earnings)
+=#
+# Create new variable using generate command
+psid.lnearns = [ismissing(e) ? missing : (e > 0 ? log(e) : missing) for e in psid.earnings]
+```
+
+#### The egen command
+
+```{julia}
+#=
+* Create new variable using egen command
+egen aveearnings = mean(earnings) if earnings < .
+=#
+# Create new variable using egen command (mean of earnings)
+psid.aveearnings = fill(mean(skipmissing(psid.earnings)), nrow(psid))
+```
+
+#### The recode command
+
+```{julia}
+#=
+* Replace existing data using the recode command
+recode education (1/11=1) (12=2) (13/15=3) (16/17=4), generate(edcat) 
+=#
+# Replace existing data using the recode command
+psid.edcat = [ismissing(e) ? missing :
+              e <= 11 ? 1 :
+              e == 12 ? 2 :
+              e <= 15 ? 3 :
+              e <= 17 ? 4 : missing
+              for e in psid.education]
+```
+
+#### The by prefix
+
+```{julia}
+#=
+* Create new variable using bysort: prefix
+bysort education: egen aveearnsbyed = mean(earnings)
+sort id
+=#
+# Create new variable using bysort: prefix (mean earnings by education)
+psid_nomiss = dropmissing(psid, [:education, :earnings])
+aveby = combine(groupby(psid_nomiss, :education), :earnings => mean => :aveearnsbyed)
+psid = leftjoin(psid, aveby, on=:education, makeunique=true, matchmissing=:equal)
+sort!(psid, :id)
+```
+
+#### Indicator variables
+
+```{julia}
+#=
+* Create indicator variable using generate command with logical operators
+generate d1 = earnings > 0 if earnings < .
+=#
+# Create indicator variable using logical operators
+psid.d1 = [ismissing(e) ? missing : (e > 0 ? 1 : 0) for e in psid.earnings]
+```
+
+```{julia}
+#=
+summarize d1
+=#
+stata_summarize(psid, :d1)
+```
+
+```{julia}
+#=
+* Create indicator variable using generate and replace commands
+generate d2 = 0
+replace d2 = 1 if earnings > 0
+replace d2 = . if earnings >= .
+=#
+# Create indicator variable using generate and replace commands
+psid.d2 = zeros(Int, nrow(psid))
+psid.d2[coalesce.(psid.earnings .> 0, false)] .= 1
+psid.d2 = [ismissing(e) ? missing : psid.d2[i] for (i, e) in enumerate(psid.earnings)]
+```
+
+```{julia}
+#=
+* Create indicator variable using recode commands
+recode earnings (0=0) (1/999999=1), generate(d3)
+=#
+# Create indicator variable using recode
+psid.d3 = [ismissing(e) ? missing : (e > 0 ? 1 : 0) for e in psid.earnings]
+```
+
+```{julia}
+#=
+* Verify that three methods create the same indicator variable
+// summarize d1 d2 d3
+summarize d1 d2 d3
+=#
+stata_summarize(psid, [:d1, :d2, :d3])
+```
+
+```{julia}
+#=
+* Create a set of indicator variables using tabulate with generate() option
+quietly tabulate edcat, generate(eddummy)
+summarize eddummy*
+=#
+# Create a set of indicator variables using tabulate with generate() option
+edcat_vals = sort(unique(skipmissing(psid.edcat)))
+for val in edcat_vals
+    psid[!, Symbol("eddummy$val")] = [ismissing(e) ? missing : (e == val ? 1 : 0) for e in psid.edcat]
+end
+eddummy_cols = [Symbol("eddummy$v") for v in edcat_vals]
+stata_summarize(psid, eddummy_cols)
+```
+
+```{julia}
+#=
+* Create a set of indicator variables using command xi
+xi i.edcat, noomit
+summarize _I*
+=#
+# xi i.edcat  -- same 0/1 dummies as `eddummy*` above.
+stata_summarize(psid, eddummy_cols)
+```
+
+```{julia}
+#=
+* Command with a variable list that includes indicators created using xi:
+xi : summarize i.edcat
+=#
+stata_summarize(psid, eddummy_cols)
+```
+
+```{julia}
+#=
+* Set of indicator variables using factor variables - no category is omitted
+summarize ibn.edcat
+=#
+# Set of indicator variables using factor variables - no category is omitted
+for val in edcat_vals
+    n = count(x -> x === val, psid.edcat)
+    println("edcat==$val: N=$n")
+end
+```
+
+#### interactions
+
+```{julia}
+#=
+* Create interactive variable using generate commands
+generate d1education = d1*education
+=#
+# Create interactive variable using generate commands
+psid.d1education = [ismissing(d) || ismissing(e) ? missing : d * e for (d, e) in zip(psid.d1, psid.education)]
+```
+
+```{julia}
+#=
+* Create set of interactions betyeen cat variable and set of indicators
+drop _Iedcat_*
+xi i.edcat*earnings, noomit
+=#
+# Create set of interactions between categorical variable and earnings
+for val in edcat_vals
+    psid[!, Symbol("_Iedcat_$(val)Xearnings")] = [
+        (ismissing(ec) || ismissing(ea)) ? missing : (ec == val ? 1 : 0) * ea
+        for (ec, ea) in zip(psid.edcat, psid.earnings)
+    ]
+end
+```
+
+```{julia}
+#=
+summarize _I*
+=#
+int_cols = [Symbol("_Iedcat_$(v)Xearnings") for v in edcat_vals]
+stata_summarize(psid, int_cols)
+```
+
+```{julia}
+#=
+* Create a set of interactions between a categorical and a set of indicators
+drop _I*
+xi i.edcat*i.d1, noomit
+=#
+# Create a set of interactions between two categorical variables (edcat x d1)
+for ev in edcat_vals
+    for dv in [0, 1]
+        colname = Symbol("_Iedcat$(ev)Xd1$(dv)")
+        psid[!, colname] = [
+            (ismissing(ec) || ismissing(d)) ? missing : ((ec == ev && d == dv) ? 1 : 0)
+            for (ec, d) in zip(psid.edcat, psid.d1)
+        ]
+    end
+end
+```
+
+```{julia}
+#=
+summarize _I*
+=#
+int2_cols = vec([Symbol("_Iedcat$(ev)Xd1$(dv)") for ev in edcat_vals, dv in [0, 1]])
+stata_summarize(psid, int2_cols)
+```
+
+#### Demeaning
+
+```{julia}
+#=
+* Create demeaned variables
+egen double aveage = mean(age)
+generate double agedemean = age - aveage
+generate double agesqdemean = agedemean^2
+summarize agedemean agesqdemean
+=#
+# Create demeaned variables
+aveage = mean(skipmissing(psid.age))
+psid.agedemean   = psid.age .- aveage
+psid.agesqdemean = psid.agedemean .^ 2
+col1 = collect(skipmissing(psid.agedemean))
+col2 = collect(skipmissing(psid.agesqdemean))
+println("agedemean:   N=$(length(col1))  Mean=$(round(mean(col1), digits=6))  Std=$(round(std(col1), digits=4))")
+println("agesqdemean: N=$(length(col2))  Mean=$(round(mean(col2), digits=4))  Std=$(round(std(col2), digits=4))")
+```
+
+### 2.4.8 Saving data
+
+```{julia}
+#=
+* Save as Stata data file
+save musr/mus02psid92m_test.dta, replace
+=#
+# Save as Stata data file -- save as CSV instead
+CSV.write("$(DATA)/musr/mus02psid92m_test.csv", psid)
+```
+
+```{julia}
+#=
+* Save as comma-separated values spreadsheet
+outsheet age education eddummy* earnings d1 hours using musr/mus02psid92m_test.csv, comma replace
+=#
+# Save as comma-separated values spreadsheet
+let
+    eddummy_local = Symbol[Symbol("eddummy$v") for v in edcat_vals]
+    save_cols = [:age, :education]
+    append!(save_cols, eddummy_local)
+    append!(save_cols, [:earnings, :d1, :hours])
+    CSV.write("$(DATA)/musr/mus02psid92m_test_subset.csv", psid[!, save_cols])
+end
+```
+
+```{julia}
+#=
+* Save as formatted text (ascii) file
+outfile age education eddummy* earnings d1 hours using musr/mus02psid92m.asc, replace
+=#
+# Save as formatted text (ascii) file
+let
+    eddummy_local = Symbol[Symbol("eddummy$v") for v in edcat_vals]
+    cols = [:age, :education]
+    append!(cols, eddummy_local)
+    append!(cols, [:earnings, :d1, :hours])
+    sub = psid[!, cols]
+    open("$(DATA)/musr/mus02psid92m.asc", "w") do io
+        for i in 1:DataFrames.nrow(sub)
+            parts = String[]
+            for c in cols
+                v = sub[i, c]
+                push!(parts, ismissing(v) ? "." : string(v))
+            end
+            println(io, join(parts, " "))
+        end
+    end
+end
+```
+
+### 2.4.9 Selecting the sample
+
+```{julia}
+#=
+* Select the sample used in a single command using the if qualifier
+summarize earnings lnearns if age >= 35 & age <= 44 
+=#
+# Select the sample used in a single command using the if qualifier
+sub_age = dropmissing(psid, [:earnings, :lnearns, :age])
+sub_age = filter(r -> r.age >= 35 && r.age <= 44, sub_age)
+stata_summarize(sub_age, [:earnings, :lnearns])
+```
+
+```{julia}
+#=
+* Select the sample using command keep
+keep if (lnearns != .) & (age >= 35 & age <= 44) 
+summarize earnings lnearns
+=#
+# Select the sample using keep (filter)
+psid_filt = dropmissing(psid, [:lnearns, :age])
+psid_filt = filter(r -> !ismissing(r.lnearns) && r.age >= 35 && r.age <= 44, psid_filt)
+stata_summarize(psid_filt, [:earnings, :lnearns])
+```
+
+```{julia}
+#=
+* Select the sample using keep and drop commands
+use musr/mus02psid92m.dta, clear
+keep lnearns age
+drop in 1/1000
+=#
+# Select the sample using keep and drop commands
+psid_reload = DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus02psid92m.dta"))
+psid_sub = psid_reload[!, [:lnearns, :age]]
+psid_sub = psid_sub[1001:end, :]  # drop first 1000 observations
+```
+
+## 2.5 Manipulating datasets
+
+### 2.5.1 Ordering observations and variables
+
+### 2.5.2 Preserving and restoring a dataset
+
+```{julia}
+#=
+clear all
+* Commands preserve and restore illustrated
+use musr/mus02psid92m.dta, clear
+list age in 1/1, noheader clean
+*preserve
+replace age = age + 1000
+list age in 1/1, noheader clean
+*restore
+list age in 1/1, noheader clean
+=#
+# Commands preserve and restore illustrated
+psid_full = DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus02psid92m.dta"))
+println("Original age[1]: ", psid_full.age[1])
+# preserve equivalent: make a copy
+psid_backup = copy(psid_full)
+psid_full.age .= psid_full.age .+ 1000
+println("Modified age[1]: ", psid_full.age[1])
+# restore equivalent: restore from copy
+psid_full = copy(psid_backup)
+println("Restored age[1]: ", psid_full.age[1])
+```
+
+### 2.5.3 Wide and long forms for a dataset
+
+### 2.5.4 Merging datasets
+
+```{julia}
+#=
+* Create first dataset with every third observation
+use musr/mus02psid92m.dta, clear
+keep if mod(_n,3) == 0 
+keep id education earnings
+list in 1/4, clean
+quietly save musr/merge1.dta, replace
+=#
+# Create first dataset with every third observation
+psid_full = DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus02psid92m.dta"))
+merge1 = psid_full[mod.(1:nrow(psid_full), 3) .== 0, [:id, :education, :earnings]]
+println("merge1 first 4 rows:")
+println(first(merge1, 4))
+```
+
+```{julia}
+#=
+* Create second dataset with every second observation
+use musr/mus02psid92m.dta, clear
+keep if mod(_n,2) == 0 
+keep id education hours
+list in 1/4, clean
+quietly save musr/merge2.dta, replace
+=#
+# Create second dataset with every second observation
+merge2 = psid_full[mod.(1:nrow(psid_full), 2) .== 0, [:id, :education, :hours]]
+println("merge2 first 4 rows:")
+println(first(merge2, 4))
+```
+
+```{julia}
+#=
+* Merge two datasets with some observations and variables different
+clear
+use musr/merge1.dta
+sort id
+merge 1:1 id using musr/merge2.dta    
+sort id
+list in 1/4, clean
+=#
+# Merge two datasets with some observations and variables different
+merged = outerjoin(merge1, merge2, on=[:id, :education], makeunique=true, matchmissing=:equal)
+sort!(merged, :id)
+println("Merged first 4 rows:")
+println(first(merged, 4))
+```
+
+```{julia}
+#=
+tab _merge
+=#
+# Tabulate merge indicator
+merged.source = ifelse.(.!ismissing.(merged.earnings) .& .!ismissing.(merged.hours), "both",
+    ifelse.(.!ismissing.(merged.earnings), "merge1_only", "merge2_only"))
+println(combine(groupby(merged, :source), nrow => :Freq))
+```
+
+### 2.5.5 Appending datasets
+
+```{julia}
+#=
+* Append two datasets with some observations and variables different
+clear
+use musr/merge1.dta
+append using musr/merge2.dta
+sort id
+list in 1/5, clean
+=#
+# Append two datasets with some observations and variables different
+appended = vcat(merge1, merge2, cols=:union)
+sort!(appended, :id)
+println("Appended first 5 rows:")
+println(first(appended, 5))
+```
+
+## 2.6 Graphical display of data
+
+### 2.6.1 Stata graph commands
+
+#### Example graph commands
+
+```{julia}
+#=
+use musr/mus02psid92m.dta, clear
+twoway scatter lnearns hours
+graph export musr/mus02two1.eps, replace
+=#
+# Load data and create scatter plot
+psid_plot = DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus02psid92m.dta"))
+psid_plot_clean = dropmissing(psid_plot, [:lnearns, :hours])
+
+fig = CairoMakie.Figure()
+ax = CairoMakie.Axis(fig[1, 1], xlabel="Hours", ylabel="Log Earnings")
+CairoMakie.scatter!(ax, psid_plot_clean.hours, psid_plot_clean.lnearns, markersize=4)
+CairoMakie.save("$(DATA)/musr/mus02two1.png", fig)
+fig
+```
+
+```{julia}
+#=
+* More advanced graphics command with two plots and with several options
+graph twoway (scatter lnearns hours, msize(small))     ///
+   (lfit lnearns hours, lwidth(medthick)),             ///
+   title("Scatterplot and OLS fitted line")       
+graph export musr/mus02two2.eps, replace
+=#
+# More advanced graphics command with scatter and OLS fitted line
+fig = CairoMakie.Figure()
+ax = CairoMakie.Axis(fig[1, 1], xlabel="Hours", ylabel="Log Earnings",
+    title="Scatterplot and OLS fitted line")
+CairoMakie.scatter!(ax, psid_plot_clean.hours, psid_plot_clean.lnearns, markersize=4, color=:steelblue)
+# OLS fitted line
+model_plot = FixedEffectModels.reg(psid_plot_clean, @formula(lnearns ~ hours))
+x_range = range(minimum(psid_plot_clean.hours), maximum(psid_plot_clean.hours), length=100)
+y_hat = StatsBase.coef(model_plot)[1] .+ StatsBase.coef(model_plot)[2] .* x_range
+CairoMakie.lines!(ax, collect(x_range), y_hat, color=:red, linewidth=2)
+CairoMakie.save("$(DATA)/musr/mus02two2.png", fig)
+fig
+```
+
+#### Saving and exporting graphs
+
+```{julia}
+#=
+* More advanced graph example 
+graph twoway (scatter lnearns hours, msize(small))    ///
+  (lfit lnearns hours, lwidth(medthick)),             ///
+  title("Scatterplot and OLS fitted line") 
+graph export musr/mus02examplefigure.eps, replace
+=#
+# More advanced graph example (same as above)
+fig = CairoMakie.Figure()
+ax = CairoMakie.Axis(fig[1, 1], xlabel="Hours", ylabel="Log Earnings",
+    title="Scatterplot and OLS fitted line")
+CairoMakie.scatter!(ax, psid_plot_clean.hours, psid_plot_clean.lnearns, markersize=4, color=:steelblue)
+model_plot = FixedEffectModels.reg(psid_plot_clean, @formula(lnearns ~ hours))
+x_range = range(minimum(psid_plot_clean.hours), maximum(psid_plot_clean.hours), length=100)
+y_hat = StatsBase.coef(model_plot)[1] .+ StatsBase.coef(model_plot)[2] .* x_range
+CairoMakie.lines!(ax, collect(x_range), y_hat, color=:red, linewidth=2)
+CairoMakie.save("$(DATA)/musr/mus02examplefigure.png", fig)
+fig
+```
+
+```{julia}
+#=
+* Combine graphs saved as graph1 . gph and graph2. gph
+*graph combine graph1 graph2
+=#
+# Combine graphs -- in CairoMakie, use subplots in a Figure
+# fig = CairoMakie.Figure()
+# ax1 = CairoMakie.Axis(fig[1, 1], ...)
+# ax2 = CairoMakie.Axis(fig[1, 2], ...)
+# CairoMakie.save("combined.png", fig)
+```
+
+#### Learning how to use graph commands
+
+### 2.6.2 Box-and-whisker plot
+
+```{julia}
+#=
+* Simple box-and-Yhisker plot
+graph box hours
+=#
+# Simple box-and-whisker plot
+fig = CairoMakie.Figure()
+ax = CairoMakie.Axis(fig[1, 1], ylabel="Hours")
+boxplot!(ax, ones(Int, length(psid_plot_clean.hours)), Float64.(psid_plot_clean.hours))
+fig
+```
+
+```{julia}
+#=
+use musr/mus02psid92m.dta, clear
+label define edtype 1 "< High School" 2 "High School" 3 "Some College" 4 "College Degree"
+label values edcat edtype
+=#
+# Prepare edcat labels
+psid_plot = DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus02psid92m.dta"))
+psid_plot.edcat = [ismissing(e) ? missing :
+    e <= 11 ? 1 : e == 12 ? 2 : e <= 15 ? 3 : e <= 17 ? 4 : missing
+    for e in psid_plot.education]
+edtype = Dict(1 => "< High School", 2 => "High School", 3 => "Some College", 4 => "College Degree")
+```
+
+```{julia}
+#=
+* Box and whisker plot of single variable over several categories
+graph box hours, over(edcat) scale(1.2) marker(1,msize(vsmall))   ///
+  ytitle("Annual hours worked by education") yscale(titlegap(*5)) 
+quietly graph export musr/mus02boxfig.eps, replace
+=#
+# Box and whisker plot of single variable over several categories
+psid_box = dropmissing(psid_plot, [:hours, :edcat])
+fig = CairoMakie.Figure()
+ax = CairoMakie.Axis(fig[1, 1],
+    ylabel="Annual hours worked by education",
+    xticks=(1:4, [edtype[i] for i in 1:4]))
+boxplot!(ax, Int.(psid_box.edcat), Float64.(psid_box.hours), markersize=3)
+CairoMakie.save("$(DATA)/musr/mus02boxfig.png", fig)
+fig
+```
+
+### 2.6.3 Histogram
+
+```{julia}
+#=
+histogram lnearns
+=#
+# histogram lnearns
+psid_hist = dropmissing(psid_plot, :lnearns)
+fig = CairoMakie.Figure()
+ax = CairoMakie.Axis(fig[1, 1], xlabel="Log Earnings", ylabel="Density")
+hist!(ax, Float64.(psid_hist.lnearns), normalization=:pdf)
+fig
+```
+
+```{julia}
+#=
+* Histogram with bin width and start value set
+histogram lnearns, width(0.25) start(4.0)
+graph export musr/mus02hist.eps, replace
+=#
+# Histogram with bin width and start value set
+fig = CairoMakie.Figure()
+ax = CairoMakie.Axis(fig[1, 1], xlabel="Log Earnings", ylabel="Density")
+bins = range(4.0, maximum(skipmissing(psid_hist.lnearns)) + 0.25, step=0.25)
+hist!(ax, Float64.(psid_hist.lnearns), bins=collect(bins), normalization=:pdf)
+CairoMakie.save("$(DATA)/musr/mus02hist.png", fig)
+fig
+```
+
+### 2.6.4 Kernel density plot
+
+```{julia}
+#=
+kdensity lnearns
+=#
+# kdensity lnearns
+psid_kd = dropmissing(psid_plot, :lnearns)
+kd = KernelDensity.kde(Float64.(psid_kd.lnearns))
+fig = CairoMakie.Figure()
+ax = CairoMakie.Axis(fig[1, 1], xlabel="Log Earnings", ylabel="Density")
+CairoMakie.lines!(ax, kd.x, kd.density, linewidth=2)
+fig
+```
+
+```{julia}
+#=
+* Kernel density plot with bandwidth set and fitted normal density overlaid
+kdensity lnearns, bwidth(0.20) normal n(4000)
+graph export musr/mus02kd1.eps, replace
+=#
+# Kernel density plot with bandwidth set and fitted normal density overlaid
+kd2 = KernelDensity.kde(Float64.(psid_kd.lnearns), bandwidth=0.20, npoints=4000)
+fig = CairoMakie.Figure()
+ax = CairoMakie.Axis(fig[1, 1], xlabel="Log Earnings", ylabel="Density")
+CairoMakie.lines!(ax, kd2.x, kd2.density, linewidth=2, label="Kernel density")
+# Overlay normal density
+mu_kd = mean(Float64.(psid_kd.lnearns))
+sigma_kd = std(Float64.(psid_kd.lnearns))
+x_norm = range(minimum(kd2.x), maximum(kd2.x), length=4000)
+y_norm = @. (1 / (sigma_kd * sqrt(2pi))) * exp(-0.5 * ((x_norm - mu_kd) / sigma_kd)^2)
+CairoMakie.lines!(ax, collect(x_norm), y_norm, linewidth=2, linestyle=:dash, label="Normal")
+axislegend(ax)
+CairoMakie.save("$(DATA)/musr/mus02kd1.png", fig)
+fig
+```
+
+```{julia}
+#=
+* Histogram and nonparametric kernel density estimate 
+histogram lnearns if lnearns > 0, width(0.25) kdensity             ///
+  kdenopts(bwidth(0.2) lwidth(medthick))                               ///
+  plotregion(style(none)) scale(1.2)                                   ///
+  title("Histogram and density for log earnings")                      ///
+  xtitle("Log annual earnings", size(medlarge)) xscale(titlegap(*5))   ///
+  ytitle("Histogram and density", size(medlarge)) yscale(titlegap(*5)) 
+graph export musr/mus02histdens.eps, replace
+=#
+# Histogram and nonparametric kernel density estimate
+psid_hd = filter(r -> !ismissing(r.lnearns) && r.lnearns > 0, psid_plot)
+kd3 = KernelDensity.kde(Float64.(psid_hd.lnearns), bandwidth=0.20)
+fig = CairoMakie.Figure()
+ax = CairoMakie.Axis(fig[1, 1],
+    title="Histogram and density for log earnings",
+    xlabel="Log annual earnings",
+    ylabel="Histogram and density")
+bins = range(minimum(Float64.(psid_hd.lnearns)), maximum(Float64.(psid_hd.lnearns)) + 0.25, step=0.25)
+hist!(ax, Float64.(psid_hd.lnearns), bins=collect(bins), normalization=:pdf, color=(:steelblue, 0.5))
+CairoMakie.lines!(ax, kd3.x, kd3.density, linewidth=2, color=:red)
+CairoMakie.save("$(DATA)/musr/mus02histdens.png", fig)
+fig
+```
+
+### 2.6.5 Twoway scatterplots and fitted lines
+
+```{julia}
+#=
+* Simple two-way scatterplot
+scatter lnearns hours
+=#
+# Simple two-way scatterplot
+psid_sc = dropmissing(psid_plot, [:lnearns, :hours])
+fig = CairoMakie.Figure()
+ax = CairoMakie.Axis(fig[1, 1], xlabel="Hours", ylabel="Log Earnings")
+CairoMakie.scatter!(ax, Float64.(psid_sc.hours), Float64.(psid_sc.lnearns), markersize=4)
+fig
+```
+
+```{julia}
+#=
+* Two-way scatterplot and quadratic regression curve with 95% ci for y|x  
+twoway (qfitci lnearns hours, stdf)  (scatter lnearns hours, msize(small))
+graph export musr/mus02scatter2.eps, replace
+=#
+# Two-way scatterplot and quadratic regression curve with 95% ci
+psid_sc.hours_f  = Float64.(psid_sc.hours)
+psid_sc.lnearns_f = Float64.(psid_sc.lnearns)
+psid_sc.hours2   = psid_sc.hours_f .^ 2
+model_quad = FixedEffectModels.reg(psid_sc, @formula(lnearns_f ~ hours_f + hours2))
+
+x_sorted = sort(psid_sc.hours_f)
+newdata = DataFrame(hours_f=x_sorted, hours2=x_sorted .^ 2)
+pred = FixedEffectModels.predict(model_quad, newdata)
+
+fig = CairoMakie.Figure()
+ax = CairoMakie.Axis(fig[1, 1], xlabel="Hours", ylabel="Log Earnings")
+CairoMakie.lines!(ax, x_sorted, pred, color=:blue, linewidth=2)
+CairoMakie.scatter!(ax, psid_sc.hours_f, psid_sc.lnearns_f, markersize=4, color=:gray)
+CairoMakie.save("$(DATA)/musr/mus02scatter2.png", fig)
+fig
+```
+
+### 2.6.6 lowess, kernel, local linear, and nearest-neighbor regression
+
+```{julia}
+#=
+* Scatterplot with lowess and local linear nonparametric regression
+graph twoway (scatter lnearns hours, msize(tiny))                 ///
+  (lowess lnearns hours, clstyle(p1) lwidth(medthick))            /// 
+  (lpoly lnearns hours, kernel(epan2) degree(1) lwidth(medthick)  ///
+  bwidth(500)), plotregion(style(none))                           ///
+  title("Scatterplot, lowess, and local linear regression")        ///
+  xtitle("Annual hours", size(medlarge))                          /// 
+  ytitle("Natural logarithm of annual earnings", size(medlarge)) ///
+  legend(pos(4) ring(0) col(1)) legend(size(small))              ///
+  legend(label(1 "Actual Data") label(2 "Lowess") label(3 "Local linear"))
+quietly graph export musr/mus02twoway.eps, replace
+=#
+# Scatterplot with lowess and local linear nonparametric regression
+psid_np = dropmissing(psid_plot, [:lnearns, :hours])
+psid_np = filter(r -> isfinite(r.lnearns) && isfinite(r.hours), psid_np)
+sorted_idx = sortperm(Float64.(psid_np.hours))
+hours_s   = Float64.(psid_np.hours[sorted_idx])
+lnearns_s = Float64.(psid_np.lnearns[sorted_idx])
+
+# Lowess — Stata default span ≈ 0.8
+loess_model = Loess.loess(hours_s, lnearns_s, span=0.8)
+hours_grid  = collect(range(minimum(hours_s), maximum(hours_s), length=200))
+lowess_pred = Loess.predict(loess_model, hours_grid)
+
+# Local linear with Epanechnikov kernel and fixed bandwidth = 500
+# Stata: lpoly lnearns hours, kernel(epan2) degree(1) bwidth(500)
+# Loess.jl only supports tricube kernel with span (fraction), so we use a
+# manual local-linear estimator with the Epanechnikov kernel and bwidth=500.
+# Stata's lpoly requires a minimum effective sample size (degree+1 non-zero
+# weights) to produce a prediction; grid points with too few observations in
+# the kernel window are set to NaN (and therefore not plotted).
+function lpoly(x, y, xgrid; bw=500.0, degree=1, min_obs=max(degree+2, 5))
+    n = length(x)
+    ŷ = similar(xgrid)
+    for (j, x0) in enumerate(xgrid)
+        u = (x .- x0) ./ bw
+        # Epanechnikov kernel: K(u) = 0.75(1 - u²) for |u| ≤ 1
+        w = @. ifelse(abs(u) <= 1.0, 0.75 * (1.0 - u^2), 0.0)
+        n_eff = count(w .> 0)      # observations inside the kernel window
+        if n_eff < min_obs
+            ŷ[j] = NaN             # too few points — suppress prediction
+            continue
+        end
+        if degree == 0
+            ŷ[j] = dot(w, y) / sum(w)
+        else
+            X_loc = hcat(ones(n), x .- x0)
+            W = LinearAlgebra.Diagonal(w)
+            β_loc = (X_loc' * W * X_loc) \ (X_loc' * W * y)
+            ŷ[j] = β_loc[1]
+        end
+    end
+    return ŷ
+end
+ll_pred = lpoly(hours_s, lnearns_s, hours_grid; bw=500.0, degree=1)
+
+# Filter out NaN predictions so lines stop where data is too sparse
+# (matches Stata's behaviour of not drawing lpoly in empty regions)
+valid_ll = .!isnan.(ll_pred)
+
+fig = CairoMakie.Figure()
+ax = CairoMakie.Axis(fig[1, 1],
+    title="Scatterplot, lowess, and local linear regression",
+    xlabel="Annual hours",
+    ylabel="Natural logarithm of annual earnings")
+CairoMakie.scatter!(ax, hours_s, lnearns_s, markersize=2, color=(:gray, 0.5), label="Actual Data")
+CairoMakie.lines!(ax, hours_grid, lowess_pred, linewidth=2, color=:blue, label="Lowess")
+CairoMakie.lines!(ax, hours_grid[valid_ll], ll_pred[valid_ll],
+    linewidth=2, color=:red, label="Local linear")
+axislegend(ax, position=:rc)
+CairoMakie.save("$(DATA)/musr/mus02twoway.png", fig)
+fig
+```
+
+### 2.6.7 Multiple scatterplots
+
+```{julia}
+#=
+* Multiple scatterplots
+label variable age "Age"
+label variable lnearns "Log earnings"
+label variable hours "Annual hours"
+graph matrix lnearns hours age, by(edcat) msize(small) 
+=#
+# Multiple scatterplots (scatter matrix by edcat)
+psid_mat = dropmissing(psid_plot, [:lnearns, :hours, :age, :edcat])
+edcat_vals_plot = sort(unique(psid_mat.edcat))
+vars = [:lnearns, :hours, :age]
+var_labels = ["Log earnings", "Annual hours", "Age"]
+nv = length(vars)
+nc = length(edcat_vals_plot)
+
+fig = CairoMakie.Figure(size=(300 * nc, 300 * nv))
+for (ci, ec) in enumerate(edcat_vals_plot)
+    sub = filter(r -> r.edcat == ec, psid_mat)
+    for (ri, yv) in enumerate(vars)
+        for (cj, xv) in enumerate(vars)
+            ax = CairoMakie.Axis(fig[ri, cj + (ci-1)*nv],
+                xlabel=(ri == nv ? var_labels[cj] : ""),
+                ylabel=(cj == 1 ? var_labels[ri] : ""),
+                title=(ri == 1 ? "edcat=$(edtype[ec])" : ""))
+            CairoMakie.scatter!(ax, Float64.(sub[!, xv]), Float64.(sub[!, yv]), markersize=3)
+        end
+    end
+end
+fig
+```
+
+## 2.7 Stata resources
+
+## 2.8 Exercises

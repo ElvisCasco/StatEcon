@@ -1,0 +1,1946 @@
+---
+title: "Cameron & Trivedi -- Ch. 13: Bootstrap methods (via StatEcon)"
+Authors:
+- Colin Cameron
+- Pravin Trivedi
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+# Julia setup
+
+```{julia}
+using StatEcon
+const DATA = first(filter(d -> isdir(d) && (isfile(joinpath(d, "auto.dta")) || isdir(joinpath(d, "musr"))), ["../../data", "data", raw"C:/EC/GitHub/StatEcon/data"]))
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+_rawval(x) = hasproperty(x, :value) ? x.value : x
+```
+
+The canonical estimators used in this chapter now live in `StatEcon` and are
+called directly below:
+
+  - `stata_probit`  — canonical probit (`src/stata_probit.jl`)
+  - `stata_bsample` — Stata's `bsample` (`src/stata_bsample.jl`)
+  - `stata_poisson`, `stata_nbreg`, `stata_test`, `stata_regress`,
+    `stata_summarize`, `stata_ivregress_2sls`
+
+The **bootstrap demonstrations** are the point of this chapter, so they are
+kept inline as pedagogical scaffolding: the resampling engines
+(`obs_bootstrap`, `panel_bootstrap`), the Stata-format printers
+(`bootstrap_b_table_stata`), the `vce(bootstrap)` / `vce(jackknife)` wrappers
+(`poisson_boot_stata`, `poisson_boot_ci_stata`, `poisson_boot_b_se_stata`,
+`poisson_jackknife_stata`), the percentile-t pipeline (`bootstrap_tstar_stata`,
+`percentilet_pvalue_stata`, `percentilet_ci_stata`, `mybootstrap_stata`), the
+alternative resampling schemes (`bootparametric_nb_stata`,
+`bootresidual_ols_stata`, `bootwild_ols_stata`), and the Heckman two-step
+(`heckman_twostep_stata`).
+
+```{julia}
+#| output: false
+# ── Bootstrap dataset loader ────────────────────────────────────────────
+# Stata's musr/bootdata.dta is the first 50 obs of year02==1 from the
+# doctor-visits data, keeping docvis chronic age. We rebuild it from
+# mus10data so every cell is self-contained (no intermediate .dta needed).
+function _c13_bootdata()
+    d = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus10data.dta"))
+    d = DataFrames.filter(r -> r.year02 == 1, d)[1:50, [:docvis, :chronic, :age]]
+    for c in DataFrames.names(d)
+        d[!, c] = Float64.(_rawval.(d[!, c]))
+    end
+    return d
+end
+
+# ── Resampling engines ─────────────────────────────────────────────────
+"""
+    panel_bootstrap(f, df, idvar; B=400, seed=10101)
+
+Cluster bootstrap on the panel identifier `idvar`. Applies `f(df_resampled)`
+on each resample and returns a `B × k` matrix (one row per replicate). Each
+sampled cluster gets a fresh unique id so panel estimators do not merge
+duplicates (matching Stata's `bootstrap, cluster()`).
+"""
+function panel_bootstrap(f::Function, df, idvar::Symbol; B::Int=400, seed::Int=10101,
+                         verbose::Bool=true)
+    rng = Random.MersenneTwister(seed)
+    ids = unique(df[!, idvar])
+    id_to_rows = Dict{Any, Vector{Int}}()
+    for (i, id) in enumerate(df[!, idvar])
+        push!(get!(id_to_rows, id, Int[]), i)
+    end
+    results = Vector{Vector{Float64}}()
+    n_fail = 0
+    for b in 1:B
+        boot_ids = StatsBase.sample(rng, ids, length(ids); replace=true)
+        row_idx = Int[]; new_id = Int[]
+        for (k, i) in enumerate(boot_ids)
+            rows = id_to_rows[i]
+            append!(row_idx, rows)
+            append!(new_id, fill(k, length(rows)))
+        end
+        sub = df[row_idx, :]
+        sub[!, idvar] = new_id
+        try
+            push!(results, f(sub))
+        catch
+            n_fail += 1
+        end
+    end
+    verbose && n_fail > 0 && @warn "Bootstrap: $n_fail/$B resamples failed (skipped)."
+    isempty(results) && error("All bootstrap resamples failed.")
+    return reduce(hcat, results)'
+end
+
+"""
+    obs_bootstrap(f, df; B=400, seed=10101, verbose=true)
+
+Observation-level bootstrap — resamples n rows with replacement (no cluster
+structure). Matches Stata's `vce(bootstrap)` with no cluster specified.
+"""
+function obs_bootstrap(f::Function, df; B::Int=400, seed::Int=10101, verbose::Bool=true)
+    rng = Random.MersenneTwister(seed)
+    n = DataFrames.nrow(df)
+    results = Vector{Vector{Float64}}()
+    n_fail = 0
+    for b in 1:B
+        row_idx = StatsBase.sample(rng, 1:n, n; replace=true)
+        sub = df[row_idx, :]
+        try
+            push!(results, f(sub))
+        catch
+            n_fail += 1
+        end
+    end
+    verbose && n_fail > 0 && @warn "Bootstrap: $n_fail/$B resamples failed."
+    isempty(results) && error("All bootstrap resamples failed.")
+    return reduce(hcat, results)'
+end
+
+# ── Stata `%9.0g` sign-aware formatter shared by the printers below ──────
+function _c13_g9(x; w::Int=10, sig::Int=7)
+    (ismissing(x) || !isfinite(x)) && return lpad(".", w)
+    sig_use = sig
+    s = Printf.@sprintf("%.*g", sig_use, x)
+    cap = (0 < abs(x) < 1 && x < 0) ? 10 : 9
+    while length(s) > cap && sig_use > 1
+        sig_use -= 1
+        s = Printf.@sprintf("%.*g", sig_use, x)
+    end
+    0 < abs(x) < 1 && (s = replace(s, r"^(-?)0\." => s"\1."))
+    lpad(s, w)
+end
+function _c13_commafmt(num)
+    s = string(abs(num)); parts = String[]; i = length(s)
+    while i >= 1; push!(parts, s[max(1, i-2):i]); i -= 3; end
+    (num < 0 ? "-" : "") * join(reverse(parts), ",")
+end
+
+# ── Minimal Stata-format `regress` printer (kept inline; the exported
+# `stata_regress` uses a different display path and has no `noheader`) ───
+function regress_stata(model; level::Float64=0.95, noheader::Bool=false)
+    β  = StatsBase.coef(model); V = StatsBase.vcov(model)
+    se = sqrt.(max.(LinearAlgebra.diag(V), 0.0))
+    nm_raw = string.(StatsBase.coefnames(model))
+    nm = replace.(nm_raw, "(Intercept)" => "_cons")
+    has_int = any(==("_cons"), nm)
+    n = Int(StatsBase.nobs(model)); rss = StatsBase.deviance(model)
+    r2 = StatsBase.r2(model); ar2 = StatsBase.adjr2(model)
+    dof_r = Int(StatsBase.dof_residual(model))
+    k = length(β) - (has_int ? 1 : 0)
+    tss = rss / max(1 - r2, eps()); mss = tss - rss
+    rmse = sqrt(rss / dof_r)
+    Fstat = (mss / k) / (rss / dof_r)
+    pF = 1 - Distributions.cdf(Distributions.FDist(k, dof_r), Fstat)
+    yname = try string(StatsBase.responsename(model))
+            catch; hasproperty(model, :yname) ? string(model.yname) : "y" end
+    t_stat = β ./ se
+    tcrit  = Distributions.quantile(Distributions.TDist(dof_r), 1 - (1-level)/2)
+    p_val  = 2 .* (1 .- Distributions.cdf.(Distributions.TDist(dof_r), abs.(t_stat)))
+    ci_lo  = β .- tcrit .* se; ci_hi = β .+ tcrit .* se
+    _g(x, w; sig=7) = begin
+        (ismissing(x) || !isfinite(x)) && return Printf.@sprintf("%*s", w, ".")
+        s = Printf.@sprintf("%.*g", sig, x)
+        0 < abs(x) < 1 && (s = replace(s, r"^(-?)0\." => s"\1."))
+        Printf.@sprintf("%*s", w, s)
+    end
+    if !noheader
+        println()
+        Printf.@printf("%12s | %10s %10s %10s    %-13s = %10d\n",
+                       "Source", "SS", "df", "MS", "Number of obs", n)
+        println("-"^13, "+", "-"^34, "   ",
+                Printf.@sprintf("%-13s = %10.2f", "F($k, $dof_r)", Fstat))
+        Printf.@printf("%12s | %s %10d %s    %-13s = %10.4f\n",
+                       "Model", _g(mss,10), k, _g(mss/k,10), "Prob > F", pF)
+        Printf.@printf("%12s | %s %10d %s    %-13s = %10.4f\n",
+                       "Residual", _g(rss,10), dof_r, _g(rss/dof_r,10), "R-squared", r2)
+        println("-"^13, "+", "-"^34, "   ",
+                Printf.@sprintf("%-13s = %10.4f", "Adj R-squared", ar2))
+        Printf.@printf("%12s | %s %10d %s    %-13s = %10.4f\n",
+                       "Total", _g(tss,10), n-1, _g(tss/(n-1),10), "Root MSE", rmse)
+    end
+    println()
+    println("-"^78)
+    Printf.@printf("%12s | %10s  %9s  %6s  %5s     [%d%% conf. interval]\n",
+                   yname, "Coefficient", "Std. err.", "t", "P>|t|", round(Int,100*level))
+    println("-"^13, "+", "-"^64)
+    for i in eachindex(β)
+        Printf.@printf("%12s | %s  %s  %6.2f  %5.3f  %s  %s\n",
+                       nm[i], _g(β[i],10), _g(se[i],9), t_stat[i], p_val[i],
+                       _g(ci_lo[i],11), _g(ci_hi[i],11))
+    end
+    println("-"^78)
+    return nothing
+end
+
+function regress_stata(df::DataFrames.AbstractDataFrame, y, xs;
+                       level::Float64=0.95, vcov=nothing, weights=nothing,
+                       noheader::Bool=false)
+    ys  = Symbol(y)
+    xsv = xs isa Union{Symbol,AbstractString} ? [Symbol(xs)] : [Symbol(v) for v in xs]
+    f = StatsModels.term(ys) ~ sum(StatsModels.term.(xsv))
+    kw = weights === nothing ? (;) : (; weights=Symbol(weights))
+    m = vcov === nothing ? FixedEffectModels.reg(df, f; kw...) :
+                           FixedEffectModels.reg(df, f, vcov; kw...)
+    regress_stata(m; level=level, noheader=noheader)
+    return nothing
+end
+
+# ── Wald chi² test on a bootstrap (β, V, coefnames) vector (Stata `test`
+# after `bootstrap _b:`; the exported `stata_test` only takes a model) ───
+function _c13_test_boot(vars; β, V, coefnames, depvar::AbstractString="",
+                        values=nothing)
+    names = string.(coefnames)
+    vs = vars isa AbstractVector ? string.(vars) : [string(vars)]
+    vals = values === nothing ? zeros(length(vs)) : collect(values)
+    p_idx(v) = (i = findfirst(==(string(v)), names);
+                i === nothing && error("'$(v)' not in coefnames=$(names)"); i)
+    q = length(vs); k = length(β); R = zeros(q, k); r = vals; labels = String[]
+    for (row, v) in enumerate(vs)
+        R[row, p_idx(v)] = 1.0
+        prefix = isempty(depvar) ? "" : "[$depvar]"
+        push!(labels, "$prefix$v = " * Printf.@sprintf("%g", vals[row]))
+    end
+    Rβ_r = R * collect(β) .- r
+    chi2 = (Rβ_r' * (LinearAlgebra.Symmetric(R * Matrix(V) * R') \ Rβ_r))::Float64
+    df = size(R, 1)
+    pval = 1 - Distributions.cdf(Distributions.Chisq(df), chi2)
+    println()
+    for (k_, lab) in enumerate(labels)
+        Printf.@printf(" ( %d)  %s\n", k_, lab)
+    end
+    Printf.@printf("\n           chi2(%3d) = %7.2f\n", df, chi2)
+    Printf.@printf("         Prob > chi2 = %9.4f\n", pval)
+    return (; chi2, df, p = pval)
+end
+```
+
+```{julia}
+#| output: false
+# ── `poisson ..., vce(bootstrap)` / `bootstrap _b: poisson` ─────────────
+"""
+    poisson_boot_stata(df, formula; B=400, seed=10101, level=0.95,
+                       cluster_var=nothing, noheader=false, quiet=false)
+
+Stata `poisson <depvar> <regs>, vce(boot, reps(B) seed(s))`. Fits Poisson,
+then runs B observation-level (or cluster, via `cluster_var`) bootstrap
+replicates to estimate Var(β̂). Prints the Stata bootstrap table with
+"Observed coefficient | Bootstrap std. err. | z | P>|z| | Normal-based CI".
+"""
+function poisson_boot_stata(df, formula; B::Int=400, seed::Int=10101,
+                            level::Float64=0.95, quiet::Bool=false,
+                            cluster_var=nothing, noheader::Bool=false)
+    needed = StatsModels.termvars(formula)
+    cols   = cluster_var === nothing ? needed : vcat(needed, [Symbol(cluster_var)])
+    dfc = DataFrames.dropmissing(df[:, cols])
+    m   = GLM.glm(formula, dfc, Distributions.Poisson(), GLM.LogLink())
+    β̂   = GLM.coef(m); cn = GLM.coefnames(m)
+    n   = Int(StatsBase.nobs(m)); k = length(β̂)
+    ll  = GLM.loglikelihood(m)
+
+    fml_null = StatsModels.term(Symbol(formula.lhs)) ~ StatsModels.term(1)
+    m_null   = GLM.glm(fml_null, dfc, Distributions.Poisson(), GLM.LogLink())
+    pseudo_r2 = 1 - ll / GLM.loglikelihood(m_null)
+
+    n_clusters = cluster_var === nothing ? 0 :
+                 length(unique(dfc[!, Symbol(cluster_var)]))
+    β_boot = if cluster_var === nothing
+        obs_bootstrap(dfc; B = B, seed = seed, verbose = false) do d
+            GLM.coef(GLM.glm(formula, d, Distributions.Poisson(), GLM.LogLink()))
+        end
+    else
+        panel_bootstrap(dfc, Symbol(cluster_var); B = B, seed = seed,
+                        verbose = false) do d
+            GLM.coef(GLM.glm(formula, d, Distributions.Poisson(), GLM.LogLink()))
+        end
+    end
+    V  = Statistics.cov(β_boot)
+    se = sqrt.(LinearAlgebra.diag(V))
+
+    intercept_idx = findfirst(==("(Intercept)"), cn)
+    slope_idx     = setdiff(1:k, [intercept_idx])
+    βs = β̂[slope_idx]; Vs = V[slope_idx, slope_idx]
+    Wald   = (βs' * (LinearAlgebra.Symmetric(Vs) \ βs))::Float64
+    Wald_p = 1 - Distributions.cdf(Distributions.Chisq(length(slope_idx)), Wald)
+
+    z      = β̂ ./ se
+    pv     = 2 .* (1 .- Distributions.cdf.(Distributions.Normal(), abs.(z)))
+    crit   = Distributions.quantile(Distributions.Normal(), 1 - (1-level)/2)
+    ci_lo  = β̂ .- crit .* se; ci_hi = β̂ .+ crit .* se
+
+    if !quiet
+        if !noheader
+            println()
+            Printf.@printf("%-56s%-13s = %6s\n",
+                           "Poisson regression", "Number of obs", _c13_commafmt(n))
+            Printf.@printf("%56s%-13s = %6s\n", "", "Replications", _c13_commafmt(B))
+            Printf.@printf("%56s%-13s = %6.2f\n", "",
+                           "Wald chi2($(length(slope_idx)))", Wald)
+            Printf.@printf("%56s%-13s = %6.4f\n", "", "Prob > chi2", Wald_p)
+            ll_str = Printf.@sprintf("Log likelihood = %.5f", ll)
+            r2_str = Printf.@sprintf("%-13s = %6.4f", "Pseudo R2", pseudo_r2)
+            pad    = max(0, 78 - length(ll_str) - length(r2_str))
+            println(ll_str, " "^pad, r2_str)
+            println()
+            if cluster_var !== nothing
+                cl_str = Printf.@sprintf("(Replications based on %d clusters in %s)",
+                                         n_clusters, cluster_var)
+                println(lpad(cl_str, 78))
+            end
+        end
+        println("-"^78)
+        println("             |   Observed   Bootstrap                         ",
+                "Normal-based")
+        Printf.@printf("%12s | coefficient  std. err.      z    P>|z|     [%g%% conf. interval]\n",
+                       string(formula.lhs), 100*level)
+        println("-"^13, "+", "-"^64)
+        ord = intercept_idx === nothing ? collect(slope_idx) :
+                                          vcat(slope_idx, [intercept_idx])
+        for i in ord
+            label = cn[i] == "(Intercept)" ? "_cons" : cn[i]
+            Printf.@printf("%12s | %s  %s  %s   %s    %s  %s\n",
+                           label, _c13_g9(β̂[i]; w=10), _c13_g9(se[i]; w=9),
+                           Printf.@sprintf("%7.2f", z[i]),
+                           Printf.@sprintf("%.3f", pv[i]),
+                           _c13_g9(ci_lo[i]; w=9), _c13_g9(ci_hi[i]; w=10))
+        end
+        println("-"^78)
+    end
+    return (; β = β̂, se, V, β_boot, model = m, n, B)
+end
+
+"""
+    poisson_boot_ci_stata(df, formula; B=999, seed=10101, level=0.95, quiet=false)
+
+Stata `poisson, vce(boot, bca); estat bootstrap, all`. Computes all four
+bootstrap CI types (Normal, Percentile, Bias-corrected, BCa) per coefficient
+(BCa needs a leave-one-out jackknife pass for the acceleration `a`).
+"""
+function poisson_boot_ci_stata(df, formula; B::Int=999, seed::Int=10101,
+                               level::Float64=0.95, quiet::Bool=false)
+    needed = StatsModels.termvars(formula)
+    dfc = DataFrames.dropmissing(df[:, needed])
+    m   = GLM.glm(formula, dfc, Distributions.Poisson(), GLM.LogLink())
+    β̂   = GLM.coef(m); cn = GLM.coefnames(m)
+    n   = Int(StatsBase.nobs(m)); k = length(β̂)
+
+    β_boot = obs_bootstrap(dfc; B = B, seed = seed, verbose = false) do d
+        GLM.coef(GLM.glm(formula, d, Distributions.Poisson(), GLM.LogLink()))
+    end
+    se_b = sqrt.(LinearAlgebra.diag(Statistics.cov(β_boot)))
+    bias = vec(Statistics.mean(β_boot, dims = 1)) .- β̂
+
+    β_jack = zeros(n, k)
+    for i in 1:n
+        sub = dfc[setdiff(1:n, i), :]
+        β_jack[i, :] = GLM.coef(GLM.glm(formula, sub,
+                                        Distributions.Poisson(), GLM.LogLink()))
+    end
+
+    α   = 1 - level
+    zα2 = Distributions.quantile(Distributions.Normal(), 1 - α/2)
+    cis = Vector{Vector{NTuple{2, Float64}}}(undef, k)
+    z0_v = zeros(k); a_v = zeros(k)
+    for j in 1:k
+        b̂  = β̂[j]; bj = β_boot[:, j]
+        N_lo = b̂ - zα2 * se_b[j]; N_hi = b̂ + zα2 * se_b[j]
+        P_lo = Statistics.quantile(bj, α/2); P_hi = Statistics.quantile(bj, 1 - α/2)
+        p_lt = sum(bj .< b̂) / B
+        p_lt_safe = clamp(p_lt, 1/(2B), 1 - 1/(2B))
+        z0 = Distributions.quantile(Distributions.Normal(), p_lt_safe)
+        BC_lo = Statistics.quantile(bj, Distributions.cdf(Distributions.Normal(), 2*z0 - zα2))
+        BC_hi = Statistics.quantile(bj, Distributions.cdf(Distributions.Normal(), 2*z0 + zα2))
+        bjk = β_jack[:, j]; b̄jk = Statistics.mean(bjk); d = b̄jk .- bjk
+        a   = sum(d .^ 3) / (6 * (sum(d .^ 2)) ^ 1.5)
+        BCa_lo = Statistics.quantile(bj, Distributions.cdf(Distributions.Normal(),
+                        z0 + (z0 - zα2) / (1 - a*(z0 - zα2))))
+        BCa_hi = Statistics.quantile(bj, Distributions.cdf(Distributions.Normal(),
+                        z0 + (z0 + zα2) / (1 - a*(z0 + zα2))))
+        cis[j] = [(N_lo, N_hi), (P_lo, P_hi), (BC_lo, BC_hi), (BCa_lo, BCa_hi)]
+        z0_v[j] = z0; a_v[j] = a
+    end
+
+    g9(x; w::Int=10, sig::Int=8) = begin
+        s = Printf.@sprintf("%.*g", sig, x)
+        cap = (0 < abs(x) < 1 && x < 0) ? 11 : 10
+        sig_use = sig
+        while length(s) > cap && sig_use > 1
+            sig_use -= 1; s = Printf.@sprintf("%.*g", sig_use, x)
+        end
+        0 < abs(x) < 1 && (s = replace(s, r"^(-?)0\." => s"\1."))
+        lpad(s, w)
+    end
+
+    if !quiet
+        println()
+        Printf.@printf("%-48s%-18s= %10s\n",
+                       "Poisson regression", "Number of obs", _c13_commafmt(n))
+        Printf.@printf("%48s%-18s= %10s\n", "", "Replications", _c13_commafmt(B))
+        println()
+        intercept_idx = findfirst(==("(Intercept)"), cn)
+        slope_idx     = setdiff(1:k, [intercept_idx])
+        ord = intercept_idx === nothing ? collect(slope_idx) :
+                                          vcat(slope_idx, [intercept_idx])
+        println("-"^78)
+        println("             |    Observed               Bootstrap")
+        Printf.@printf("%12s | coefficient       Bias    std. err.  [%g%% conf. interval]\n",
+                       string(formula.lhs), 100*level)
+        println("-"^13, "+", "-"^64)
+        labels = ["(N)", "(P)", "(BC)", "(BCa)"]
+        for i in ord
+            label = cn[i] == "(Intercept)" ? "_cons" : cn[i]
+            for r in 1:4
+                lo, hi = cis[i][r]
+                if r == 1
+                    Printf.@printf("%12s | %s  %s  %s   %s   %s  %4s\n",
+                                   label, g9(β̂[i]; w=10), g9(bias[i]; w=8),
+                                   g9(se_b[i]; w=9), g9(lo; w=9), g9(hi; w=8), labels[r])
+                else
+                    Printf.@printf("%12s | %s  %s  %s   %s   %s  %4s\n",
+                                   "", " "^10, " "^8, " "^9,
+                                   g9(lo; w=9), g9(hi; w=8), labels[r])
+                end
+            end
+        end
+        println("-"^78)
+        println("Key:   N: Normal")
+        println("       P: Percentile")
+        println("      BC: Bias-corrected")
+        println("     BCa: Bias-corrected and accelerated")
+    end
+    return (; β = β̂, bias, se = se_b, β_boot, β_jack, cis, z0 = z0_v, a = a_v)
+end
+
+"""
+    poisson_boot_b_se_stata(df, formula; B=400, seed=10101, level=0.95,
+                            vce=:oim, quiet=false)
+
+Stata `bootstrap _b _se, reps(B) seed(s): poisson`. On each resample saves
+BOTH β̂ and se(β̂) (OIM or robust via `vce`), so the bootstrap distribution
+covers the SE-of-SE. Prints a two-block table (`docvis` / `docvis_se`).
+"""
+function poisson_boot_b_se_stata(df, formula; B::Int=400, seed::Int=10101,
+                                 level::Float64=0.95, quiet::Bool=false,
+                                 vce::Symbol=:oim)
+    needed = StatsModels.termvars(formula)
+    dfc = DataFrames.dropmissing(df[:, needed])
+    m   = GLM.glm(formula, dfc, Distributions.Poisson(), GLM.LogLink())
+    β̂   = GLM.coef(m); cn = GLM.coefnames(m)
+    n   = Int(StatsBase.nobs(m)); k = length(β̂)
+
+    function _se_of(model)
+        if vce == :robust
+            yv  = Float64.(GLM.response(model)); μ = GLM.predict(model)
+            Xm  = GLM.modelmatrix(model); n_b = size(Xm, 1)
+            H   = Xm' * LinearAlgebra.Diagonal(μ) * Xm
+            S   = Xm' * LinearAlgebra.Diagonal((yv .- μ).^2) * Xm
+            Hi  = LinearAlgebra.inv(LinearAlgebra.cholesky(LinearAlgebra.Symmetric(H)))
+            V_  = Hi * S * Hi * (n_b / (n_b - 1))
+            return sqrt.(LinearAlgebra.diag(V_))
+        else
+            return sqrt.(LinearAlgebra.diag(Matrix(GLM.vcov(model))))
+        end
+    end
+    se_obs = _se_of(m)
+
+    bs = obs_bootstrap(dfc; B = B, seed = seed, verbose = false) do d
+        m_b = GLM.glm(formula, d, Distributions.Poisson(), GLM.LogLink())
+        vcat(GLM.coef(m_b), _se_of(m_b))
+    end
+    β_boot   = bs[:, 1:k]; se_boot = bs[:, (k + 1):(2k)]
+    boot_se_β  = vec(Statistics.std(β_boot,  dims = 1))
+    boot_se_se = vec(Statistics.std(se_boot, dims = 1))
+
+    crit = Distributions.quantile(Distributions.Normal(), 1 - (1 - level)/2)
+    function _z_p_ci(obs_v, boot_se_v)
+        z = obs_v ./ boot_se_v
+        p = 2 .* (1 .- Distributions.cdf.(Distributions.Normal(), abs.(z)))
+        return z, p, obs_v .- crit .* boot_se_v, obs_v .+ crit .* boot_se_v
+    end
+    z_β,  p_β,  lo_β,  hi_β  = _z_p_ci(β̂,     boot_se_β)
+    z_se, p_se, lo_se, hi_se = _z_p_ci(se_obs, boot_se_se)
+
+    if !quiet
+        println()
+        Printf.@printf("%-59s%-13s = %3d\n", "Bootstrap results", "Number of obs", n)
+        Printf.@printf("%59s%-13s = %3d\n", "", "Replications", B)
+        println()
+        println("-"^78)
+        println("             |   Observed   Bootstrap                         ",
+                "Normal-based")
+        println("             | coefficient  std. err.      z    P>|z|     ",
+                "[", round(Int, 100*level), "% conf. interval]")
+        println("-"^13, "+", "-"^64)
+        depvar = string(formula.lhs)
+        intercept_idx = findfirst(==("(Intercept)"), cn)
+        slope_idx     = setdiff(1:k, [intercept_idx])
+        ord = intercept_idx === nothing ? collect(slope_idx) :
+                                          vcat(slope_idx, [intercept_idx])
+        Printf.@printf("%-12s |\n", depvar)
+        for i in ord
+            label = cn[i] == "(Intercept)" ? "_cons" : cn[i]
+            Printf.@printf("%12s | %s  %s  %s   %s    %s  %s\n",
+                           label, _c13_g9(β̂[i]; w=10), _c13_g9(boot_se_β[i]; w=9),
+                           Printf.@sprintf("%7.2f", z_β[i]), Printf.@sprintf("%.3f", p_β[i]),
+                           _c13_g9(lo_β[i]; w=9), _c13_g9(hi_β[i]; w=10))
+        end
+        println("-"^13, "+", "-"^64)
+        Printf.@printf("%-12s |\n", depvar * "_se")
+        for i in ord
+            label = cn[i] == "(Intercept)" ? "_cons" : cn[i]
+            Printf.@printf("%12s | %s  %s  %s   %s    %s  %s\n",
+                           label, _c13_g9(se_obs[i]; w=10), _c13_g9(boot_se_se[i]; w=9),
+                           Printf.@sprintf("%7.2f", z_se[i]), Printf.@sprintf("%.3f", p_se[i]),
+                           _c13_g9(lo_se[i]; w=9), _c13_g9(hi_se[i]; w=10))
+        end
+        println("-"^78)
+    end
+    return (; β = β̂, se_obs, boot_se_β, boot_se_se, β_boot, se_boot, model = m, n, B)
+end
+
+"""
+    bootstrap_b_table_stata(β_obs, β_boot, coefnames; n_obs, depvar="", level=0.95,
+                            command="", expressions=String[])
+
+Stata `bootstrap _b: <command>` output — a single flat block with
+"Observed coefficient | Bootstrap std. err. | z | P>|z| | Normal-based CI".
+"""
+function bootstrap_b_table_stata(β_obs::AbstractVector, β_boot::AbstractMatrix,
+                                 coefnames::AbstractVector;
+                                 n_obs::Int, depvar::AbstractString = "",
+                                 level::Float64 = 0.95,
+                                 command::AbstractString = "",
+                                 expressions::AbstractVector = String[])
+    B    = size(β_boot, 1)
+    se_b = vec(Statistics.std(β_boot, dims = 1))
+    crit = Distributions.quantile(Distributions.Normal(), 1 - (1-level)/2)
+    z    = β_obs ./ se_b
+    pv   = 2 .* (1 .- Distributions.cdf.(Distributions.Normal(), abs.(z)))
+    lo   = β_obs .- crit .* se_b; hi = β_obs .+ crit .* se_b
+
+    println()
+    Printf.@printf("%-59s%-13s = %3s\n",
+                   "Bootstrap results", "Number of obs", _c13_commafmt(n_obs))
+    Printf.@printf("%59s%-13s = %3s\n", "", "Replications", _c13_commafmt(B))
+    if !isempty(command) || !isempty(expressions)
+        println()
+        isempty(command) || Printf.@printf("%14s%s\n", "Command:  ", command)
+        for ex in expressions
+            Printf.@printf("%14s%s\n", "$(ex.first):  ", ex.second)
+        end
+    end
+    println()
+    println("-"^78)
+    println("             |   Observed   Bootstrap                         Normal-based")
+    Printf.@printf("%12s | coefficient  std. err.      z    P>|z|     [%g%% conf. interval]\n",
+                   depvar, 100*level)
+    println("-"^13, "+", "-"^64)
+    for (i, lab) in enumerate(coefnames)
+        Printf.@printf("%12s | %s  %s  %s   %s    %s  %s\n",
+                       lab, _c13_g9(β_obs[i]; w=10), _c13_g9(se_b[i]; w=9),
+                       Printf.@sprintf("%7.2f", z[i]), Printf.@sprintf("%.3f", pv[i]),
+                       _c13_g9(lo[i]; w=9), _c13_g9(hi[i]; w=10))
+    end
+    println("-"^78)
+    return (; β = β_obs, se = se_b, z, p = pv, ci_lo = lo, ci_hi = hi, B, n_obs)
+end
+```
+
+```{julia}
+#| output: false
+# ── Percentile-t pipeline (§13.5–13.6) ──────────────────────────────────
+"""
+    bootstrap_tstar_stata(df, formula, var; B=999, seed=10101, vce=:robust,
+                          command="", save_csv=nothing, quiet=false)
+
+Percentile-t bootstrap for a single Poisson coefficient. Fits
+`stata_poisson(df, formula; vce)` to get θ = β̂_var and σ_θ, then bootstraps
+`t* = (β̂*_var − θ)/SE*_var` over B resamples. Returns `(; β_orig, se_orig,
+tstars, B, n)`.
+"""
+function bootstrap_tstar_stata(df, formula, var::Symbol;
+                               B::Int=999, seed::Int=10101, vce::Symbol=:robust,
+                               command::AbstractString="", save_csv=nothing,
+                               quiet::Bool=false)
+    fit0 = stata_poisson(df, formula; vce = vce, quiet = true)
+    cn0  = fit0.coefnames_glm
+    i0   = findfirst(==(string(var)), cn0)
+    i0 === nothing && error("'$(var)' not in coefnames=$(cn0)")
+    β_orig  = fit0.β_glm[i0]; se_orig = sqrt(fit0.V_glm[i0, i0])
+
+    tstar_mat = obs_bootstrap(df; B = B, seed = seed, verbose = false) do d
+        fit_b = stata_poisson(d, formula; vce = vce, quiet = true)
+        cn_b  = fit_b.coefnames_glm
+        i_b   = findfirst(==(string(var)), cn_b)
+        i_b === nothing && error("'$(var)' not in resample coefnames")
+        return [(fit_b.β_glm[i_b] - β_orig) / sqrt(fit_b.V_glm[i_b, i_b])]
+    end
+    tstars = vec(tstar_mat)
+
+    if save_csv !== nothing
+        mkpath(dirname(save_csv))
+        CSV.write(save_csv, DataFrames.DataFrame(tstar = tstars))
+    end
+    if !quiet
+        bootstrap_b_table_stata([0.0], reshape(tstars, :, 1), ["tstar"];
+            n_obs = DataFrames.nrow(df), depvar = "", command = command,
+            expressions = ["tstar" => "(_b[$(var)]-$(β_orig))/_se[$(var)]"])
+    end
+    return (; β_orig, se_orig, tstars, B, n = DataFrames.nrow(df))
+end
+
+"""
+    percentilet_pvalue_stata(tstars, β_orig, se_orig; null=0.0, quiet=false)
+
+Symmetric two-sided percentile-t Wald test:
+`p = (1/B)·Σ 1{|t*_b| > |t_obs|}`, `t_obs = (β_orig − null)/se_orig`.
+"""
+function percentilet_pvalue_stata(tstars::AbstractVector, β_orig::Real, se_orig::Real;
+                                  null::Real = 0.0, quiet::Bool = false)
+    t_obs = (β_orig - null) / se_orig; B = length(tstars)
+    p_val = sum(abs(t) > abs(t_obs) for t in tstars) / B
+    quiet || @printf("p-value = %.7g\n", p_val)
+    return (; t_obs, p_value = p_val, B)
+end
+
+"""
+    percentilet_ci_stata(tstars, β_orig, se_orig; level=0.95, quiet=false)
+
+Percentile-t CI: `[θ + q(α/2)·SE_θ, θ + q(1−α/2)·SE_θ]`.
+"""
+function percentilet_ci_stata(tstars::AbstractVector, β_orig::Real, se_orig::Real;
+                              level::Real = 0.95, quiet::Bool = false)
+    α = 1 - level; plo = α / 2; phi = 1 - α / 2
+    q_lo = Statistics.quantile(tstars, plo); q_hi = Statistics.quantile(tstars, phi)
+    lb = β_orig + q_lo * se_orig; ub = β_orig + q_hi * se_orig
+    gd(x) = begin
+        s = Printf.@sprintf("%.7g", x)
+        (0 < abs(x) < 1) && (s = replace(s, r"^(-?)0\." => s"\1."))
+        s
+    end
+    pct_str(p) = (q = p * 100; isinteger(q) ? string(Int(q)) :
+                  rstrip(rstrip(Printf.@sprintf("%.4f", q), '0'), '.'))
+    if !quiet
+        @printf("%s and %s percentiles of t* distn: %s, %s\n",
+                pct_str(plo), pct_str(phi), gd(q_lo), gd(q_hi))
+        @printf("%g percent percentile-t confidence interval is  (%s,%s)\n",
+                level * 100, gd(lb), gd(ub))
+    end
+    return (; q_lo, q_hi, lb, ub, level)
+end
+
+"""
+    mybootstrap_stata(df, formula, var; B=999, seed=10101, vce=:robust,
+                      command="", null=0.0, quiet=false)
+
+One-shot percentile-t p-value (Stata's `mybootstrap` program): wraps
+`bootstrap_tstar_stata` + `percentilet_pvalue_stata`.
+"""
+function mybootstrap_stata(df, formula, var::Symbol; B::Int=999, seed::Int=10101,
+                           vce::Symbol=:robust, command::AbstractString="",
+                           null::Real=0.0, quiet::Bool=false)
+    res = bootstrap_tstar_stata(df, formula, var;
+                                B=B, seed=seed, vce=vce, command=command, quiet=true)
+    pv  = percentilet_pvalue_stata(res.tstars, res.β_orig, res.se_orig;
+                                   null=null, quiet=quiet)
+    return (; pvalue = pv.p_value, t_obs = pv.t_obs, B = pv.B,
+              tstars = res.tstars, β_orig = res.β_orig, se_orig = res.se_orig)
+end
+
+# ── Jackknife (§13.8) ───────────────────────────────────────────────────
+"""
+    poisson_jackknife_stata(df, formula; mse=true, level=0.95, quiet=false)
+
+Stata `poisson ..., vce(jackknife, mse)`. Delete-1 jackknife SE:
+`V_jack = (n-1)/n · Σ (β̂_(i) − c)(β̂_(i) − c)ᵀ`, `c = β̂` if `mse` else `β̄`.
+Inference uses t with df = n − 1; omnibus stat `F(k, n − 1)`.
+"""
+function poisson_jackknife_stata(df, formula; mse::Bool = true,
+                                 level::Float64 = 0.95, quiet::Bool = false)
+    needed = StatsModels.termvars(formula)
+    dfc = DataFrames.dropmissing(df[:, needed])
+    for c in needed
+        col = dfc[!, c]
+        if eltype(col) <: Union{Missing, Float32} || eltype(col) === Float32
+            dfc[!, c] = Float64.(col)
+        end
+    end
+    fit  = stata_poisson(dfc, formula; vce = :oim, quiet = true)
+    β_glm  = fit.β_glm; cn = fit.coefnames_glm
+    n = fit.n; k = fit.k; ll = fit.ll
+    ll_null = ll / (1 - fit.pseudo_r2); pseudo_r2 = fit.pseudo_r2
+
+    β_jack = Matrix{Float64}(undef, n, k)
+    rows = 1:DataFrames.nrow(dfc)
+    for i in 1:n
+        fit_i = stata_poisson(dfc[setdiff(rows, i), :], formula; vce = :oim, quiet = true)
+        β_jack[i, :] = [fit_i.β_glm[findfirst(==(name), fit_i.coefnames_glm)] for name in cn]
+    end
+
+    centre = mse ? β_glm : vec(Statistics.mean(β_jack, dims = 1))
+    devs   = β_jack .- centre'
+    V_jack = ((n - 1) / n) * (devs' * devs)
+
+    se   = sqrt.(LinearAlgebra.diag(V_jack)); t = β_glm ./ se
+    df_t = n - 1
+    p    = 2 .* (1 .- Distributions.cdf.(Distributions.TDist(df_t), abs.(t)))
+    crit = Distributions.quantile(Distributions.TDist(df_t), 1 - (1-level)/2)
+    ci_lo = β_glm .- crit .* se; ci_hi = β_glm .+ crit .* se
+
+    intercept_idx = findfirst(==("(Intercept)"), cn)
+    slope_idx = setdiff(1:k, [intercept_idx])
+    F_val, F_p = NaN, NaN
+    if !isempty(slope_idx)
+        β_s = β_glm[slope_idx]; V_s = V_jack[slope_idx, slope_idx]
+        Wald_s = β_s' * LinearAlgebra.inv(V_s) * β_s
+        F_val  = Wald_s / length(slope_idx)
+        F_p    = 1 - Distributions.cdf(Distributions.FDist(length(slope_idx), df_t), F_val)
+    end
+
+    if !quiet
+        println()
+        Printf.@printf("%-56s%-13s = %6s\n",
+                       "Poisson regression", "Number of obs", _c13_commafmt(n))
+        Printf.@printf("%56s%-13s = %6s\n", "", "Replications", _c13_commafmt(n))
+        if isfinite(F_val)
+            Printf.@printf("%56s%-13s = %6.2f\n", "", "F($(length(slope_idx)), $df_t)", F_val)
+            Printf.@printf("%56s%-13s = %6.4f\n", "", "Prob > F", F_p)
+        end
+        ll_str = Printf.@sprintf("Log likelihood = %.5f", ll)
+        r2_str = Printf.@sprintf("%-13s = %6.4f", "Pseudo R2", pseudo_r2)
+        pad_h  = max(0, 78 - length(ll_str) - length(r2_str))
+        println(ll_str, " "^pad_h, r2_str)
+        println()
+        println("-"^78)
+        println("             |              Jackknife")
+        Printf.@printf("%12s | Coefficient  std. err.       t    P>|t|     [%g%% conf. interval]\n",
+                       string(formula.lhs), 100*level)
+        println("-"^13, "+", "-"^64)
+        ord = intercept_idx === nothing ? collect(slope_idx) :
+                                          vcat(collect(slope_idx), [intercept_idx])
+        for i in ord
+            label = cn[i] == "(Intercept)" ? "_cons" : cn[i]
+            Printf.@printf("%12s | %s  %s  %s   %s    %s  %s\n",
+                           label, _c13_g9(β_glm[i]; w=10), _c13_g9(se[i]; w=9),
+                           Printf.@sprintf("%7.2f", t[i]), Printf.@sprintf("%.3f", p[i]),
+                           _c13_g9(ci_lo[i]; w=9), _c13_g9(ci_hi[i]; w=10))
+        end
+        println("-"^78)
+    end
+    ord = intercept_idx === nothing ? collect(slope_idx) :
+                                      vcat(collect(slope_idx), [intercept_idx])
+    cn_ord = intercept_idx === nothing ? cn[ord] : vcat(cn[slope_idx], "_cons")
+    return (; β = β_glm[ord], V = V_jack[ord, ord], se = se[ord],
+              t = t[ord], p = p[ord], ci_lo = ci_lo[ord], ci_hi = ci_hi[ord],
+              β_jack, coefnames = cn_ord, n, k, F = F_val, F_p,
+              ll, ll_null, pseudo_r2, model = fit.model)
+end
+```
+
+```{julia}
+#| output: false
+# ── Alternative resampling schemes (§13.7) & Heckman (§13.4.5) ──────────
+"""
+    bootparametric_nb_stata(df, muhat, α, formula; seed=nothing, quiet=false)
+
+Parametric NB2 bootstrap (§13.7.2): draws ν ~ Gamma(1/α, α),
+y* ~ Poisson(μ̂·ν), overwrites `formula.lhs` in a copy of `df`, and refits
+NB2 via `stata_nbreg`. Returns the `stata_nbreg` named tuple.
+"""
+function bootparametric_nb_stata(df::DataFrames.AbstractDataFrame,
+                                 muhat::AbstractVector, α::Real, formula;
+                                 seed::Union{Int, Nothing} = nothing, quiet::Bool = false)
+    rng = seed === nothing ? Random.default_rng() : Random.MersenneTwister(seed)
+    n   = length(muhat)
+    ν      = Distributions.rand(rng, Distributions.Gamma(1/α, α), n)
+    y_star = [Distributions.rand(rng, Distributions.Poisson(m * v)) for (m, v) in zip(muhat, ν)]
+    df_b = DataFrames.DataFrame(df)
+    df_b[!, Symbol(formula.lhs)] = y_star
+    return stata_nbreg(df_b, formula; quiet = quiet)
+end
+
+"""
+    bootresidual_ols_stata(df, formula; seed=nothing, vcov=nothing, quiet=false)
+
+Residual bootstrap for OLS with iid errors (§13.7.3): fits OLS, resamples
+residuals û*_i, forms y*_i = x_iᵀβ̂ + û*_i, refits. Prints both `regress`
+tables. Returns `(; orig, boot, uhat, idx, ystar)`.
+"""
+function bootresidual_ols_stata(df::DataFrames.AbstractDataFrame, formula;
+                                seed::Union{Int, Nothing} = nothing,
+                                vcov = nothing, quiet::Bool = false)
+    rng = seed === nothing ? Random.default_rng() : Random.MersenneTwister(seed)
+    m0  = vcov === nothing ? FixedEffectModels.reg(df, formula) :
+                             FixedEffectModels.reg(df, formula, vcov)
+    quiet || regress_stata(m0)
+    quiet || println("(option xb assumed; fitted values)")
+    yvar = Symbol(formula.lhs)
+    yhat = FixedEffectModels.predict(m0, df)
+    uhat = df[!, yvar] .- yhat
+    n    = length(uhat)
+    idx  = StatsBase.sample(rng, 1:n, n; replace = true)
+    ystar = yhat .+ uhat[idx]
+    df_b = DataFrames.DataFrame(df); df_b[!, yvar] = ystar
+    m_b  = vcov === nothing ? FixedEffectModels.reg(df_b, formula) :
+                              FixedEffectModels.reg(df_b, formula, vcov)
+    quiet || regress_stata(m_b)
+    return (; orig = m0, boot = m_b, uhat, idx, ystar)
+end
+
+"""
+    bootwild_ols_stata(df, formula; seed=nothing, vcov=nothing, quiet=false)
+
+Wild bootstrap for OLS (§13.7.4) with Mammen two-point weights
+η ∈ {-0.618034, +1.618034}, P(b) ≈ 0.2764. Prints both `regress` tables and
+the `(<n> real changes made)` line. Returns `(; orig, boot, η, ustar, ystar)`.
+"""
+function bootwild_ols_stata(df::DataFrames.AbstractDataFrame, formula;
+                            seed::Union{Int, Nothing} = nothing,
+                            vcov = nothing, quiet::Bool = false)
+    rng = seed === nothing ? Random.default_rng() : Random.MersenneTwister(seed)
+    m0  = vcov === nothing ? FixedEffectModels.reg(df, formula) :
+                             FixedEffectModels.reg(df, formula, vcov)
+    quiet || regress_stata(m0)
+    quiet || println("(option xb assumed; fitted values)")
+    yvar = Symbol(formula.lhs)
+    yhat = FixedEffectModels.predict(m0, df)
+    uhat = df[!, yvar] .- yhat
+    n_   = length(uhat)
+    a, b = -0.618034, 1.618034
+    flip = [Random.rand(rng) > 0.723607 for _ in 1:n_]
+    η    = ifelse.(flip, b, a)
+    ustar = η .* uhat; ystar = yhat .+ ustar
+    quiet || println("($(sum(flip)) real changes made)")
+    df_b = DataFrames.DataFrame(df); df_b[!, yvar] = ystar
+    m_b = vcov === nothing ? FixedEffectModels.reg(df_b, formula) :
+                             FixedEffectModels.reg(df_b, formula, vcov)
+    quiet || regress_stata(m_b)
+    return (; orig = m0, boot = m_b, η, ustar, ystar)
+end
+
+"""
+    heckman_twostep_stata(df, fml_outcome, fml_selection; depvar_y="lny",
+                          depvar_d="dy", level=0.95, quiet=false)
+
+Stata `heckman <y> <xs>, select(<d> = <zs>) twostep` — Heckman (1979)
+two-step with first-stage-corrected variance. Prints the lny / dy / /mills
+blocks with σ, ρ. Returns the coefficient/variance NamedTuple.
+"""
+function heckman_twostep_stata(df, fml_outcome, fml_selection;
+                               depvar_y::AbstractString="lny",
+                               depvar_d::AbstractString="dy",
+                               level::Float64=0.95, quiet::Bool=false)
+    sel_vars = StatsModels.termvars(fml_selection)
+    out_vars = StatsModels.termvars(fml_outcome)
+    needed   = unique(vcat(sel_vars, out_vars))
+    df_h = DataFrames.dropmissing(df[:, needed], sel_vars)
+    n_full = DataFrames.nrow(df_h)
+
+    m_pr = GLM.glm(fml_selection, df_h, Distributions.Binomial(), GLM.ProbitLink())
+    γ̂   = GLM.coef(m_pr); cn_pr = GLM.coefnames(m_pr)
+    Z   = GLM.modelmatrix(m_pr); xb_full = Z * γ̂
+    λ_full  = Distributions.pdf.(Distributions.Normal(), xb_full) ./
+              Distributions.cdf.(Distributions.Normal(), xb_full)
+    δ_full  = λ_full .* (λ_full .+ xb_full)
+
+    d_full = Int.(df_h[!, Symbol(depvar_d)])
+    is_pos = Bool[d == 1 for d in d_full]
+    n_pos  = sum(is_pos); n_zero = n_full - n_pos
+
+    df_pos = df_h[is_pos, :]; df_pos.invmills = λ_full[is_pos]
+    out_xs = out_vars[2:end]
+    X_pos  = hcat(ones(n_pos), [Float64.(df_pos[!, v]) for v in out_xs]..., df_pos.invmills)
+    y_pos  = Float64.(df_pos[!, Symbol(depvar_y)])
+    α̂      = X_pos \ y_pos; ε̂ = y_pos .- X_pos * α̂
+
+    β̂_λ    = α̂[end]; δ_pos = δ_full[is_pos]
+    σ̂²     = (ε̂'ε̂) / n_pos + β̂_λ^2 * Statistics.mean(δ_pos)
+    σ̂      = sqrt(σ̂²); ρ̂ = β̂_λ / σ̂
+
+    safe_sym_inv(A; rtol::Float64=1e-10) = begin
+        As = LinearAlgebra.Symmetric(A)
+        try LinearAlgebra.inv(As) catch; LinearAlgebra.pinv(Matrix(As); rtol=rtol) end
+    end
+    XX_inv = safe_sym_inv(X_pos' * X_pos)
+    Φ_full = clamp.(Distributions.cdf.(Distributions.Normal(), xb_full), 1e-12, 1 - 1e-12)
+    φ_full = Distributions.pdf.(Distributions.Normal(), xb_full)
+    w_full = (φ_full .^ 2) ./ (Φ_full .* (1 .- Φ_full))
+    A_γ    = Z' * LinearAlgebra.Diagonal(w_full) * Z
+    Vγ     = safe_sym_inv(A_γ); Z_pos = Z[is_pos, :]
+    D_pos  = LinearAlgebra.Diagonal(δ_pos)
+    M1     = X_pos' * (LinearAlgebra.I(n_pos) - ρ̂^2 .* D_pos) * X_pos
+    M2     = ρ̂^2 .* (X_pos' * D_pos * Z_pos) * Vγ * (Z_pos' * D_pos * X_pos)
+    V_α    = σ̂² .* XX_inv * (M1 + M2) * XX_inv
+    se_α   = sqrt.(max.(LinearAlgebra.diag(V_α), 0.0))
+
+    k_out  = length(out_xs)
+    α̂_disp = vcat(α̂[2:k_out+1], [α̂[1]]); se_disp = vcat(se_α[2:k_out+1], [se_α[1]])
+    α_lam  = α̂[end]; se_lam = se_α[end]
+    z_disp = α̂_disp ./ se_disp
+    p_disp = 2 .* (1 .- Distributions.cdf.(Distributions.Normal(), abs.(z_disp)))
+    crit   = Distributions.quantile(Distributions.Normal(), 1 - (1-level)/2)
+    lo_disp = α̂_disp .- crit .* se_disp; hi_disp = α̂_disp .+ crit .* se_disp
+    z_lam = α_lam / se_lam
+    p_lam = 2 * (1 - Distributions.cdf(Distributions.Normal(), abs(z_lam)))
+    lo_lam = α_lam - crit * se_lam; hi_lam = α_lam + crit * se_lam
+
+    se_pr = sqrt.(LinearAlgebra.diag(Matrix(GLM.vcov(m_pr))))
+    z_pr  = γ̂ ./ se_pr
+    p_pr  = 2 .* (1 .- Distributions.cdf.(Distributions.Normal(), abs.(z_pr)))
+    lo_pr = γ̂ .- crit .* se_pr; hi_pr = γ̂ .+ crit .* se_pr
+    i_int_pr = findfirst(==("(Intercept)"), cn_pr)
+    slope_pr = setdiff(1:length(γ̂), [i_int_pr]); ord_pr = vcat(slope_pr, [i_int_pr])
+    cn_pr_ord = vcat(cn_pr[slope_pr], "_cons")
+    γ̂_disp = γ̂[ord_pr]; se_pr_disp = se_pr[ord_pr]
+    z_pr_disp = z_pr[ord_pr]; p_pr_disp = p_pr[ord_pr]
+    lo_pr_disp = lo_pr[ord_pr]; hi_pr_disp = hi_pr[ord_pr]
+
+    βs = α̂_disp[1:end-1]; Vs = V_α[2:k_out+1, 2:k_out+1]
+    Wald = try (βs' * (LinearAlgebra.Symmetric(Vs) \ βs))::Float64
+           catch; (βs' * LinearAlgebra.pinv(Vs) * βs)::Float64 end
+    Wald_p = 1 - Distributions.cdf(Distributions.Chisq(k_out), Wald)
+
+    if !quiet
+        println()
+        Printf.@printf("%-48s%-13s = %10s\n",
+                       "Heckman selection model -- two-step estimates",
+                       "Number of obs", _c13_commafmt(n_full))
+        Printf.@printf("%-48s    %-13s = %10s\n",
+                       "(regression model with sample selection)", "Selected",
+                       _c13_commafmt(n_pos))
+        Printf.@printf("%-48s    %-13s = %10s\n", "", "Nonselected", _c13_commafmt(n_zero))
+        println()
+        Printf.@printf("%48s%-13s = %10.2f\n", "", "Wald chi2($(k_out))", Wald)
+        Printf.@printf("%48s%-13s = %10.4f\n", "", "Prob > chi2", Wald_p)
+        println()
+        println("-"^78)
+        Printf.@printf("%12s | Coefficient  Std. err.      z    P>|z|     [%g%% conf. interval]\n",
+                       "", 100*level)
+        println("-"^13, "+", "-"^64)
+        Printf.@printf("%-12s |\n", depvar_y)
+        for i in 1:k_out
+            Printf.@printf("%12s | %s  %s  %s   %s    %s  %s\n",
+                           string(out_xs[i]), _c13_g9(α̂_disp[i]; w=10), _c13_g9(se_disp[i]; w=9),
+                           Printf.@sprintf("%7.2f", z_disp[i]), Printf.@sprintf("%.3f", p_disp[i]),
+                           _c13_g9(lo_disp[i]; w=9), _c13_g9(hi_disp[i]; w=10))
+        end
+        Printf.@printf("%12s | %s  %s  %s   %s    %s  %s\n",
+                       "_cons", _c13_g9(α̂_disp[end]; w=10), _c13_g9(se_disp[end]; w=9),
+                       Printf.@sprintf("%7.2f", z_disp[end]), Printf.@sprintf("%.3f", p_disp[end]),
+                       _c13_g9(lo_disp[end]; w=9), _c13_g9(hi_disp[end]; w=10))
+        println("-"^13, "+", "-"^64)
+        Printf.@printf("%-12s |\n", depvar_d)
+        for i in eachindex(γ̂_disp)
+            Printf.@printf("%12s | %s  %s  %s   %s    %s  %s\n",
+                           cn_pr_ord[i], _c13_g9(γ̂_disp[i]; w=10), _c13_g9(se_pr_disp[i]; w=9),
+                           Printf.@sprintf("%7.2f", z_pr_disp[i]), Printf.@sprintf("%.3f", p_pr_disp[i]),
+                           _c13_g9(lo_pr_disp[i]; w=9), _c13_g9(hi_pr_disp[i]; w=10))
+        end
+        println("-"^13, "+", "-"^64)
+        Printf.@printf("%-12s |\n", "/mills")
+        Printf.@printf("%12s | %s  %s  %s   %s    %s  %s\n",
+                       "lambda", _c13_g9(α_lam; w=10), _c13_g9(se_lam; w=9),
+                       Printf.@sprintf("%7.2f", z_lam), Printf.@sprintf("%.3f", p_lam),
+                       _c13_g9(lo_lam; w=9), _c13_g9(hi_lam; w=10))
+        println("-"^13, "+", "-"^64)
+        Printf.@printf("%12s | %10s\n", "rho",   Printf.@sprintf("%9.5f", ρ̂))
+        Printf.@printf("%12s | %10s\n", "sigma", Printf.@sprintf("%9.7f", σ̂))
+        println("-"^78)
+    end
+    return (; β_outcome = α̂_disp, se_outcome = se_disp, V_outcome = V_α,
+              β_selection = γ̂, se_selection = se_pr, β_lambda = α_lam,
+              se_lambda = se_lam, σ = σ̂, ρ = ρ̂, n = n_full, n_pos, n_zero,
+              outcome_coefnames = vcat(string.(out_xs), ["_cons"]),
+              selection_coefnames = cn_pr_ord)
+end
+```
+
+# 13 Bootstrap methods
+
+## 13.1 Introduction
+
+## 13.2 Bootstrap methods
+
+### 13.2.1 Bootstrap estimate of standard error
+
+### 13.2.2 Bootstrap methods
+
+### 13.2.3 Asymptotic refinement
+
+### 13.2.4 Use the bootstrap with caution
+
+## 13.3 Bootstrap pairs
+
+### 13.3.1 Bootstrap-pairs method
+
+### 13.3.2 Bootstrap option
+
+### 13.3.3 Bootstrap standard-errors example
+
+```{julia}
+#=
+* Sample is only the first 50 observations of chapter 10 data
+use musr/mus10data.dta
+quietly keep if year02 == 1
+quietly drop if _n > 50
+quietly keep docvis chronic age
+quietly save musr/bootdata, replace
+=#
+# Use first 50 observations of year02 = 1 from the doctor visits data
+df_boot = _c13_bootdata()
+@printf("Bootstrap dataset: %d obs\n", DataFrames.nrow(df_boot))
+```
+
+```{julia}
+#=
+* Option vce(bootstrap) to compute bootstrap standard errors
+poisson docvis chronic, vce(boot, reps(400) seed(10101) nodots)
+=#
+# Stata `poisson docvis chronic, vce(boot, reps(400) seed(10101) nodots)`.
+# `poisson_boot_stata` does the full Stata-format output: Number of obs /
+# Replications / Wald chi2 / Log likelihood / Pseudo R² header, "Observed
+# coefficient | Bootstrap std. err. | … | Normal-based CI" subheaders,
+# slopes-first / _cons-last row order.
+df_boot = _c13_bootdata()
+poisson_boot_stata(df_boot, GLM.@formula(docvis ~ chronic); B = 400, seed = 10101);
+```
+
+### 13.3.4 How many bootstraps?
+
+```{julia}
+#=
+* Bootstrap standard errors for different reps and seeds
+quietly poisson docvis chronic, vce(boot, reps(50) seed(10101))
+estimates store boot50
+quietly poisson docvis chronic, vce(boot, reps(50) seed(20202))
+estimates store boot50diff
+quietly poisson docvis chronic, vce(boot, reps(2000) seed(10101))
+estimates store boot2000
+quietly poisson docvis chronic, vce(robust)
+estimates store robust
+estimates table boot50 boot50diff boot2000 robust, b(%8.5f) se(%8.5f)
+=#
+# How sensitive are the bootstrap SEs to (a) the number of replications and
+# (b) the RNG seed? Compare four estimators of Var(β̂) for the same β̂:
+#   boot50      — B = 50,   seed = 10101
+#   boot50diff  — B = 50,   seed = 20202
+#   boot2000    — B = 2000, seed = 10101
+#   robust      — sandwich (no bootstrap)
+df_boot = _c13_bootdata()
+
+print("running boot50 (B=50, seed=10101)... ")
+b50    = poisson_boot_stata(df_boot, GLM.@formula(docvis ~ chronic);
+                            B = 50,   seed = 10101, quiet = true);  println("done")
+print("running boot50diff (B=50, seed=20202)... ")
+b50d   = poisson_boot_stata(df_boot, GLM.@formula(docvis ~ chronic);
+                            B = 50,   seed = 20202, quiet = true);  println("done")
+print("running boot2000 (B=2000, seed=10101)... ")
+b2000  = poisson_boot_stata(df_boot, GLM.@formula(docvis ~ chronic);
+                            B = 2000, seed = 10101, quiet = true);  println("done")
+rob    = stata_poisson(df_boot, GLM.@formula(docvis ~ chronic);
+                       vce = :robust, quiet = true)
+
+β_disp  = b50.β   # GLM order: [_cons, chronic]
+se_b50  = b50.se;  se_b50d = b50d.se;  se_b2k = b2000.se
+se_rob  = sqrt.(LinearAlgebra.diag(rob.V_glm))
+i_chr = 2; i_con = 1   # GLM puts (Intercept) first
+
+println("\n", "-"^65)
+Printf.@printf("%12s | %10s %10s %10s %10s\n",
+               "Variable", "boot50", "boot50diff", "boot2000", "robust")
+println("-"^13, "+", "-"^51)
+for (lab, idx) in [("chronic", i_chr), ("_cons", i_con)]
+    Printf.@printf("%12s | %10.5f %10.5f %10.5f %10.5f\n",
+                   lab, β_disp[idx], β_disp[idx], β_disp[idx], β_disp[idx])
+    Printf.@printf("%12s | (%8.5f) (%8.5f) (%8.5f) (%8.5f)\n",
+                   "", se_b50[idx], se_b50d[idx], se_b2k[idx], se_rob[idx])
+end
+println("-"^65);
+```
+
+### 13.3.5 Clustered bootstraps
+
+```{julia}
+#=
+* Option vce(boot, cluster) to compute cluster-bootstrap standard errors
+poisson docvis chronic, vce(boot, cluster(age) reps(400) seed(10101) nodots)
+
+poisson docvis chronic, vce(cluster age)
+=#
+# (1) Cluster bootstrap: `poisson_boot_stata(... cluster_var = :age)` resamples
+#     the unique age groups (panel_bootstrap), refits Poisson on each, and
+#     prints "(Replications based on G clusters in age)".
+# (2) Analytical cluster-robust SE: `stata_poisson(... vce = :cluster,
+#     cluster_var = :age)` uses the CR1 sandwich and prints
+#     "(Std. err. adjusted for G clusters in age)".
+df_boot = _c13_bootdata()
+
+poisson_boot_stata(df_boot, GLM.@formula(docvis ~ chronic);
+                   B = 400, seed = 10101, cluster_var = :age)
+
+println()
+stata_poisson(df_boot, GLM.@formula(docvis ~ chronic);
+              vce = :cluster, cluster_var = :age);
+```
+
+### 13.3.6 Bootstrap confidence intervals
+
+### 13.3.7 Postestimation bootstrap functions
+
+### 13.3.8 Bootstrap CI example
+
+```{julia}
+# Stata: `poisson docvis chronic, vce(boot, reps(999) seed(10101) bca);
+# estat bootstrap, all` — all four bootstrap CI types side-by-side.
+# `poisson_boot_ci_stata` does the full pipeline: fit → B=999 obs bootstrap
+# reps → leave-one-out jackknife → Observed coef / Bias / Bootstrap SE +
+# four CI rows per coef labelled (N), (P), (BC), (BCa).
+df_boot = _c13_bootdata()
+
+bs_fit = poisson_boot_ci_stata(df_boot, GLM.@formula(docvis ~ chronic);
+                               B = 999, seed = 10101);
+```
+
+### 13.3.9 Bootstrap estimate of bias
+
+```{julia}
+#=
+* List the average of the bootstraps
+matrix list e(b_bs)
+=#
+# Stata's `e(b_bs)` is the mean of the bootstrap β-matrix across replicates,
+# stored as a 1×k row matrix with equation-prefixed column names. We
+# reproduce the format from the `bs_fit.β_boot` matrix (GLM order
+# [(Intercept), chronic]; Stata displays slopes first, then _cons).
+β_bs    = vec(Statistics.mean(bs_fit.β_boot, dims = 1))
+chronic = β_bs[2]; _cons = β_bs[1]
+strip0(s) = replace(s, r"^(-?)0\." => s"\1.")
+println()
+println("e(b_bs)[1,2]")
+println("       docvis:    docvis:")
+println("      chronic      _cons")
+@printf("y1  %9s  %9s\n",
+        strip0(Printf.@sprintf("%.8f", chronic)),
+        strip0(Printf.@sprintf("%.8f", _cons)))
+```
+
+## 13.4 Bootstrap with custom estimators
+
+### 13.4.1 The bootstrap framework
+
+### 13.4.2 Bootstrap of a parameter estimate
+
+```{julia}
+# Stata's `bootstrap, reps(400) seed(10101) nodots noheader: poisson docvis
+# chronic` runs the same Poisson + bootstrap pipeline as vce(boot, …), with
+# `noheader` suppressing the regression-header block.
+df_boot = _c13_bootdata()
+
+poisson_boot_stata(df_boot, GLM.@formula(docvis ~ chronic);
+                   B = 400, seed = 10101, noheader = true);
+```
+
+### 13.4.3 Bootstrap of a standard error
+
+```{julia}
+# `poisson_boot_b_se_stata` bootstraps both β and the OIM SEs in one pass.
+# Each resample refits Poisson, saves β̂ AND se(β̂), then prints Stata's
+# two-block table:  docvis block (bootstrap of β) and docvis_se block
+# (bootstrap of se(β)).
+df_boot = _c13_bootdata()
+
+poisson_boot_b_se_stata(df_boot, GLM.@formula(docvis ~ chronic);
+                        B = 400, seed = 10101);
+```
+
+### 13.4.4 Bootstrap of a user-written estimator
+
+```{julia}
+# Stata's `program poissrobust, eclass` just fits Poisson with vce(robust)
+# and stores e(b)/e(V). `stata_poisson(... vce = :robust)` returns a
+# NamedTuple with β, V, coefnames in Stata-display order (slopes first).
+df_boot = _c13_bootdata()
+
+# Step 1 — run the wrapper (full Stata-format table)
+fit_pr = stata_poisson(df_boot, GLM.@formula(docvis ~ chronic); vce = :robust)
+
+# Step 2 — `ereturn display`: just the coefficient table, capital
+# "Std. err." (no "Robust" subheader), with a "docvis" equation banner row.
+println("\n. ereturn display")
+β    = fit_pr.β; V = fit_pr.V; se = fit_pr.se
+crit = Distributions.quantile(Distributions.Normal(), 0.975)
+z_v  = β ./ se
+p_v  = 2 .* (1 .- Distributions.cdf.(Distributions.Normal(), abs.(z_v)))
+lo_v = β .- crit .* se; hi_v = β .+ crit .* se
+
+println("-"^78)
+println("             | Coefficient  Std. err.      z    P>|z|     [95% conf. interval]")
+println("-"^13, "+", "-"^64)
+Printf.@printf("%-12s |\n", string(GLM.@formula(docvis ~ chronic).lhs))
+for i in eachindex(β)
+    Printf.@printf("%12s | %s  %s  %s   %s    %s  %s\n",
+                   fit_pr.coefnames[i], _c13_g9(β[i]; w=10), _c13_g9(se[i]; w=9),
+                   Printf.@sprintf("%7.2f", z_v[i]), Printf.@sprintf("%.3f", p_v[i]),
+                   _c13_g9(lo_v[i]; w=9), _c13_g9(hi_v[i]; w=10))
+end
+println("-"^78)
+```
+
+### 13.4.5 Bootstrap of a two-step estimator
+
+```{julia}
+# Heckman two-step on the mus16 ambulatory-expenditure data:
+#   Stage 1: probit of dy = 1{y > 0} on xlist (selection)
+#   Stage 2: OLS of ln(y) on xlist + invmills, invmills = φ(x'γ̂)/Φ(x'γ̂)
+# `stata_probit` gives the Stata probit table; we build `invmills` from the
+# probit linear index, restrict to y > 0, run the outcome regression, then
+# print the `ereturn display` block (β only, no SEs).
+df16 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus16data.dta"))
+df16.y  = Float64.(df16.ambexp)
+df16.dy = Int.(df16.y .> 0)
+xs      = [:age, :female, :educ, :blhisp, :totchr, :ins]
+
+# Stage 1 — probit on rows with non-missing dy + xs
+df_pr = DataFrames.dropmissing(df16[:, vcat([:dy], xs)])
+fml_p = StatsModels.term(:dy) ~ sum(StatsModels.term.(xs))
+pr_fit = stata_probit(df_pr, fml_p)
+
+# Stage 2 — invmills on the same df_pr rows, then subset to y > 0.
+xb = GLM.modelmatrix(pr_fit.model) * pr_fit.β_glm
+df_pr.invmills = Distributions.pdf.(Distributions.Normal(), xb) ./
+                 Distributions.cdf.(Distributions.Normal(), xb)
+df_pr.y = df16[DataFrames.completecases(df16[:, vcat([:dy], xs)]), :y]
+df_pos = DataFrames.filter(r -> r.y > 0, df_pr)
+df_pos.lny = log.(df_pos.y)
+
+regress_stata(df_pos, :lny, vcat(xs, [:invmills]))
+
+# `ereturn display` — Stata posts only β (no V), so just the Coefficient col.
+m_out = FixedEffectModels.reg(df_pos,
+    GLM.term(:lny) ~ sum(GLM.term.(vcat(xs, [:invmills]))))
+β_out  = StatsBase.coef(m_out)
+cn_out = string.(StatsBase.coefnames(m_out))
+i_int  = findfirst(==("(Intercept)"), cn_out)
+slope  = setdiff(1:length(β_out), [i_int]); ord = vcat(slope, [i_int])
+labels = [cn_out[i] == "(Intercept)" ? "_cons" : cn_out[i] for i in ord]
+
+println("\n. ereturn display")
+println("-"^78)
+println("             | Coefficient")
+println("-"^13, "+", "-"^64)
+for (lab, i) in zip(labels, ord)
+    Printf.@printf("%12s | %s\n", lab, _c13_g9(β_out[i]; w=10))
+end
+println("-"^78)
+```
+
+```{julia}
+# Stata `heckman lny $xlist, select(dy = $xlist) twostep` — full Heckman
+# (1979) two-step with first-stage-corrected SEs, σ, ρ, λ block via
+# `heckman_twostep_stata`.
+df16 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus16data.dta"))
+df16.y  = Float64.(df16.ambexp)
+df16.dy = Int.(df16.y .> 0)
+df16.lny = Vector{Union{Missing, Float64}}(missing, DataFrames.nrow(df16))
+for i in 1:DataFrames.nrow(df16)
+    if Int(df16.dy[i]) == 1
+        df16.lny[i] = log(Float64(df16.y[i]))
+    end
+end
+
+xs      = [:age, :female, :educ, :blhisp, :totchr, :ins]
+fml_out = StatsModels.term(:lny) ~ sum(StatsModels.term.(xs))
+fml_sel = StatsModels.term(:dy)  ~ sum(StatsModels.term.(xs))
+
+heckman_twostep_stata(df16, fml_out, fml_sel; depvar_y = "lny", depvar_d = "dy");
+```
+
+### 13.4.6 Bootstrap Hausman test
+
+```{julia}
+#=
+* Bootstrap for Heckman two-step estimator using chapter 16 example
+bootstrap _b, reps(400) seed(10101) nodots nowarn: hecktwostep
+=#
+# Bootstrap of the full Heckman two-step pipeline. Stata's
+# `bootstrap _b: hecktwostep` resamples observations from the FULL
+# pre-stage-1 dataset, runs the entire pipeline on each resample, and saves
+# the OLS β. We mirror that with `obs_bootstrap` wrapping a closure.
+df16 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus16data.dta"))
+df16.y  = Float64.(df16.ambexp)
+df16.dy = Int.(df16.y .> 0)
+xs      = [:age, :female, :educ, :blhisp, :totchr, :ins]
+df_h    = DataFrames.dropmissing(df16[:, vcat([:y, :dy], xs)])
+fml_pr  = StatsModels.term(:dy)  ~ sum(StatsModels.term.(xs))
+fml_ols = StatsModels.term(:lny) ~ sum(StatsModels.term.(vcat(xs, [:invmills])))
+
+function _hecktwostep(d)
+    m_pr = GLM.glm(fml_pr, d, Distributions.Binomial(), GLM.ProbitLink())
+    xb   = GLM.modelmatrix(m_pr) * GLM.coef(m_pr)
+    d2   = DataFrames.copy(d)
+    d2.invmills = Distributions.pdf.(Distributions.Normal(), xb) ./
+                  Distributions.cdf.(Distributions.Normal(), xb)
+    keep = Bool[Int(dy) == 1 for dy in d2.dy]
+    d_pos = d2[keep, :]; d_pos.lny = log.(Float64.(d_pos.y))
+    return StatsBase.coef(FixedEffectModels.reg(d_pos, fml_ols))
+end
+
+β_hat  = _hecktwostep(df_h)
+n_full = DataFrames.nrow(df_h)
+
+print("running 400 reps... "); t0 = time()
+β_boot = obs_bootstrap(df_h; B = 400, seed = 10101, verbose = false) do d
+    _hecktwostep(d)
+end
+@printf("done in %.2fs\n", time() - t0)
+
+se_b = vec(Statistics.std(β_boot, dims = 1))
+crit = Distributions.quantile(Distributions.Normal(), 0.975)
+z    = β_hat ./ se_b
+p    = 2 .* (1 .- Distributions.cdf.(Distributions.Normal(), abs.(z)))
+lo   = β_hat .- crit .* se_b; hi = β_hat .+ crit .* se_b
+
+cn  = ["(Intercept)", "age", "female", "educ", "blhisp", "totchr", "ins", "invmills"]
+ord = vcat(2:length(cn), [1])
+
+println()
+Printf.@printf("%-59s%-13s = %5s\n",
+               "Bootstrap results", "Number of obs", _c13_commafmt(n_full))
+Printf.@printf("%59s%-13s = %5d\n", "", "Replications", 400)
+println()
+println("-"^78)
+println("             |   Observed   Bootstrap                         Normal-based")
+Printf.@printf("%12s | coefficient  std. err.      z    P>|z|     [95%% conf. interval]\n", "lny")
+println("-"^13, "+", "-"^64)
+for i in ord
+    label = cn[i] == "(Intercept)" ? "_cons" : cn[i]
+    Printf.@printf("%12s | %s  %s  %s   %s    %s  %s\n",
+                   label, _c13_g9(β_hat[i]; w=10), _c13_g9(se_b[i]; w=9),
+                   Printf.@sprintf("%7.2f", z[i]), Printf.@sprintf("%.3f", p[i]),
+                   _c13_g9(lo[i]; w=9), _c13_g9(hi[i]; w=10))
+end
+println("-"^78);
+```
+
+```{julia}
+#=
+* Program to return (b1-b2) for hausman test of endogeneity
+program hausmantest, eclass
+  version 11
+  tempname b bols biv
+  regress ldrugexp hi_empunion totchr age female blhisp linc, vce(robust)
+  matrix `bols' = e(b)
+  ivregress 2sls ldrugexp (hi_empunion = ssiratio) totchr age female blhisp linc, vce(robust)
+  matrix `biv' = e(b)
+  matrix `b' = `bols' - `biv'
+  ereturn post `b'
+end
+=#
+# Stata `program hausmantest` runs OLS and 2SLS on the same regressors
+# (hi_empunion instrumented by ssiratio), then posts β̂_OLS − β̂_IV as the
+# Hausman endogeneity statistic. We compose `regress_stata` and
+# `stata_ivregress_2sls`, then print the difference in `ereturn display` style.
+df6 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus06data.dta"))
+xs6 = [:totchr, :age, :female, :blhisp, :linc]
+
+# Stage 1 — OLS with vce(robust); hi_empunion first to match Stata's order.
+regress_stata(df6, :ldrugexp, vcat([:hi_empunion], xs6);
+              vcov = Vcov.robust(), noheader = true)
+
+# Stage 2 — 2SLS with vce(robust); first = false suppresses the first-stage table.
+stata_ivregress_2sls(df6, :ldrugexp, :hi_empunion => :ssiratio, xs6;
+                     robust = true, first = false)
+
+# Compute β̂_OLS − β̂_IV (refit directly to grab coefficients).
+df6c = DataFrames.dropmissing(df6,
+    [:ldrugexp, :hi_empunion, :ssiratio, :totchr, :age, :female, :blhisp, :linc])
+m_ols = FixedEffectModels.reg(df6c,
+    GLM.@formula(ldrugexp ~ hi_empunion + totchr + age + female + blhisp + linc),
+    Vcov.robust())
+m_iv  = FixedEffectModels.reg(df6c,
+    GLM.@formula(ldrugexp ~ totchr + age + female + blhisp + linc +
+                 (hi_empunion ~ ssiratio)), Vcov.robust())
+
+cn_ols = string.(StatsBase.coefnames(m_ols)); cn_iv = string.(StatsBase.coefnames(m_iv))
+β_ols  = StatsBase.coef(m_ols); β_iv = StatsBase.coef(m_iv)
+labels = ["hi_empunion", "totchr", "age", "female", "blhisp", "linc", "_cons"]
+function _lookup(cn, lab)
+    target = lab == "_cons" ? "(Intercept)" : lab
+    findfirst(==(target), cn)
+end
+diff_v = [β_ols[_lookup(cn_ols, l)] - β_iv[_lookup(cn_iv, l)] for l in labels]
+
+println("\n. ereturn display")
+println("-"^78)
+println("             | Coefficient")
+println("-"^13, "+", "-"^64)
+for (lab, d) in zip(labels, diff_v)
+    Printf.@printf("%12s | %s\n", lab, _c13_g9(d; w=10))
+end
+println("-"^78);
+```
+
+```{julia}
+#=
+* Bootstrap estimates for Hausman test using chapter 6 example
+use musr/mus06data.dta, clear
+bootstrap _b, reps(400) seed(10101) nodots nowarn: hausmantest
+=#
+# Bootstrap of the Hausman test β̂_OLS − β̂_IV. Each resample refits both OLS
+# and 2SLS, computes the difference vector, and stores it. `obs_bootstrap`
+# resamples; `bootstrap_b_table_stata` prints the Stata-format table.
+df6 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus06data.dta"))
+df6c = DataFrames.dropmissing(df6,
+    [:ldrugexp, :hi_empunion, :ssiratio, :totchr, :age, :female, :blhisp, :linc])
+
+labels = ["hi_empunion", "totchr", "age", "female", "blhisp", "linc", "_cons"]
+fml_ols = GLM.@formula(ldrugexp ~ hi_empunion + totchr + age + female + blhisp + linc)
+fml_iv  = GLM.@formula(ldrugexp ~ totchr + age + female + blhisp + linc +
+                       (hi_empunion ~ ssiratio))
+
+function _hausmantest(d)
+    m_ols = FixedEffectModels.reg(d, fml_ols)
+    m_iv  = FixedEffectModels.reg(d, fml_iv)
+    cn_ols = string.(StatsBase.coefnames(m_ols)); cn_iv = string.(StatsBase.coefnames(m_iv))
+    β_ols  = StatsBase.coef(m_ols); β_iv = StatsBase.coef(m_iv)
+    function _lookup(cn, lab)
+        target = lab == "_cons" ? "(Intercept)" : lab
+        findfirst(==(target), cn)
+    end
+    return [β_ols[_lookup(cn_ols, l)] - β_iv[_lookup(cn_iv, l)] for l in labels]
+end
+
+β_obs = _hausmantest(df6c); n_obs = DataFrames.nrow(df6c)
+
+print("running 400 reps... "); t0 = time()
+β_boot = obs_bootstrap(df6c; B = 400, seed = 10101, verbose = false) do d
+    _hausmantest(d)
+end
+@printf("done in %.2fs\n", time() - t0)
+
+bootstrap_b_table_stata(β_obs, β_boot, labels; n_obs = n_obs, depvar = "");
+```
+
+```{julia}
+#=
+* Perform Hausman test on the potentially endogenous regressor
+test hi_empunion
+=#
+# Stata's `test hi_empunion` (after `bootstrap _b: hausmantest`) tests
+# H0: β̂_OLS_hi_empunion − β̂_IV_hi_empunion = 0 using the bootstrap
+# variance. The exported `stata_test` only accepts a model object, so we use
+# the small inline `_c13_test_boot` that takes β/V/coefnames directly.
+V_boot = Statistics.cov(β_boot)            # k×k bootstrap variance matrix
+_c13_test_boot("hi_empunion"; β = β_obs, V = V_boot, coefnames = labels, depvar = "");
+```
+
+```{julia}
+# Joint Hausman test on all 6 regressors. Pass a vector of variable names;
+# `_c13_test_boot` builds R (6×7), computes the joint chi²(6), and prints the
+# equation list + chi² block in Stata's format.
+_c13_test_boot(["hi_empunion", "totchr", "age", "female", "blhisp", "linc"];
+               β = β_obs, V = V_boot, coefnames = labels, depvar = "");
+```
+
+### 13.4.7 Bootstrap SE of the coefficient of variation
+
+```{julia}
+# Bootstrap of a SCALAR statistic — the coefficient of variation
+# `coeffvar = std(docvis) / mean(docvis)` — on resamples of the bootdata.
+# `obs_bootstrap` resamples; the closure returns a 1-element vector;
+# `bootstrap_b_table_stata` formats the output with the "Command:" / named
+# expression sub-header.
+df_bd = _c13_bootdata()
+n_bd  = DataFrames.nrow(df_bd)
+
+function _coeffvar(d)
+    y = Float64.(d.docvis)
+    return [Statistics.std(y) / Statistics.mean(y)]
+end
+
+cv_obs = _coeffvar(df_bd)
+print("running 400 reps... "); t0 = time()
+cv_boot = obs_bootstrap(df_bd; B = 400, seed = 10101, verbose = false) do d
+    _coeffvar(d)
+end
+@printf("done in %.2fs\n", time() - t0)
+
+# Persist the 400 replicates (Stata's `saving(musr/coeffofvar, replace)`).
+mkpath("musr")
+CSV.write("musr/coeffofvar.csv", DataFrames.DataFrame(coeffvar = vec(cv_boot)))
+
+bootstrap_b_table_stata(cv_obs, cv_boot, ["coeffvar"];
+                        n_obs = n_bd, depvar = "",
+                        command = "summarize docvis",
+                        expressions = ["coeffvar" => "r(sd)/r(mean)"]);
+```
+
+## 13.5 Bootstraps with asymptotic refinement
+
+### 13.5.1 Percentile-t method
+
+### 13.5.2 Percentile-t Wald test
+
+```{julia}
+#=
+* Percentile-t for a single coefficient: Bootstrap the t statistic
+use musr/bootdata, clear
+quietly poisson docvis chronic, vce(robust)
+local theta = _b[chronic]
+local setheta = _se[chronic]
+bootstrap tstar=((_b[chronic]-`theta')/_se[chronic]), seed(10101)        ///
+  reps(999) nodots saving(musr/percentilet, replace): poisson docvis chronic, ///
+  vce(robust)
+=#
+# Percentile-t bootstrap for β_chronic via `bootstrap_tstar_stata`:
+#   1. Fit Poisson, vce(robust) → (θ, σ_θ)
+#   2. Bootstrap t* = (β̂*_chronic − θ)/SE*_chronic over B = 999 resamples
+#   3. Persist replicates to musr/percentilet.csv
+#   4. Print the Stata `bootstrap … : poisson` table
+df_boot = _c13_bootdata()
+
+ptres = bootstrap_tstar_stata(df_boot, GLM.@formula(docvis ~ chronic), :chronic;
+                              B = 999, seed = 10101, vce = :robust,
+                              command = "poisson docvis chronic, vce(robust)",
+                              save_csv = "musr/percentilet.csv")
+β_orig  = ptres.β_orig; se_orig = ptres.se_orig; tstars = ptres.tstars
+```
+
+```{julia}
+#=
+* Percentile-t p-value for symmetric two-sided Wald test of H0: theta = 0
+use musr/percentilet, clear
+quietly count if abs(`theta'/`setheta') < abs(tstar)
+display "p-value = " r(N)/_N
+=#
+# Percentile-t two-sided Wald test of H0: θ = 0 from the bootstrap t*
+# distribution:  p = (1/B)·Σ 1{|t*_b| > |t_obs|},  t_obs = β_orig/se_orig.
+percentilet_pvalue_stata(tstars, β_orig, se_orig);
+```
+
+### 13.5.3 Percentile-t CI
+
+```{julia}
+#=
+* Percentile-t critical values and confidence interval
+_pctile tstar, p(2.5,97.5)
+scalar lb = `theta' + r(r1)*`setheta'
+scalar ub = `theta' + r(r2)*`setheta'
+display "2.5 and 97.5 percentiles of t* distn: " r(r1) ", " r(r2) _n ///
+    "95 percent percentile-t confidence interval is  (" lb ","  ub ")"
+=#
+# Percentile-t 95% CI from the t* distribution and (β_orig, se_orig):
+#   [β_orig + q(α/2)·se_orig,  β_orig + q(1-α/2)·se_orig].
+percentilet_ci_stata(tstars, β_orig, se_orig);
+```
+
+```{julia}
+#=
+use musr/bootdata, clear
+nbreg docvis chronic
+=#
+# `stata_nbreg` (ch12) fits NB2 jointly in (β, lnα), prints the Stata header
+# (LR chi2 / Pseudo R²), the coefficient table with /lnalpha and alpha rows,
+# and the LR test of α=0 reported as chibar2(01).
+nb_chronic = stata_nbreg(df_boot, GLM.@formula(docvis ~ chronic));
+```
+
+## 13.6 Bootstrap pairs via custom resampling
+
+### 13.6.1 Manual resampling helper
+
+### 13.6.2 Custom bootstrap loop
+
+```{julia}
+#=
+* Program to do one bootstrap replication
+program onebootrep, rclass
+  version 11
+  drop _all
+  use musr/bootdata
+  bsample
+  poisson docvis chronic, vce(robust)
+  return scalar tstar = (_b[chronic]-$theta)/_se[chronic]
+end
+
+* Now do 999 bootstrap replications
+use musr/bootdata, clear
+quietly poisson docvis chronic, vce(robust)
+global theta = _b[chronic]
+global setheta = _se[chronic]
+simulate tstar=r(tstar), seed(10101) reps(999) nodots  ///
+  saving(musr/percentilet2, replace): onebootrep
+
+* Analyze the results to get the p-value
+use musr/percentilet2, clear
+quietly count if abs($theta/$setheta) < abs(tstar)
+display "p-value = " r(N)/_N
+=#
+# Same percentile-t pipeline as §13.5.2 but via Stata's `simulate`.
+# `bootstrap_tstar_stata` returns the t* distribution;
+# `percentilet_pvalue_stata` computes the symmetric two-sided p-value.
+ptres2 = bootstrap_tstar_stata(df_boot, GLM.@formula(docvis ~ chronic), :chronic;
+                               B = 999, seed = 10101, vce = :robust,
+                               command = "poisson docvis chronic, vce(robust)",
+                               save_csv = "musr/percentilet2.csv", quiet = true)
+percentilet_pvalue_stata(ptres2.tstars, ptres2.β_orig, ptres2.se_orig);
+```
+
+### 13.6.3 Bootstrap Monte Carlo exercise
+
+```{julia}
+#=
+* Program to do one bootstrap of B replications
+program mybootstrap, rclass
+  use musr/bootdata, clear
+  quietly poisson docvis chronic, vce(robust)
+  global theta = _b[chronic]
+  global setheta = _se[chronic]
+  simulate tstar=r(tstar), reps(999) nodots  ///
+    saving(musr/percentilet2, replace): onebootrep
+  use musr/percentilet2, clear
+  quietly count if abs($theta/$setheta) < abs(tstar)
+  return scalar pvalue =  r(N)/_N
+end
+
+* Check the program by running once
+set seed 10101
+mybootstrap
+display r(pvalue)
+=#
+# `mybootstrap_stata` wraps the full §13.6.2 percentile-t pipeline into one
+# call returning the symmetric two-sided Wald p-value. Re-runnable with
+# different seeds. Mirrors `set seed 10101; mybootstrap; display r(pvalue)`.
+mb_one = mybootstrap_stata(df_boot, GLM.@formula(docvis ~ chronic), :chronic;
+                            B = 999, seed = 10101, vce = :robust);
+```
+
+## 13.7 Alternative resampling schemes
+
+### 13.7.1 Bootstrap pairs
+
+```{julia}
+#=
+* Program to resample using bootstrap pairs
+program bootpairs
+  version 11
+  drop _all
+  use musr/bootdata
+  bsample
+  poisson docvis chronic
+end
+
+* Check the program by running once
+bootpairs
+=#
+# `stata_bsample` is Stata's `bsample` — observation-level resample with
+# replacement. `stata_poisson` with vce=:oim matches the default
+# `poisson docvis chronic` (OIM SEs). RNG note: Julia's MersenneTwister
+# differs from Stata's MT64, so the resampled rows and coefficients will not
+# match Stata's exact "one run" output.
+poisson_out = stata_poisson(stata_bsample(df_boot; seed = 10101),
+                            GLM.@formula(docvis ~ chronic); vce = :oim);
+```
+
+```{julia}
+#=
+* Bootstrap pairs for the parameters
+simulate _b, seed(10101) reps(400) nodots: bootpairs
+summarize
+=#
+# `simulate _b, reps(400): bootpairs` runs the bootstrap-pair program 400
+# times saving the coefficient vector each time, then `summarize` reports
+# univariate stats for _b_chronic / _b_cons. `obs_bootstrap` does the loop;
+# `stata_summarize` prints the summary table. RNG note: MersenneTwister ≠
+# Stata's MT64, so summary statistics differ; means should be near the
+# full-sample β.
+β_pairs_mat = obs_bootstrap(df_boot; B = 400, seed = 10101, verbose = false) do d
+    fit = stata_poisson(d, GLM.@formula(docvis ~ chronic); vce = :oim, quiet = true)
+    return [fit.β_glm[findfirst(==("chronic"),     fit.coefnames_glm)],
+            fit.β_glm[findfirst(==("(Intercept)"), fit.coefnames_glm)]]
+end
+
+df_pairs = DataFrames.DataFrame(:_b_chronic => β_pairs_mat[:, 1],
+                                :_b_cons    => β_pairs_mat[:, 2])
+stata_summarize(df_pairs);
+```
+
+```{julia}
+#=
+// Following not included in book
+* Compare to bootstrap command
+use musr/bootdata, clear
+bootstrap, reps(100) seed(10101): poisson docvis chronic
+=#
+# Stata's `bootstrap _b: poisson docvis chronic` — observation-level
+# bootstrap of the Poisson coefficients. `obs_bootstrap` does the loop
+# returning [chronic, _cons] per replicate; `bootstrap_b_table_stata` prints
+# the Stata header and Normal-based CI table. Numbers differ due to the RNG.
+fit0_b = stata_poisson(df_boot, GLM.@formula(docvis ~ chronic); vce = :oim, quiet = true)
+i_chr  = findfirst(==("chronic"),     fit0_b.coefnames_glm)
+i_cons = findfirst(==("(Intercept)"), fit0_b.coefnames_glm)
+
+β_boot100 = obs_bootstrap(df_boot; B = 100, seed = 10101, verbose = false) do d
+    fit = stata_poisson(d, GLM.@formula(docvis ~ chronic); vce = :oim, quiet = true)
+    return [fit.β_glm[findfirst(==("chronic"),     fit.coefnames_glm)],
+            fit.β_glm[findfirst(==("(Intercept)"), fit.coefnames_glm)]]
+end
+
+bootstrap_b_table_stata([fit0_b.β_glm[i_chr], fit0_b.β_glm[i_cons]],
+                        β_boot100, ["chronic", "_cons"];
+                        n_obs = DataFrames.nrow(df_boot), depvar = "docvis",
+                        command = "poisson docvis chronic");
+```
+
+### 13.7.2 Parametric bootstrap
+
+```{julia}
+#=
+* Estimate the model with original actual data and save estimates
+use musr/bootdata
+nbreg docvis chronic
+predict muhat
+global alpha = e(alpha)
+=#
+# Original-data NB fit and saved quantities (μ̂, α) for the parametric
+# bootstrap. `stata_nbreg` (ch12) fits NB2 jointly in (β, lnα).
+nb_boot = stata_nbreg(df_boot, GLM.@formula(docvis ~ chronic))
+
+# Stata `predict muhat` after nbreg — conditional mean μ̂_i = exp(x_iᵀβ̂).
+muhat = exp.(GLM.modelmatrix(nb_boot.model) * nb_boot.β_glm)
+alpha = nb_boot.α
+@printf("alpha = %.6f   mean(muhat) = %.6f\n", alpha, Statistics.mean(muhat))
+```
+
+```{julia}
+#=
+* Program for parametric bootstrap generating from negative binomial
+program bootparametric, eclass
+  version 11
+  capture drop nu dvhat
+  generate nu = rgamma(1/$alpha,$alpha)
+  generate dvhat = rpoisson(muhat*nu)
+  nbreg dvhat chronic
+end
+
+// Following not included in book
+* Check the program by running once
+set seed 10101
+bootparametric
+=#
+# `bootparametric_nb_stata` draws ν ~ Gamma(1/α, α), y* ~ Poisson(μ̂·ν),
+# overwrites `dvhat`, and refits NB2 of dvhat on chronic — in one call.
+# Mirrors `set seed 10101; bootparametric`.
+nb_par_one = bootparametric_nb_stata(df_boot, muhat, alpha,
+                                      GLM.@formula(dvhat ~ chronic); seed = 10101);
+```
+
+```{julia}
+#=
+* Parametric bootstrap for the parameters
+simulate _b, seed(10101) reps(400) nodots: bootparametric
+summarize
+=#
+# Runs the parametric NB2 program 400 times saving the coefficient vector
+# each rep, then summarizes. Seed the global RNG once and let
+# `bootparametric_nb_stata` advance it; collect (β_chronic, β_cons, lnα).
+# RNG note: MersenneTwister ≠ Stata's MT64, so summary stats differ.
+Random.seed!(10101)
+β_par_mat = reduce(hcat, [
+    let f = bootparametric_nb_stata(df_boot, muhat, alpha,
+                                     GLM.@formula(dvhat ~ chronic); quiet = true)
+        [f.β_glm[findfirst(==("chronic"),     f.coefnames_glm)],
+         f.β_glm[findfirst(==("(Intercept)"), f.coefnames_glm)],
+         f.lnα]
+    end
+    for _ in 1:400])'
+
+df_par = DataFrames.DataFrame(:_b_chronic  => β_par_mat[:, 1],
+                              :_b_cons     => β_par_mat[:, 2],
+                              :_b_lnalpha  => β_par_mat[:, 3])
+stata_summarize(df_par);
+```
+
+### 13.7.3 Residual bootstrap
+
+```{julia}
+#=
+* Program for residual bootstrap for OLS with iid errors
+use musr/bootdata, clear
+quietly regress docvis chronic
+predict uhat, resid
+keep uhat
+save musr/residuals, replace
+program bootresidual
+  version 11
+  drop _all
+  use musr/residuals
+  bsample
+  merge using musr/bootdata
+  regress docvis chronic
+  predict xb
+  generate ystar =  xb + uhat
+  regress ystar chronic
+end
+
+// Following not included in book
+* Check the program by running once
+bootresidual
+=#
+# `bootresidual_ols_stata` mirrors Stata's `bootresidual`: fits OLS on
+# bootdata (table 1), resamples residuals, builds y* = X β̂ + u*, refits y*
+# on chronic (table 2), and prints both `regress` tables plus the
+# `(option xb assumed; fitted values)` notice. RNG note: the original-data
+# table matches Stata exactly; the bootstrap table differs (MersenneTwister
+# ≠ MT64).
+bootresidual_ols_stata(df_boot, GLM.@formula(docvis ~ chronic); seed = 10101);
+```
+
+```{julia}
+#=
+* Residual bootstrap for the parameters
+simulate _b, seed(10101) reps(400) nodots: bootresidual
+summarize
+=#
+# Runs the residual-bootstrap program 400 times saving β̂ each rep, then
+# summarizes. Seed the global RNG once and let `bootresidual_ols_stata`
+# advance it. RNG note: summary stats won't match Stata exactly.
+Random.seed!(10101)
+β_res_mat = reduce(hcat, [
+    let res = bootresidual_ols_stata(df_boot, GLM.@formula(docvis ~ chronic); quiet = true)
+        cn = string.(StatsBase.coefnames(res.boot)); β = FixedEffectModels.coef(res.boot)
+        [β[findfirst(==("chronic"),     cn)], β[findfirst(==("(Intercept)"), cn)]]
+    end
+    for _ in 1:400])'
+
+df_res = DataFrames.DataFrame(:_b_chronic => β_res_mat[:, 1],
+                              :_b_cons    => β_res_mat[:, 2])
+stata_summarize(df_res);
+```
+
+### 13.7.4 Wild bootstrap
+
+```{julia}
+#=
+* Wild bootstrap for OLS with iid errors
+use musr/bootdata, clear
+program bootwild
+  version 11
+  drop _all
+  use musr/bootdata
+  regress docvis chronic
+  predict xb
+  predict u, resid
+  gen ustar = -0.618034*u
+  replace ustar = 1.618034*u if runiform() > 0.723607
+  gen ystar =  xb + ustar
+  regress ystar chronic
+end
+
+// Following not included in book
+* Check the program by running once
+bootwild
+=#
+# `bootwild_ols_stata` mirrors Stata's `bootwild`: fits OLS on bootdata
+# (table 1), draws Mammen-weighted η_i ∈ {-0.618, 1.618} (P(b) ≈ 0.276),
+# forms u* = η·û and y* = X β̂ + u*, refits OLS on y* (table 2). Prints both
+# `regress` tables, the fitted-values notice, and the `(<n> real changes
+# made)` line. RNG note: table 1 matches Stata; table 2 differs.
+bootwild_ols_stata(df_boot, GLM.@formula(docvis ~ chronic); seed = 10101);
+```
+
+```{julia}
+#=
+* Wild bootstrap for the parameters
+simulate _b, seed(10101) reps(400) nodots: bootwild
+summarize
+=#
+# Runs the wild-bootstrap program 400 times saving β̂ each rep, then
+# summarizes. Seed the global RNG once and let `bootwild_ols_stata` advance
+# it. RNG note: summary stats won't match Stata exactly.
+Random.seed!(10101)
+β_wild_mat = reduce(hcat, [
+    let res = bootwild_ols_stata(df_boot, GLM.@formula(docvis ~ chronic); quiet = true)
+        cn = string.(StatsBase.coefnames(res.boot)); β = FixedEffectModels.coef(res.boot)
+        [β[findfirst(==("chronic"),     cn)], β[findfirst(==("(Intercept)"), cn)]]
+    end
+    for _ in 1:400])'
+
+df_wild = DataFrames.DataFrame(:_b_chronic => β_wild_mat[:, 1],
+                               :_b_cons    => β_wild_mat[:, 2])
+stata_summarize(df_wild);
+```
+
+### 13.7.5 Subsampling
+
+## 13.8 The jackknife
+
+### 13.8.1 Jackknife method
+
+### 13.8.2 Jackknife in Julia
+
+```{julia}
+#=
+* Jackknife estimate of standard errors
+use musr/bootdata, replace
+poisson docvis chronic, vce(jackknife, mse nodots)
+=#
+# `poisson_jackknife_stata` computes Stata's `vce(jackknife, mse)` SE:
+# refits Poisson on each leave-one-out subset, then
+#   V_jack = (n-1)/n · Σ (β̂_(i) − β̂)(β̂_(i) − β̂)ᵀ
+# (centered on β̂ because of `mse`). Inference uses t with df = n − 1; the
+# omnibus stat is F(k, n − 1).
+poisson_jackknife_stata(df_boot, GLM.@formula(docvis ~ chronic));
+```
+
+```{julia}
+#=
+// Following not included in book
+jacknife, mse nodots: poisson docvis chronic
+=#
+# Same as the previous chunk: the prefix-style `jackknife, mse: poisson` is
+# equivalent to `poisson ..., vce(jackknife, mse)`.
+poisson_jackknife_stata(df_boot, GLM.@formula(docvis ~ chronic));
+```
+
+## 13.9 Stata resources
+
+## 13.10 Exercises

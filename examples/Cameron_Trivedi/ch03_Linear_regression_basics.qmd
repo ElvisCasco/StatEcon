@@ -1,0 +1,1224 @@
+---
+title: "Microeconometrics Using Stata"
+Authors:
+- Colin Cameron
+- Pravin Trivedi
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+[Microeconometrics with R](https://ycroissant.github.io/micsr_book/)
+
+[UCLA](https://stats.oarc.ucla.edu/stata/modules/)
+
+[Github](https://github.com/thousandoaks?tab=repositories)
+
+# Julia setup
+
+```{julia}
+using StatEcon
+const DATA = first(filter(d -> isdir(d) && (isfile(joinpath(d, "auto.dta")) || isdir(joinpath(d, "musr"))), ["../../data", "data", raw"C:/EC/GitHub/StatEcon/data"]))
+using DataFrames, ReadStatTables, CSV, Downloads
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using GLM, FixedEffectModels, StatsModels
+using CategoricalArrays
+using KernelDensity, Loess
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using RegressionTables
+import Distributions
+using Distributions: cdf, quantile, Normal, TDist, FDist, Chisq
+
+# Small helper: unwrap ReadStatTables.LabeledValue.
+_rawval(x) = hasproperty(x, :value) ? x.value : x
+```
+
+# 3 Linear regression basics
+
+## 3.1 Introduction
+
+## 3.2 Data and data summary
+
+### 3.2.1 Data description
+
+### 3.2.2 Variable description
+
+```{julia}
+#=
+set more off
+version 11
+clear all
+set linesize 82
+set scheme s1mono  /* Graphics scheme */
+=#
+# Load medical expenditure dataset
+df3 = DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus03data.dta"))
+select(df3, [:totexp, :ltotexp, :posexp, :suppins, :phylim, :actlim,
+             :totchr, :age, :female, :income]) |> DataFrames.describe
+```
+
+### 3.2.3 Summary statistics
+
+```{julia}
+#=
+* Summary statistics for medical expenditure dataset
+summarize totexp ltotexp posexp suppins phylim actlim totchr age female income
+=#
+# Summary statistics for medical expenditure dataset
+DataFrames.describe(df3[:, [:totexp, :ltotexp, :posexp, :suppins, :phylim, :actlim,
+                 :totchr, :age, :female, :income]],
+         :mean, :std, :min, :max, :nmissing)
+```
+
+```{julia}
+#=
+* Tabulate variable
+tabulate income if income <= 0
+=#
+# Tabulate income <= 0
+DataFrames.combine(DataFrames.groupby(filter(r -> r.income <= 0, df3), :income), nrow => :freq)
+```
+
+### 3.2.4 More-detailed summary statistics
+
+```{julia}
+#=
+* Detailed summary statistics of a single variable
+summarize totexp, detail
+=#
+# Detailed summary statistics: percentiles, skewness, kurtosis
+let x = collect(skipmissing(df3.totexp))
+    @printf("N        = %d\n",   length(x))
+    @printf("Mean     = %.4f\n", mean(x))
+    @printf("Std.Dev. = %.4f\n", std(x))
+    @printf("Min      = %.4f\n", minimum(x))
+    @printf("p1       = %.4f\n", quantile(x, 0.01))
+    @printf("p5       = %.4f\n", quantile(x, 0.05))
+    @printf("p25      = %.4f\n", quantile(x, 0.25))
+    @printf("p50      = %.4f\n", quantile(x, 0.50))
+    @printf("p75      = %.4f\n", quantile(x, 0.75))
+    @printf("p95      = %.4f\n", quantile(x, 0.95))
+    @printf("p99      = %.4f\n", quantile(x, 0.99))
+    @printf("Max      = %.4f\n", maximum(x))
+    @printf("Skewness = %.4f\n", skewness(x))
+    @printf("Kurtosis = %.4f\n", kurtosis(x) + 3)  # Stata uses non-excess
+end
+```
+
+```{julia}
+stata_summarize(df3, :totexp)
+```
+
+### 3.2.5 Tables for data
+
+```{julia}
+#=
+* Two-way table of frequencies
+table female totchr
+=#
+# Two-way table of frequencies (female × totchr)
+DataFrames.unstack(combine(groupby(df3, [:female, :totchr]), nrow => :freq),
+        :female, :totchr, :freq)
+```
+
+```{julia}
+#=
+* Two-way table with row and column percentages and Pearson chi-squared
+tabulate female suppins, row col chi2
+=#
+# Two-way table with row/col percentages + chi-squared
+ct = DataFrames.unstack(combine(groupby(df3, [:female, :suppins]), nrow => :freq),
+             :female, :suppins, :freq)
+println("Frequencies:")
+println(ct)
+
+# Chi-squared test of independence (manual — avoids Missing-typed matrix)
+M_raw = Matrix(ct[:, Not(:female)])
+M = Int.(coalesce.(M_raw, 0))           # drop Missing, cast to Int
+n  = sum(M)
+row_t = sum(M, dims = 2)
+col_t = sum(M, dims = 1)
+expected = (row_t * col_t) ./ n
+χ² = sum((M .- expected).^2 ./ expected)
+df_χ = (size(M, 1) - 1) * (size(M, 2) - 1)
+@printf("Pearson chi-squared(%d) = %.4f, p = %.4f\n",
+        df_χ, χ², 1 - Distributions.cdf(Distributions.Chisq(df_χ), χ²))
+```
+
+```{julia}
+#=
+* Three-way table of frequencies
+table female totchr suppins
+=#
+# Three-way table of frequencies
+DataFrames.combine(DataFrames.groupby(df3, [:female, :totchr, :suppins]), nrow => :freq)
+```
+
+```{julia}
+#=
+* One-way table of summary statistics
+table female, statistic(count totchr) statistic(mean totchr) statistic(sd totchr) statistic(p50 totchr)
+=#
+# One-way table of summary statistics by female
+DataFrames.combine(DataFrames.groupby(df3, :female),
+    :totchr => length    => :count,
+    :totchr => mean      => :mean,
+    :totchr => std       => :sd,
+    :totchr => median    => :p50)
+```
+
+```{julia}
+#=
+* Two-way table of summary statistics
+table female suppins, statistic(count totchr) statistic(mean totchr)
+=#
+# Two-way table of summary statistics
+DataFrames.combine(DataFrames.groupby(df3, [:female, :suppins]),
+    :totchr => length => :count,
+    :totchr => mean   => :mean)
+```
+
+```{julia}
+#=
+* Summary statistics obtained using command tabstat
+tabstat totexp ltotexp, stat (count mean p50 sd skew kurt) col(stat)
+=#
+# Summary statistics: count, mean, p50, sd, skewness, kurtosis
+function tabstat(x)
+    xc = collect(skipmissing(x))
+    return (count = length(xc),
+            mean  = Statistics.mean(xc),
+            p50   = Statistics.median(xc),
+            sd    = Statistics.std(xc),
+            skew  = StatsBase.skewness(xc),
+            kurt  = StatsBase.kurtosis(xc) + 3)
+end
+let s1 = tabstat(df3.totexp), s2 = tabstat(df3.ltotexp)
+    DataFrames.DataFrame(
+        var   = ["totexp", "ltotexp"],
+        count = [s1.count, s2.count],
+        mean  = [s1.mean,  s2.mean],
+        p50   = [s1.p50,   s2.p50],
+        sd    = [s1.sd,    s2.sd],
+        skew  = [s1.skew,  s2.skew],
+        kurt  = [s1.kurt,  s2.kurt],
+    )
+end
+```
+
+### 3.2.6 Statistical tests
+
+```{julia}
+#=
+ttest totexp, by(suppins)
+=#
+# ttest totexp, by(suppins)        -- Stata default: equal-variance (pooled)
+stata_ttest(df3, :totexp, :suppins);
+```
+
+```{julia}
+# ttest totexp, by(suppins) unequal -- Welch's t-test (unequal variances)
+stata_ttest(df3, :totexp, :suppins; unequal=true);
+```
+
+### 3.2.7 Data plots
+
+```{julia}
+#=
+* Kernel density plots with adjustment for highly skewed data
+kdensity totexp if posexp==1, generate (kx1 kd1) n(500) 
+graph twoway (line kd1 kx1) if kx1 < 40000, name(levels)
+kdensity ltotexp if posexp==1, generate (kx2 kd2) n(500) 
+graph twoway (line kd2 kx2) if kx2 < ln(40000), name(logs)
+graph combine levels logs, iscale(1.0)
+graph export musr/mus03fig1.eps, replace
+=#
+# Kernel density plots: levels and logs (for positive expenditures)
+pos = df3[df3.posexp .== 1, :]
+kd1 = kde(collect(skipmissing(pos.totexp)))
+kd2 = kde(collect(skipmissing(pos.ltotexp)))
+
+fig = Figure(size = (900, 400))
+ax1 = Axis(fig[1, 1], title = "Density of totexp",  xlabel = "totexp")
+ax2 = Axis(fig[1, 2], title = "Density of ltotexp", xlabel = "ln(totexp)")
+mask1 = kd1.x .< 40000
+mask2 = kd2.x .< log(40000)
+lines!(ax1, kd1.x[mask1], kd1.density[mask1])
+lines!(ax2, kd2.x[mask2], kd2.density[mask2])
+fig
+```
+
+## 3.3 Regression in levels and logs
+
+### 3.3.1 Basic regression theory
+
+### 3.3.2 OLS regression and matrix algebra
+
+### 3.3.3 Properties of the OLS estimator
+
+### 3.3.4 Heteroskedasticity-robust standard errors
+
+### 3.3.5 Cluster-robust standard errors
+
+### 3.3.6 Regression in logs
+
+## 3.4 Basic regression analysis
+
+### 3.4.1 Correlations
+
+```{julia}
+#=
+* Pairwise correlations for dependent variable and regressor variables
+correlate ltotexp suppins phylim actlim totchr age female income
+=#
+# Pairwise correlations
+cols = [:ltotexp, :suppins, :phylim, :actlim, :totchr, :age, :female, :income]
+df3_clean = dropmissing(df3[:, cols])
+cor(Matrix(df3_clean))
+```
+
+### 3.4.2 The regress command
+
+```{julia}
+#=
+* OLS regression with heteroskedasticity-robust standard errors
+regress ltotexp suppins phylim actlim totchr age female income, vce(robust)
+=#
+# OLS with heteroskedasticity-robust SE
+reg1 = FixedEffectModels.reg(df3,
+    @formula(ltotexp ~ suppins + phylim + actlim + totchr + age + female + income),
+    Vcov.robust())
+```
+
+```{julia}
+#=
+* Display stored results and list available postestimation commands
+ereturn list
+help regress postestimation
+=#
+# Stored results
+println("R²        = ", StatsBase.r2(reg1))
+println("Adj R²    = ", StatsBase.adjr2(reg1))
+println("N         = ", StatsBase.nobs(reg1))
+println("dof_resid = ", StatsBase.dof_residual(reg1))
+println("RSS       = ", GLM.deviance(reg1))
+println("MSS       = ", StatsBase.mss(reg1))
+```
+
+### 3.4.3 Hypothesis tests
+
+```{julia}
+#=
+* Wald test of equality of coefficients
+quietly regress ltotexp suppins phylim actlim totchr age female ///
+  income, vce(robust)
+test phylim = actlim
+=#
+# Wald test of equality of coefficients: phylim = actlim
+β  = StatsBase.coef(reg1); V = StatsBase.vcov(reg1); cnames = StatsBase.coefnames(reg1)
+i_phylim = findfirst(==("phylim"), cnames)
+i_actlim = findfirst(==("actlim"), cnames)
+diff_est = β[i_phylim] - β[i_actlim]
+se_diff  = sqrt(V[i_phylim, i_phylim] + V[i_actlim, i_actlim] -
+                2*V[i_phylim, i_actlim])
+t_stat   = diff_est / se_diff
+@printf("phylim - actlim = %.6f  SE = %.6f  t = %.3f  p = %.4f\n",
+        diff_est, se_diff, t_stat,
+        2*(1 - cdf(Normal(), abs(t_stat))))
+```
+
+```{julia}
+#=
+*  Joint test of statistical significance of several variables
+test phylim actlim totchr
+=#
+# Joint test of statistical significance of several variables
+# test phylim actlim totchr
+stata_test(reg1, ["phylim", "actlim", "totchr"]);
+```
+
+```{julia}
+# Joint Wald test: phylim = actlim = totchr = 0
+idx = [findfirst(==(n), cnames) for n in ["phylim","actlim","totchr"]]
+βs  = β[idx]; Vs = V[idx, idx]
+W = try
+    βs' * LinearAlgebra.inv(Vs) * βs
+catch
+    NaN
+end
+@printf("Joint W = %.4f, df = %d, p = %.4f\n",
+        W, length(idx), 1 - cdf(Chisq(length(idx)), W))
+```
+
+```{julia}
+# Wald test of equality of coefficients: test phylim = actlim
+# regress ltotexp suppins phylim actlim totchr age female income, vce(robust)
+m_wald = FixedEffectModels.reg(df3,
+    @formula(ltotexp ~ suppins + phylim + actlim + totchr + age + female + income),
+    Vcov.robust())
+β_w  = StatsBase.coef(m_wald)
+V_w  = StatsBase.vcov(m_wald)
+cn_w = StatsBase.coefnames(m_wald)
+i_phy = findfirst(==("phylim"), cn_w)
+i_act = findfirst(==("actlim"), cn_w)
+# H0: phylim - actlim = 0  →  R = [0 ... 1 ... -1 ... 0], Rβ = β_phy - β_act
+diff   = β_w[i_phy] - β_w[i_act]
+var_diff = V_w[i_phy, i_phy] + V_w[i_act, i_act] - 2 * V_w[i_phy, i_act]
+F_val  = diff^2 / var_diff
+df_r   = m_wald.nobs - length(β_w)   # residual df
+p_val  = 1 - cdf(FDist(1, df_r), F_val)
+@printf(" ( 1)  phylim - actlim = 0\n\n")
+@printf("       F(  1, %5d) = %7.2f\n", df_r, F_val)
+@printf("            Prob > F = %8.4f\n", p_val)
+```
+
+```{julia}
+# Joint test of statistical significance of several variables
+# test phylim actlim totchr
+stata_test(reg1, ["phylim", "actlim", "totchr"]);
+```
+
+### 3.4.4 Tables of output from several regressions
+
+```{julia}
+#=
+* Store and then tabulate results from multiple regressions
+quietly regress ltotexp suppins phylim actlim totchr age female income, vce(robust)
+estimates store REG1
+quietly regress ltotexp suppins phylim actlim totchr age female educyr, vce(robust)
+estimates store REG2
+estimates table REG1 REG2, b(%9.4f) se stats(N r2 F ll) keep(suppins income educyr)
+=#
+# Store and tabulate results from multiple regressions
+REG1 = FixedEffectModels.reg(df3, @formula(ltotexp ~ suppins + phylim + actlim + totchr + age + female + income), Vcov.robust())
+REG2 = FixedEffectModels.reg(df3, @formula(ltotexp ~ suppins + phylim + actlim + totchr + age + female + educyr), Vcov.robust())
+# estimates table REG1 REG2, b(%9.4f) se stats(N r2 F ll) keep(suppins income educyr)
+RegressionTables.regtable(
+    REG1, REG2;
+    keep = ["suppins", "income", "educyr"],
+    regression_statistics = [
+        RegressionTables.Nobs,
+        RegressionTables.R2,
+        RegressionTables.FStat,
+        RegressionTables.LogLikelihood])
+```
+
+### 3.4.5 Even better tables of regression output
+
+```{julia}
+#=
+* Tabulate results using user-written command esttab to produce cleaner output
+esttab REG1 REG2, b(%10.4f) se scalars(N r2 F ll) mtitles ///
+  keep(suppins income educyr) title("Model comparison of REG1-REG2")
+=#
+# esttab REG1 REG2, b(%10.4f) se scalars(N r2 F ll) mtitles
+#   keep(suppins income educyr) title("Model comparison of REG1-REG2")
+RegressionTables.regtable(
+    REG1, REG2;
+    keep = ["suppins", "income", "educyr"],
+    labels = Dict(
+        "suppins" => "Supplement ins.",
+        "income"  => "Income",
+        "educyr"  => "Education years"),
+    regression_statistics = [
+        RegressionTables.Nobs,
+        RegressionTables.R2,
+        RegressionTables.FStat,
+        RegressionTables.LogLikelihood])
+```
+
+```{julia}
+#=
+* Write tabulated results to a file in latex table format
+quietly esttab REG1 REG2 using musr/mus03table.tex, replace b(%10.4f) se scalars(N r2 F ll) ///
+   mtitles keep(suppins age income educyr _cons) title("Model comparison of REG1-REG2")
+=#
+# Write tabulated results to a LaTeX file (esttab ... using musr/mus03table.tex)
+RegressionTables.regtable(
+    REG1, REG2;
+    render = RegressionTables.LatexTable(),
+    file = "$(DATA)/musr/mus03table.tex",
+    keep = ["suppins", "age", "income", "educyr", "(Intercept)"],
+    regression_statistics = [
+        RegressionTables.Nobs,
+        RegressionTables.R2,
+        RegressionTables.FStat,
+        RegressionTables.LogLikelihood])
+println("LaTeX table written to musr/mus03table.tex")
+```
+
+```{julia}
+#=
+* Add a user-calculated statistic to the table
+estimates drop REG1 REG2
+quietly regress ltotexp suppins phylim actlim totchr age female ///
+  income, vce(robust)
+estadd scalar pvalue = Ftail(e(df_r),e(df_m),e(F))
+estimates store REG1
+quietly regress ltotexp suppins phylim actlim totchr age female ///
+  educyr, vce(robust)
+estadd scalar pvalue = Ftail(e(df_r),e(df_m),e(F))
+estimates store REG2
+esttab REG1 REG2, b(%10.4f) se scalars(F pvalue) mtitles keep(suppins) 
+=#
+# Add a user-calculated statistic (p-value of F-test) to the table
+# estadd scalar pvalue = Ftail(e(df_r), e(df_m), e(F))
+# Re-fit REG1 and REG2 with robust SEs and compute F p-values
+REG1b = FixedEffectModels.reg(df3,
+    @formula(ltotexp ~ suppins + phylim + actlim + totchr + age + female + income),
+    Vcov.robust())
+REG2b = FixedEffectModels.reg(df3,
+    @formula(ltotexp ~ suppins + phylim + actlim + totchr + age + female + educyr),
+    Vcov.robust())
+for (label, m) in [("REG1", REG1b), ("REG2", REG2b)]
+    fval = m.F
+    df_m = length(coef(m)) - 1       # numerator df = number of regressors (excl. intercept)
+    df_r = m.nobs - length(coef(m))   # denominator df
+    pval = 1 - cdf(Distributions.FDist(df_m, df_r), fval)
+    @printf("%s:  F = %.4f,  df_m = %d,  df_r = %d,  p-value = %.6f\n",
+            label, fval, df_m, df_r, pval)
+end
+# Display comparison keeping only suppins, with F and p-value
+RegressionTables.regtable(
+    REG1b, REG2b;
+    keep = ["suppins"],
+    regression_statistics = [
+        RegressionTables.FStat,
+        RegressionTables.FStatPValue])
+```
+
+```{julia}
+#=
+* Factor variables for sets of indicator variables and interactions
+regress ltotexp suppins phylim actlim totchr age female c.income ///
+ i.famsze c.income#i.famsze, vce(robust) noheader allbaselevels
+=#
+# Factor variables / interactions: include famsze as categorical and interact with income
+df3.famsze_cat = categorical(df3.famsze)
+reg_fact = FixedEffectModels.reg(df3,
+    @formula(ltotexp ~ suppins + phylim + actlim + totchr + age + female +
+                       income + famsze_cat + income & famsze_cat),
+    Vcov.robust())
+```
+
+```{julia}
+#=
+* Test joint significance of sets of indicator variables and interactions
+testparm i.famsz c.income#i.famsze
+=#
+# Joint test of significance of famsze indicators + interactions
+nm = StatsBase.coefnames(reg_fact)
+idx_test = findall(n -> occursin("famsze_cat", n), nm)
+βt = StatsBase.coef(reg_fact)[idx_test]
+Vt = StatsBase.vcov(reg_fact)[idx_test, idx_test]
+W = try
+    βt' * LinearAlgebra.inv(Vt) * βt
+catch
+    NaN
+end
+@printf("W = %.4f, df = %d, p = %.4f\n", W, length(idx_test),
+        1 - cdf(Chisq(length(idx_test)), W))
+```
+
+```{julia}
+#=
+* Compute the average marginal effect in model with interactions
+quietly regress totexp suppins phylim actlim totchr age female c.income ///
+ i.famsze c.income#i.famsze, vce(robust) noheader allbaselevels
+margins, dydx(income)
+=#
+# testparm i.famsze c.income#i.famsze
+# Joint robust Wald F-test. Build the design matrix manually to avoid
+# collinearity issues from formula-based dummy expansion.
+df3_tp = dropmissing(df3, [:ltotexp, :suppins, :phylim, :actlim, :totchr,
+                            :age, :female, :income, :famsze_cat])
+
+y_tp = Float64.(df3_tp.ltotexp)
+# Base regressors (always included)
+X_base = hcat(ones(nrow(df3_tp)),
+              Float64.(df3_tp.suppins), Float64.(df3_tp.phylim),
+              Float64.(df3_tp.actlim), Float64.(df3_tp.totchr),
+              Float64.(df3_tp.age),    Float64.(df3_tp.female),
+              Float64.(df3_tp.income))
+cn_base = ["_cons","suppins","phylim","actlim","totchr","age","female","income"]
+
+# Famsze dummies + income interactions (base level = 1, dropped)
+fam_vals = [_rawval(v) for v in df3_tp.famsze_cat]
+levs = sort(unique(fam_vals))
+base_lev = levs[1]
+test_levs = levs[levs .!= base_lev]
+
+X_fam = zeros(nrow(df3_tp), 0)
+cn_fam = String[]
+# Dummies
+for lv in test_levs
+    X_fam = hcat(X_fam, Float64.(fam_vals .== lv))
+    push!(cn_fam, "$(Int(lv)).famsze")
+end
+# Interactions income × famsze dummy
+inc = Float64.(df3_tp.income)
+for lv in test_levs
+    col = Float64.(fam_vals .== lv) .* inc
+    # Skip if the column is all zeros or has < 2 nonzero values (not estimable)
+    if sum(col .!= 0) >= 2
+        X_fam = hcat(X_fam, col)
+        push!(cn_fam, "$(Int(lv)).famsze#c.income")
+    end
+end
+
+X_full = hcat(X_base, X_fam)
+cn_full = vcat(cn_base, cn_fam)
+n_tp = size(X_full, 1); k_tp = size(X_full, 2)
+
+# OLS
+β_tp = X_full \ y_tp
+u_tp = y_tp - X_full * β_tp
+
+# HC1 robust sandwich
+XtXinv = LinearAlgebra.inv(X_full' * X_full)
+meat   = X_full' * LinearAlgebra.Diagonal(u_tp.^2) * X_full
+V_hc1  = XtXinv * meat * XtXinv * (n_tp / (n_tp - k_tp))
+
+# Test indices: all famsze-related columns
+idx_fam_test = (length(cn_base)+1):k_tp
+q    = length(idx_fam_test)
+βtp  = β_tp[idx_fam_test]
+Vtp  = V_hc1[idx_fam_test, idx_fam_test]
+df_r = n_tp - k_tp
+
+F_tp = (βtp' * LinearAlgebra.inv(Vtp) * βtp) / q
+p_tp = 1 - cdf(FDist(q, df_r), F_tp)
+@printf("testparm i.famsze c.income#i.famsze\n")
+for (j, i) in enumerate(idx_fam_test)
+    @printf(" (%2d)  %-35s = 0\n", j, cn_full[i])
+end
+@printf("\n       F(%d, %d) = %7.2f\n", q, df_r, F_tp)
+@printf("            Prob > F = %8.4f\n", p_tp)
+```
+
+```{julia}
+#=
+* Compute elasticity for a specified regressor
+quietly regress totexp suppins phylim actlim totchr age female income, vce(robust)
+margins, eyex(totchr) atmean
+=#
+# Average marginal effect of income (numerical derivative)
+function ame_income(model, df, varname; h = 0.01)
+    df_p = copy(df); df_p[!, varname] .= df_p[!, varname] .+ h
+    df_m = copy(df); df_m[!, varname] .= df_m[!, varname] .- h
+    mean(FixedEffectModels.predict(model, df_p) .- FixedEffectModels.predict(model, df_m)) / (2h)
+end
+m_lin = FixedEffectModels.reg(df3, @formula(totexp ~ suppins + phylim + actlim + totchr +
+                                   age + female + income), Vcov.robust(); save = :all)
+@printf("AME of income = %.4f\n", ame_income(m_lin, df3, :income))
+```
+
+```{julia}
+# regress totexp suppins phylim actlim totchr age female c.income ///
+#         i.famsze c.income#i.famsze, vce(robust)
+# margins, dydx(income)
+#
+# With interactions, ∂E[y|X]/∂income = β_income + β_{income×famsze=k_i}
+# (the second term is 0 at the base level). AME = mean across the sample.
+m_int = FixedEffectModels.reg(df3,
+    @formula(totexp ~ suppins + phylim + actlim + totchr + age + female +
+                      income + famsze_cat + income & famsze_cat),
+    Vcov.robust())
+m_int
+stata_margins(m_int, df3, :income; kind=:dydx);
+```
+
+```{julia}
+# Elasticity of totexp w.r.t. totchr at means: (∂y/∂x)·(x̄/ȳ)
+β_totchr = StatsBase.coef(m_lin)[findfirst(==("totchr"), StatsBase.coefnames(m_lin))]
+ela = β_totchr * mean(skipmissing(df3.totchr)) / mean(skipmissing(df3.totexp))
+@printf("Elasticity at means = %.4f\n", ela)
+```
+
+```{julia}
+# regress totexp suppins phylim actlim totchr age female income, vce(robust)
+# margins, eyex(totchr) atmean
+stata_margins(m_lin, df3, :totchr; kind=:eyex);
+```
+
+## 3.5 Specification analysis
+
+### 3.5.1 Specification tests and model diagnostics
+
+### 3.5.2 Residual diagnostic plots
+
+```{julia}
+#=
+* Plot of residuals against fitted values
+quietly regress ltotexp suppins phylim actlim totchr age female income, ///
+  vce(robust)
+rvfplot
+graph export musr/mus03fig2.eps, replace
+=#
+# Residuals vs fitted values plot
+m_diag = FixedEffectModels.reg(df3, @formula(ltotexp ~ suppins + phylim + actlim + totchr +
+                                     age + female + income),
+             Vcov.robust(); save = :residuals)
+df3_diag = dropmissing(df3[:, [:totexp, :ltotexp, :suppins, :phylim, :actlim, :totchr, :age, :female, :income]])
+yhat = FixedEffectModels.predict(m_diag, df3_diag)
+uhat = df3_diag.ltotexp .- yhat
+
+fig2 = Figure(size = (700, 500))
+ax = Axis(fig2[1, 1], xlabel = "Fitted values", ylabel = "Residuals",
+          title = "Residuals vs Fitted")
+scatter!(ax, yhat, uhat, markersize = 3)
+hlines!(ax, [0], color = :red)
+fig2
+```
+
+```{julia}
+#=
+* Details on the outlier residuals
+predict uhat, residual
+predict yhat, xb
+list totexp ltotexp yhat uhat if uhat < -5, clean
+=#
+# Outlier residuals (uhat < -5)
+df3_diag.yhat = yhat
+df3_diag.uhat = uhat
+outliers = filter(r -> r.uhat < -5, df3_diag)
+first(outliers, 10)
+```
+
+### 3.5.3 Influential observations
+
+```{julia}
+#=
+* Compute dfits that combines outliers and leverage
+quietly regress ltotexp suppins phylim actlim totchr age female income
+predict dfits, dfits
+scalar threshold = 2*sqrt((e(df_m)+1)/e(N))
+display "dfits threshold = "  %6.3f threshold
+tabstat dfits, stat (min p1 p5 p95 p99 max) format(%9.3f) col(stat)
+=#
+# DFITS-like influence measure (manual via leverage and residuals)
+# DFITS_i = t_i * sqrt(h_i / (1 - h_i))
+y = df3_diag.ltotexp
+X = hcat(ones(nrow(df3_diag)),
+         df3_diag.suppins, df3_diag.phylim, df3_diag.actlim,
+         df3_diag.totchr, df3_diag.age, df3_diag.female, df3_diag.income)
+H = try
+    X * LinearAlgebra.inv(X'X) * X'
+catch
+    # Use pseudoinverse fallback when X'X is singular.
+    X * LinearAlgebra.pinv(X'X) * X'
+end
+h = diag(H)
+σ² = sum(uhat.^2) / (length(y) - size(X, 2))
+t_resid = uhat ./ sqrt.(σ² .* (1 .- h))
+dfits = t_resid .* sqrt.(h ./ (1 .- h))
+
+threshold = 2 * sqrt((size(X, 2)) / nrow(df3_diag))
+@printf("DFITS threshold = %.3f\n", threshold)
+@printf("min=%.3f  p1=%.3f  p99=%.3f  max=%.3f\n",
+        minimum(dfits), quantile(dfits, 0.01),
+        quantile(dfits, 0.99), maximum(dfits))
+```
+
+```{julia}
+#=
+list dfits totexp ltotexp yhat uhat if abs(dfits) > 2*threshold & e(sample), clean
+=#
+# list dfits totexp ltotexp yhat uhat if abs(dfits) > 2*threshold & e(sample)
+influential = findall(abs.(dfits) .> 2 * threshold)
+if isempty(influential)
+    println("No observations exceed 2×threshold = $(round(2*threshold, digits=3))")
+else
+    listing = DataFrame(
+        obs     = influential,
+        dfits   = dfits[influential],
+        totexp  = df3_diag.totexp[influential],
+        ltotexp = df3_diag.ltotexp[influential],
+        yhat    = yhat[influential],
+        uhat    = uhat[influential])
+    sort!(listing, :dfits, by=abs, rev=true)
+    listing
+end
+```
+
+### 3.5.4 Specification tests
+
+#### Test of omitted variables
+
+#### Test of the Box-Cox model
+
+```{julia}
+#=
+* Boxcox model with lhs variable transformed
+boxcox totexp suppins phylim actlim totchr age female income if totexp>0, nolog
+=#
+# boxcox totexp suppins phylim actlim totchr age female income if totexp>0, nolog
+stata_boxcox(df3, :totexp, [:suppins, :phylim, :actlim, :totchr, :age, :female, :income];
+           condition = r -> r.totexp > 0)
+```
+
+
+#### Test of the functional form of the conditional mean
+
+```{julia}
+#=
+* Variable augmentation test of conditional mean using estat ovtest
+quietly regress ltotexp suppins phylim actlim totchr age female ///
+  income, vce(robust)
+estat ovtest
+=#
+# Ramsey RESET test: regress y on X plus powers of fitted values
+yhat_diag = FixedEffectModels.predict(m_diag, df3_diag)
+df3_diag.yhat2 = yhat_diag.^2
+df3_diag.yhat3 = yhat_diag.^3
+df3_diag.yhat4 = yhat_diag.^4
+m_reset = FixedEffectModels.reg(df3_diag,
+    @formula(ltotexp ~ suppins + phylim + actlim + totchr + age + female +
+                       income + yhat2 + yhat3 + yhat4))
+nm = StatsBase.coefnames(m_reset)
+idx_p = findall(n -> n in ("yhat2","yhat3","yhat4"), nm)
+βp = StatsBase.coef(m_reset)[idx_p]; Vp = StatsBase.vcov(m_reset)[idx_p, idx_p]
+F = try
+    (βp' * LinearAlgebra.inv(Vp) * βp) / 3
+catch
+    NaN
+end
+@printf("RESET F(3, %d) = %.3f, p = %.4f\n",
+        dof_residual(m_reset), F, 1 - cdf(FDist(3, dof_residual(m_reset)), F))
+```
+
+```{julia}
+#=
+* Link test of functional form of conditional mean 
+quietly regress ltotexp suppins phylim actlim totchr age female ///
+  income, vce(robust)
+linktest
+=#
+# Link test: regress y on yhat and yhat^2
+df3_diag.yhat_lt = yhat_diag
+m_link = FixedEffectModels.reg(df3_diag, @formula(ltotexp ~ yhat_lt + yhat2))
+println(m_link)
+```
+
+#### Heteroskedasticity test
+
+```{julia}
+#=
+* Heteroskedasticity tests using estat hettest and option iid
+quietly regress ltotexp suppins phylim actlim totchr age female income
+estat hettest, iid
+=#
+# Breusch–Pagan test: regress squared residuals on regressors
+df3_diag.uhat2 = uhat.^2
+m_bp = FixedEffectModels.reg(df3_diag, @formula(uhat2 ~ suppins + phylim + actlim + totchr +
+                                       age + female + income))
+LM = nrow(df3_diag) * StatsBase.r2(m_bp)
+@printf("Breusch–Pagan LM = %.3f, df = 7, p = %.4f\n",
+        LM, 1 - cdf(Chisq(7), LM))
+```
+
+
+```{julia}
+#=
+estat hettest suppins phylim actlim totchr age female income, iid
+=#
+# estat hettest, iid
+# Breusch-Pagan/Cook-Weisberg test assuming i.i.d. errors, against fitted values
+m_het = FixedEffectModels.reg(df3, @formula(ltotexp ~ suppins + phylim + actlim + totchr +
+                                   age + female + income))
+estat_hettest(m_het, df3; iid=true)
+```
+
+
+```{julia}
+# White test: regress squared residuals on X, X² and cross products
+# (manual; expand below for selected variables)
+m_white = FixedEffectModels.reg(df3_diag, @formula(uhat2 ~ suppins + phylim + actlim + totchr +
+                                          age + female + income))
+LM_w = nrow(df3_diag) * StatsBase.r2(m_white)
+@printf("White-style LM = %.3f, p = %.4f\n", LM_w, 1 - cdf(Chisq(7), LM_w))
+```
+
+#### Omnibus test
+
+```{julia}
+#=
+* Information matrix test
+quietly regress ltotexp suppins phylim actlim totchr age female income
+estat imtest
+=#
+# Information matrix test (IM test) — simplified manual version
+#println("IM test: see Cameron & Trivedi (2005); manual implementation needed.")
+```
+
+```{julia}
+# regress ltotexp suppins phylim actlim totchr age female income
+# estat imtest
+m_imt = FixedEffectModels.reg(df3,
+    @formula(ltotexp ~ suppins + phylim + actlim + totchr + age + female + income))
+estat_imtest(m_imt, df3);
+```
+
+### 3.5.5 Tests have power in more than one direction
+
+```{julia}
+# Simulation: y = exp(1 + 0.25x + 4x²) + u, fit y on x + x²
+Random.seed!(10101)
+N = 50
+x = rand(N)
+u = randn(N)
+y = exp.(1 .+ 0.25 .* x .+ 4 .* x.^2) .+ u
+xsq = x.^2
+df_sim = DataFrame(y = y, x = x, xsq = xsq)
+m_sim = FixedEffectModels.reg(df_sim, @formula(y ~ x + xsq))
+println(m_sim)
+```
+
+```{julia}
+# Heteroskedasticity test on the simulated model
+yhat_sim = FixedEffectModels.predict(m_sim, df_sim)
+uh_sim   = df_sim.y .- yhat_sim
+df_sim.uh2 = uh_sim.^2
+m_bp_sim = FixedEffectModels.reg(df_sim, @formula(uh2 ~ x + xsq))
+LMs = nrow(df_sim) * StatsBase.r2(m_bp_sim)
+@printf("BP LM = %.3f, p = %.4f\n", LMs, 1 - cdf(Chisq(2), LMs))
+```
+
+```{julia}
+# RESET on simulated model
+df_sim.yh2 = yhat_sim.^2
+df_sim.yh3 = yhat_sim.^3
+m_reset_sim = FixedEffectModels.reg(df_sim, @formula(y ~ x + xsq + yh2 + yh3))
+nm = StatsBase.coefnames(m_reset_sim)
+idx_p = findall(n -> n in ("yh2","yh3"), nm)
+βp = StatsBase.coef(m_reset_sim)[idx_p]; Vp = StatsBase.vcov(m_reset_sim)[idx_p, idx_p]
+F = try
+    (βp' * LinearAlgebra.inv(Vp) * βp) / 2
+catch
+    NaN
+end
+@printf("RESET F(2, %d) = %.3f, p = %.4f\n",
+        dof_residual(m_reset_sim), F,
+        1 - cdf(FDist(2, dof_residual(m_reset_sim)), F))
+```
+
+## 3.6 Prediction
+
+### 3.6.1 In-sample prediction
+
+```{julia}
+#=
+* Change dependent variable to level of positive medical expenditures
+use musr/mus03data.dta, clear
+keep if totexp > 0   
+regress totexp suppins phylim actlim totchr age female income, vce(robust)
+=#
+# Use only positive medical expenditures
+df3pos = filter(r -> r.totexp > 0, df3)
+m_levels = FixedEffectModels.reg(df3pos,
+    @formula(totexp ~ suppins + phylim + actlim + totchr + age + female + income),
+    Vcov.robust(); save = :all)
+println(m_levels)
+```
+
+```{julia}
+#=
+* Prediction in model linear in levels
+predict yhatlevels
+summarize totexp yhatlevels
+=#
+# Predicted values vs observed
+df3pos_clean = dropmissing(df3pos[:, [:totexp, :suppins, :phylim, :actlim,
+                                       :totchr, :age, :female, :income]])
+yhat_lev = FixedEffectModels.predict(m_levels, df3pos_clean)
+@printf("totexp:     mean = %.2f\n", mean(df3pos_clean.totexp))
+@printf("yhatlevels: mean = %.2f\n", mean(yhat_lev))
+```
+
+```{julia}
+#=
+* Compare median prediction and median actual value
+tabstat totexp yhatlevels, stat (count p50) col(stat)
+=#
+# Compare medians
+@printf("totexp     median = %.2f  (N=%d)\n",
+        median(df3pos_clean.totexp), nrow(df3pos_clean))
+@printf("yhatlevels median = %.2f\n", median(yhat_lev))
+```
+
+```{julia}
+#=
+* Compute standard errors of prediction and forecast with default VCE
+quietly regress totexp suppins phylim actlim totchr age female income
+predict yhatstdp, stdp
+predict yhatstdf, stdf
+summarize yhatstdp yhatstdf
+=#
+# Standard errors of prediction (stdp) and forecast (stdf)
+X = Matrix(hcat(ones(nrow(df3pos_clean)),
+                df3pos_clean.suppins, df3pos_clean.phylim,
+                df3pos_clean.actlim,  df3pos_clean.totchr,
+                df3pos_clean.age,     df3pos_clean.female,
+                df3pos_clean.income))
+V_β = StatsBase.vcov(m_levels)
+σ²  = sum((df3pos_clean.totexp .- yhat_lev).^2) / dof_residual(m_levels)
+stdp = [sqrt(x'V_β*x) for x in eachrow(X)]
+stdf = sqrt.(stdp.^2 .+ σ²)
+@printf("stdp: mean = %.4f\n", mean(stdp))
+@printf("stdf: mean = %.4f\n", mean(stdf))
+```
+
+
+```{julia}
+# Compute standard errors of prediction and forecast with default VCE
+# regress totexp suppins phylim actlim totchr age female income
+# predict yhatstdp, stdp
+# predict yhatstdf, stdf
+# summarize yhatstdp yhatstdf
+xvars_pred = [:suppins, :phylim, :actlim, :totchr, :age, :female, :income]
+df3_pred = dropmissing(df3[:, vcat([:totexp], xvars_pred)])
+# Unwrap any LabeledValue types and convert to Float64
+for c in vcat([:totexp], xvars_pred)
+    df3_pred[!, c] = Float64.([_rawval(v) for v in df3_pred[!, c]])
+end
+@printf("N = %d\n", nrow(df3_pred))
+
+m_pred = GLM.lm(@formula(totexp ~ suppins + phylim + actlim + totchr + age + female + income),
+                df3_pred)
+Xm_pred = GLM.modelmatrix(m_pred)
+n_pred  = nrow(df3_pred)
+k_pred  = size(Xm_pred, 2)
+yhat_p  = GLM.predict(m_pred)
+e_pred  = Float64.(df3_pred.totexp) .- yhat_p
+sig2_ols = sum(e_pred.^2) / (n_pred - k_pred)         # σ̂² = RSS/(n-k)
+XtXinv  = LinearAlgebra.inv(Xm_pred' * Xm_pred)       # (X'X)⁻¹
+
+# stdp = SE of fitted value = σ̂ · sqrt(xᵢ'(X'X)⁻¹xᵢ)
+# stdf = SE of forecast     = sqrt(σ̂² + σ̂² · xᵢ'(X'X)⁻¹xᵢ) = σ̂ · sqrt(1 + xᵢ'(X'X)⁻¹xᵢ)
+yhatstdp = [sqrt(sig2_ols * dot(x, XtXinv * x)) for x in eachrow(Xm_pred)]
+yhatstdf = [sqrt(sig2_ols * (1.0 + dot(x, XtXinv * x))) for x in eachrow(Xm_pred)]
+
+@printf("Root MSE = %.4f\n", sqrt(sig2_ols))
+println("    Variable |        Obs        Mean    Std. dev.       Min        Max")
+println("-------------+---------------------------------------------------------")
+@printf("    yhatstdp | %10d  %10.1f  %10.4f  %10.4f  %10.3f\n",
+        n_pred, mean(yhatstdp), std(yhatstdp), minimum(yhatstdp), maximum(yhatstdp))
+@printf("    yhatstdf | %10d  %10.2f  %10.5f  %10.2f  %10.1f\n",
+        n_pred, mean(yhatstdf), std(yhatstdf), minimum(yhatstdf), maximum(yhatstdf))
+```
+
+
+### 3.6.2 Marginal effects
+
+```{julia}
+#=
+* Compute elasticity for a specified regressor
+quietly regress totexp suppins phylim actlim totchr age female income, vce (robust)
+=#
+# In a linear model, ME of regressor j = β_j; elasticity at means = β_j*x̄/ȳ
+β_totchr = StatsBase.coef(m_levels)[findfirst(==("totchr"), StatsBase.coefnames(m_levels))]
+@printf("Elasticity of totexp w.r.t. totchr (at means) = %.4f\n",
+        β_totchr * mean(df3pos_clean.totchr) / mean(df3pos_clean.totexp))
+```
+
+### 3.6.3 Prediction in logs: The retransformation problem
+
+```{julia}
+#=
+* Prediction in levels from a logarithmic model
+quietly regress ltotexp suppins phylim actlim totchr age female income
+quietly predict lyhat
+generate yhatwrong = exp(lyhat)
+generate yhatnormal = exp(lyhat)*exp(0.5*e(rmse)^2)
+quietly predict uhat, residual
+generate expuhat = exp(uhat)
+quietly summarize expuhat
+generate yhatduan = r(mean)*exp(lyhat) 
+summarize totexp yhatwrong yhatnormal yhatduan yhatlevels
+=#
+# Log model: prediction in levels using normal vs Duan smearing
+m_log = FixedEffectModels.reg(df3pos, @formula(ltotexp ~ suppins + phylim + actlim + totchr +
+                                       age + female + income); save = :all)
+df3pos_log = dropmissing(df3pos[:, [:totexp, :ltotexp, :suppins, :phylim,
+                                     :actlim, :totchr, :age, :female, :income]])
+lyhat = FixedEffectModels.predict(m_log, df3pos_log)
+uhat  = df3pos_log.ltotexp .- lyhat
+σ²    = sum(uhat.^2) / dof_residual(m_log)
+
+yhatwrong  = exp.(lyhat)
+yhatnormal = exp.(lyhat) .* exp(0.5 * σ²)        # log-normal correction
+yhatduan   = mean(exp.(uhat)) .* exp.(lyhat)     # Duan smearing
+@printf("totexp     mean = %.2f\n", mean(df3pos_log.totexp))
+@printf("yhatwrong  mean = %.2f\n", mean(yhatwrong))
+@printf("yhatnormal mean = %.2f\n", mean(yhatnormal))
+@printf("yhatduan   mean = %.2f\n", mean(yhatduan))
+```
+
+```{julia}
+stata_summarize(df3pos_log, [:totexp])
+```
+
+### 3.6.4 Prediction exercise
+
+```{julia}
+#=
+* Predicted effect of supplementary insurance: methods 1 and 2
+bysort suppins: summarize totexp yhatlevels yhatduan
+=#
+# Predicted effect of supplementary insurance: by-group means
+df3pos_log.yhatnormal = yhatnormal
+df3pos_log.yhatduan   = yhatduan
+combine(groupby(df3pos_log, :suppins),
+    :totexp     => mean,
+    :yhatnormal => mean,
+    :yhatduan   => mean)
+```
+
+```{julia}
+#=
+* Predicted effect of supplementary insurance: method 3 for log-linear model
+quietly regress ltotexp suppins phylim actlim totchr age female income
+preserve
+quietly replace suppins = 1
+quietly predict lyhat1
+generate yhatnormal1 = exp(lyhat1)*exp(0.5*e(rmse)^2) 
+quietly replace suppins = 0
+quietly predict lyhat0 
+generate yhatnormal0 = exp(lyhat0)*exp(0.5*e(rmse)^2) 
+generate treateffect = yhatnormal1 - yhatnormal0
+summarize yhatnormal1 yhatnormal0 treateffect 
+restore
+=#
+# Treatment effect via counterfactual prediction (suppins=1 vs 0)
+df1 = copy(df3pos_log); df1.suppins .= 1
+df0 = copy(df3pos_log); df0.suppins .= 0
+ly1 = FixedEffectModels.predict(m_log, df1)
+ly0 = FixedEffectModels.predict(m_log, df0)
+yh1 = exp.(ly1) .* exp(0.5 * σ²)
+yh0 = exp.(ly0) .* exp(0.5 * σ²)
+@printf("E[y|x,suppins=1] = %.2f\n", mean(yh1))
+@printf("E[y|x,suppins=0] = %.2f\n", mean(yh0))
+@printf("Treatment effect = %.2f\n", mean(yh1 .- yh0))
+```
+
+## 3.7 Sampling weights
+
+### 3.7.1 Weights
+
+```{julia}
+#=
+* Create artificial sampling weights
+use musr/mus03data.dta, clear
+generate swght = totchr^2 + 0.5
+summarize swght
+=#
+# Construct artificial sampling weights
+df3 = DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus03data.dta"))
+df3.swght = df3.totchr.^2 .+ 0.5
+@printf("swght: mean = %.4f, sd = %.4f\n",
+        mean(skipmissing(df3.swght)), std(skipmissing(df3.swght)))
+```
+
+### 3.7.2 Weighted mean
+
+```{julia}
+#=
+* Calculate the weighted mean
+mean totexp [pweight=swght]
+=#
+# Weighted mean of totexp
+let df = dropmissing(df3[:, [:totexp, :swght]])
+    @printf("Weighted mean of totexp = %.4f\n",
+            sum(df.totexp .* df.swght) / sum(df.swght))
+end
+```
+
+### 3.7.3 Weighted regression
+
+```{julia}
+#=
+* Perform weighted regression 
+regress totexp suppins phylim actlim totchr age female income [pweight=swght]
+=#
+# Weighted regression
+m_w = FixedEffectModels.reg(df3,
+    @formula(totexp ~ suppins + phylim + actlim + totchr + age + female + income),
+    weights = :swght, Vcov.robust())
+```
+
+### 3.7.4 Weighted prediction and MEs
+
+```{julia}
+#=
+* Weighted prediction
+quietly predict yhatwols
+mean yhatwols [pweight=swght], noheader 
+=#
+# Weighted prediction (mean of yhat using weights)
+df3_w = dropmissing(df3[:, [:totexp, :suppins, :phylim, :actlim, :totchr,
+                             :age, :female, :income, :swght]])
+yhat_w = FixedEffectModels.predict(m_w, df3_w)
+@printf("Weighted   mean of yhatwols = %.4f\n",
+        sum(yhat_w .* df3_w.swght) / sum(df3_w.swght))
+@printf("Unweighted mean of yhatwols = %.4f\n", mean(yhat_w))
+```
+
+## 3.8 OLS using native Julia (matrix algebra)
+
+```{julia}
+# OLS with White robust SE — native Julia, equivalent to the Mata example
+df3pos = filter(r -> r.totexp > 0, df3)
+df3p   = dropmissing(df3pos[:, [:ltotexp, :suppins, :phylim, :actlim,
+                                 :totchr, :age, :female, :income]])
+y = df3p.ltotexp
+X = Matrix(hcat(df3p.suppins, df3p.phylim, df3p.actlim, df3p.totchr,
+                df3p.age, df3p.female, df3p.income, ones(nrow(df3p))))
+xnames = ["suppins","phylim","actlim","totchr","age","female","income","_cons"]
+
+n, k    = size(X)
+XtX_inv = try
+    LinearAlgebra.inv(LinearAlgebra.cholesky(LinearAlgebra.Symmetric(X'X)))
+catch
+    LinearAlgebra.pinv(X'X)  # Use pseudoinverse for singular matrices
+end
+b       = XtX_inv * X' * y
+e       = y .- X*b
+s2      = (e'e) / (n - k)
+V_def   = s2 .* XtX_inv                                     # default VCE (unused)
+V_white = XtX_inv * (X' * Diagonal(e.^2) * X) * XtX_inv * (n / (n - k))   # robust
+
+se = sqrt.(diag(V_white))
+println("─" ^ 70)
+@printf("%-10s %12s %12s %8s %8s\n", "", "Coef.", "Rob.SE", "t", "P>|t|")
+println("─" ^ 70)
+for i in 1:k
+    t = b[i] / se[i]
+    p = 2 * (1 - cdf(Normal(), abs(t)))
+    @printf("%-10s %12.6f %12.6f %8.2f %8.4f\n", xnames[i], b[i], se[i], t, p)
+end
+println("─" ^ 70)
+@printf("N = %d, k = %d, R² = %.4f\n",
+        n, k, 1 - sum(e.^2)/sum((y .- mean(y)).^2))
+```
+
+```{julia}
+# Cross-check with FixedEffectModels.jl
+reg(df3pos, @formula(ltotexp ~ suppins + phylim + actlim + totchr + age +
+                                female + income), Vcov.robust())
+```
+
+## 3.9 Stata resources
+
+## 3.10 Exercises

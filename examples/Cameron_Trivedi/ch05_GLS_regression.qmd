@@ -1,0 +1,810 @@
+---
+title: "Cameron & Trivedi -- Ch. 5: GLS regression (via StatEcon)"
+Authors:
+- Colin Cameron
+- Pravin Trivedi
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+Translation of *Microeconometrics Using Stata* Chapter 5, routed through
+[``StatEcon``](https://github.com/ElvisCasco/StatEcon). Chapter 5 covers GLS
+and FGLS estimation, heteroskedastic regression, SUR (Seemingly Unrelated
+Regressions), and survey-weighted / cluster-robust inference. Three new
+StatEcon helper families are introduced here: ``stata_sureg`` /
+``stata_sureg_fit`` / ``stata_test_sureg`` for the SUR family;
+``stata_mean`` / ``stata_svy_mean`` / ``stata_svy_regress`` for survey
+estimation; and ``stata_regress_cluster`` for weighted OLS with one-way
+cluster-robust standard errors.
+
+[Microeconometrics with R](https://ycroissant.github.io/micsr_book/)
+- [UCLA Stata modules](https://stats.oarc.ucla.edu/stata/modules/)
+- [Github](https://github.com/thousandoaks?tab=repositories)
+
+# Julia setup
+
+```{julia}
+using StatEcon
+const DATA = first(filter(d -> isdir(d) && (isfile(joinpath(d, "auto.dta")) || isdir(joinpath(d, "musr"))), ["../../data", "data", raw"C:/EC/GitHub/StatEcon/data"]))
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+```
+
+# 5 GLS regression
+
+## 5.1 Introduction
+
+## 5.2 GLS and FGLS regression
+
+### 5.2.1 GLS for heteroskedastic errors
+
+### 5.2.2 GLS and FGLS
+
+### 5.2.3 Weighted least squares and robust standard errors
+
+### 5.2.4 Leading examples
+
+## 5.3 Modeling heteroskedastic data
+
+### 5.3.1 Simulated dataset
+
+The DGP is: `y = 1 + 1·x2 + 1·x3 + u` where `u = sqrt(exp(-1 + 0.2·x2))·e`, with `x2, x3, e ~ N(0, 5²)`. Errors are heteroskedastic with `V[u|x] = exp(-1 + 0.2·x2)`.
+
+```{julia}
+#=
+* This uses generated data
+* Model is  y = 1 + 1*x2 + 1*x3 + u
+* where     u = sqrt(exp(-1+0.2*x2))*e
+*           x1 ~ N(0, 5^2)
+*           x2 ~ N(0, 5^2)
+*           e ~ N(0, 5^2)
+* Errors are conditionally heteroskedastic with V[u|x]=exp(-1+1*x2)
+=#
+# Generated data for heteroskedasticity example
+# Read from CSV exported by Stata (ensures identical data across both notebooks)
+df5 = CSV.read("$(DATA)/musr/5_3_1.csv", DataFrame)
+for c in names(df5)
+    df5[!, c] = Float64.(df5[!, c])
+end
+DataFrames.describe(df5)
+```
+
+```{julia}
+#=
+clear all
+* Generated data for heteroskedasticity example
+set seed 10101
+quietly set obs 500
+generate double x2 = 5*rnormal(0)
+generate double x3 = 5*rnormal(0)
+generate double e  = 5*rnormal(0)
+generate double u  = sqrt(exp(-1+0.2*x2))*e
+generate double y  = 1 + 1*x2 + 1*x3 + u
+summarize
+export delimited using "musr/5_3_1.csv", replace
+=#
+stata_summarize(df5)
+```
+
+### 5.3.2 OLS estimation
+
+```{julia}
+#=
+* OLS regression with default standard errors
+regress y x2 x3
+=#
+# OLS with default SE
+ols5 = FixedEffectModels.reg(df5, @formula(y ~ x2 + x3))
+```
+
+```{julia}
+#=
+* OLS regression with heteroskedasticity-robust standard errors
+regress y x2 x3, vce(robust) 
+=#
+#* OLS regression with default standard errors
+#regress y x2 x3
+stata_regress(df5, :y, [:x2, :x3])
+```
+
+```{julia}
+# OLS with heteroskedasticity-robust SE
+ols5r = FixedEffectModels.reg(df5, @formula(y ~ x2 + x3), Vcov.robust())
+```
+
+```{julia}
+#* OLS regression with heteroskedasticity-robust standard errors
+#regress y x2 x3, vce(robust) 
+stata_regress(df5, :y, [:x2, :x3]; vcov=Vcov.robust())
+```
+
+### 5.3.3 Detecting heteroskedasticity
+
+```{julia}
+#=
+* Heteroskedasticity diagnostic scatterplot
+quietly regress y x2 x3
+predict double uhat, resid
+generate double absu = abs(uhat)
+quietly twoway (scatter absu x2) (lowess absu x2, bw(0.4) lw(thick)), ///
+  scale(1.2) xscale(titleg(*5)) yscale(titleg(*5))                    ///
+  plotr(style(none)) name(gls1)
+quietly twoway (scatter absu x3) (lowess absu x3, bw(0.4) lw(thick)), ///
+  scale(1.2) xscale(titleg(*5)) yscale(titleg(*5))                    ///
+  plotr(style(none)) name(gls2)
+graph combine gls1 gls2
+=#
+# Heteroskedasticity diagnostic scatterplots
+yhat5 = FixedEffectModels.predict(ols5, df5)
+df5.uhat = df5.y .- yhat5
+df5.absu = abs.(df5.uhat)
+
+# Lowess smoother via Loess.jl
+lo2 = Loess.loess(df5.x2, df5.absu; span = 0.4)
+lo3 = Loess.loess(df5.x3, df5.absu; span = 0.4)
+
+fig5 = Figure(size = (900, 400))
+ax1 = Axis(fig5[1, 1], xlabel = "x2", ylabel = "|uhat|")
+scatter!(ax1, df5.x2, df5.absu, markersize = 4)
+xs2 = sort(df5.x2)
+lines!(ax1, xs2, Loess.predict(lo2, xs2), color = :red, linewidth = 2)
+
+ax2 = Axis(fig5[1, 2], xlabel = "x3", ylabel = "|uhat|")
+scatter!(ax2, df5.x3, df5.absu, markersize = 4)
+xs3 = sort(df5.x3)
+lines!(ax2, xs3, Loess.predict(lo3, xs3), color = :red, linewidth = 2)
+fig5
+```
+
+```{julia}
+#=
+graph export musr/mus05gls_fig1.eps, replace
+drop uhat
+=#
+# Breusch–Pagan test of heteroskedasticity (regress uhat² on regressors)
+df5.uhat2 = df5.uhat.^2
+m_bp5 = FixedEffectModels.reg(df5, @formula(uhat2 ~ x2 + x3))
+LM = nrow(df5) * StatsBase.r2(m_bp5)
+@printf("BP LM(2) = %.4f, p = %.4f\n", LM, 1 - cdf(Chisq(2), LM))
+```
+
+```{julia}
+#=
+* Test heteroskedasticity depending on x2, x3, and x2 and x3
+estat hettest x2 x3, mtest
+=#
+# estat hettest x2 x3, mtest  (individual + joint tests with Bonferroni/Sidak corrections)
+p_individual = Float64[]
+for v in (:x2, :x3)
+    m = FixedEffectModels.reg(df5, term(:uhat2) ~ term(v))
+    LM = nrow(df5) * StatsBase.r2(m)
+    p = 1 - cdf(Chisq(1), LM)
+    push!(p_individual, p)
+    @printf("BP test on %s only: LM(1) = %.4f, p = %.4f\n", v, LM, p)
+end
+# Multiple-testing corrections (mtest)
+ntests = length(p_individual)
+for (i, (vname, p)) in enumerate(zip(["x2", "x3"], p_individual))
+    p_bonf = min(p * ntests, 1.0)
+    p_sidak = 1 - (1 - p)^ntests
+    @printf("  %s: Bonferroni p = %.4f, Šidák p = %.4f\n", vname, p_bonf, p_sidak)
+end
+# Joint test
+m_joint = FixedEffectModels.reg(df5, @formula(uhat2 ~ x2 + x3))
+LM_joint = nrow(df5) * StatsBase.r2(m_joint)
+@printf("BP joint test on x2 x3: LM(2) = %.4f, p = %.4f\n",
+        LM_joint, 1 - cdf(Chisq(2), LM_joint))
+```
+
+```{julia}
+#=
+* Not included in book
+* Separate tests of heteroskedasticity using iid version of hettest
+estat hettest x2, iid
+estat hettest x3, iid
+estat hettest x2 x3, iid
+=#
+# estat hettest x2 x3, mtest
+estat_hettest(ols5, df5; vars=[:x2, :x3], mtest=true)
+```
+
+```{julia}
+# Not included in book
+# Separate tests of heteroskedasticity using iid version of hettest
+estat_hettest(ols5, df5; vars=[:x2], iid=true)
+estat_hettest(ols5, df5; vars=[:x3], iid=true)
+estat_hettest(ols5, df5; vars=[:x2, :x3], iid=true)
+```
+
+### 5.3.4 FGLS estimation
+
+```{julia}
+#=
+clear all
+* Generated data for heteroskedasticity example
+set seed 10101
+quietly set obs 500
+generate double x2 = 5*rnormal(0)
+generate double x3 = 5*rnormal(0)
+generate double e  = 5*rnormal(0)
+generate double u  = sqrt(exp(-1+0.2*x2))*e
+generate double y  = 1 + 1*x2 + 1*x3 + u
+export delimited using "musr/5_3_1.csv", replace
+
+* FGLS: First step get estimate of skedasticity function
+quietly regress y x2 x3                  // get bols
+predict double uhat, resid
+generate double uhatsq = uhat^2          // get squared residual 
+generate double one = 1 
+* NLS of uhatsq on exp(z'a)                      
+capture nl (uhatsq = exp({xb: x2 one})), nolog   
+=#
+# FGLS step 1: estimate skedasticity function via NLS:  σ²(x) = exp(α0 + α1·x2)
+function neg_lik(α, x, y)
+    pred = exp.(α[1] .+ α[2] .* x)
+    sum((y .- pred).^2)
+end
+res_α = optimize(α -> neg_lik(α, df5.x2, df5.uhat2), [0.0, 0.0])
+α_hat = Optim.minimizer(res_α)
+df5.varu = exp.(α_hat[1] .+ α_hat[2] .* df5.x2)
+@printf("α̂ = (%.4f, %.4f)\n", α_hat[1], α_hat[2])
+```
+
+```{julia}
+#=
+*get sigmahat^2
+predict double varu, yhat               
+=#
+# FGLS step 2: weighted regression with weights 1/varu
+df5.w_fgls = 1 ./ df5.varu
+fgls5 = FixedEffectModels.reg(df5, @formula(y ~ x2 + x3), weights = :w_fgls)
+```
+
+```{julia}
+#=
+* FGLS: Second step get estimate of skedasticity function
+regress y x2 x3 [aweight=1/varu] 
+=#
+# FGLS step 2: weighted regression with weights 1/varu
+stata_regress(df5, :y, [:x2, :x3]; weights = :w_fgls)
+```
+
+### 5.3.5 WLS estimation
+
+```{julia}
+#=
+* WLS estimator is FGLS with robust estimate of VCE
+regress y x2 x3 [aweight=1/varu], vce(robust)
+=#
+# WLS = FGLS with robust SE
+wls5 = FixedEffectModels.reg(df5, @formula(y ~ x2 + x3), Vcov.robust(), weights = :w_fgls)
+```
+
+```{julia}
+#=
+* FGLS: First step get estimate of skedasticity function
+quietly regress y x2 x3 if _n < 451
+quietly predict double yhat1
+quietly regress y x2 x3 [aweight=1/varu] if _n < 451
+quietly predict double yhat2
+generate double perr1 = y - yhat1
+generate double perr2 = y - yhat2
+summarize y yhat1 yhat2 perr1 perr2 if _n > 450
+=#
+# WLS = FGLS with robust SE
+wls5 = stata_regress(df5, :y, [:x2, :x3]; weights = :w_fgls, vcov=Vcov.robust())
+```
+
+```{julia}
+# Prediction comparison: OLS vs WLS on first 450 obs, evaluate on last 50
+df_train = df5[1:450, :]
+ols_sub  = FixedEffectModels.reg(df_train, @formula(y ~ x2 + x3))
+wls_sub  = FixedEffectModels.reg(df_train, @formula(y ~ x2 + x3), weights = :w_fgls)
+
+yhat1 = StatsBase.coef(ols_sub)[1] .+ StatsBase.coef(ols_sub)[2] .* df5.x2 .+ StatsBase.coef(ols_sub)[3] .* df5.x3
+yhat2 = StatsBase.coef(wls_sub)[1] .+ StatsBase.coef(wls_sub)[2] .* df5.x2 .+ StatsBase.coef(wls_sub)[3] .* df5.x3
+perr1 = df5.y .- yhat1
+perr2 = df5.y .- yhat2
+
+test_df = DataFrame(y = df5.y[451:end],
+                    yhat_ols = yhat1[451:end], yhat_wls = yhat2[451:end],
+                    err_ols  = perr1[451:end], err_wls  = perr2[451:end])
+DataFrames.describe(test_df)
+```
+
+```{julia}
+stata_summarize(test_df)
+```
+
+## 5.4 System of linear regressions
+
+### 5.4.1 SUR model
+
+### 5.4.2 The sureg command
+
+### 5.4.3 Application to two categories of expenditures
+
+```{julia}
+#=
+* Summary statistics for seemingly unrelated regressions example
+clear all
+use musr/mus05surdata.dta
+summarize ldrugexp ltotothr age age2 educyr actlim totchr medicaid private
+=#
+# Summary statistics for seemingly unrelated regressions example
+df_sur = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus05surdata.dta"))
+DataFrames.describe(df_sur[:, [:ldrugexp, :ltotothr, :age, :age2, :educyr, :actlim, :totchr, :medicaid, :private]])
+```
+
+```{julia}
+#=
+* Not included in book
+summarize ldrugexp if ldrugexp!=. & ltotothr!=.
+=#
+stata_summarize(df_sur, [:ldrugexp, :ltotothr, :age, :age2, :educyr, :actlim, :totchr, :medicaid, :private])
+```
+
+```{julia}
+#=
+* SUR estimation of a seemingly unrelated regressions model
+sureg (ldrugexp age age2 actlim totchr medicaid private) ///
+  (ltotothr age age2 educyr actlim totchr private), corr
+=#
+# Not included in book
+sub = dropmissing(df_sur, [:ldrugexp, :ltotothr])
+DataFrames.describe(sub[:, [:ldrugexp]])
+```
+
+```{julia}
+stata_summarize(sub, [:ldrugexp])
+```
+
+```{julia}
+# Not included in book
+stata_summarize(sub)
+```
+
+
+```{julia}
+# SUR estimation (FGLS) — sureg (ldrugexp ...) (ltotothr ...), corr
+# Step 1: equation-by-equation OLS to get Σ̂; Step 2: FGLS using Σ⁻¹ ⊗ I_N
+sur_data = dropmissing(df_sur, [:ldrugexp, :ltotothr, :age, :age2, :educyr, :actlim, :totchr, :medicaid, :private])
+Ns = nrow(sur_data)
+
+# Design matrices (equation-specific regressors)
+X1 = hcat(ones(Ns), sur_data.age, sur_data.age2, sur_data.actlim,
+          sur_data.totchr, sur_data.medicaid, sur_data.private)
+X2 = hcat(ones(Ns), sur_data.age, sur_data.age2, sur_data.educyr,
+          sur_data.actlim, sur_data.totchr, sur_data.private)
+Y1 = Float64.(sur_data.ldrugexp)
+Y2 = Float64.(sur_data.ltotothr)
+cn1 = ["_cons", "age", "age2", "actlim", "totchr", "medicaid", "private"]
+cn2 = ["_cons", "age", "age2", "educyr", "actlim", "totchr", "private"]
+
+# Step 1: OLS residuals
+β1_ols = X1 \ Y1;  e1 = Y1 - X1 * β1_ols
+β2_ols = X2 \ Y2;  e2 = Y2 - X2 * β2_ols
+Σ̂ = [e1'e1 e1'e2; e2'e1 e2'e2] ./ Ns
+
+# Step 2: FGLS (SUR)
+Σinv = LinearAlgebra.inv(Σ̂)
+# Block structure: X = blockdiag(X1, X2), W = Σ⁻¹ ⊗ I_N
+XWX = Σinv[1,1]*(X1'X1) + zeros(size(X1,2), size(X2,2))
+XWX = [Σinv[1,1]*(X1'X1)  Σinv[1,2]*(X1'X2);
+       Σinv[2,1]*(X2'X1)  Σinv[2,2]*(X2'X2)]
+XWY = [Σinv[1,1]*(X1'Y1) + Σinv[1,2]*(X1'Y2);
+       Σinv[2,1]*(X2'Y1) + Σinv[2,2]*(X2'Y2)]
+β_sur = XWX \ XWY
+V_sur = LinearAlgebra.inv(XWX)
+se_sur = sqrt.(max.(LinearAlgebra.diag(V_sur), 0.0))
+
+k1 = size(X1, 2); k2 = size(X2, 2)
+println("=== SUR (FGLS) Equation 1: ldrugexp ===")
+println(DataFrame(variable=cn1, Coef=β_sur[1:k1], SE=se_sur[1:k1],
+              z=β_sur[1:k1]./se_sur[1:k1]))
+println("\n=== SUR (FGLS) Equation 2: ltotothr ===")
+println(DataFrame(variable=cn2, Coef=β_sur[k1+1:end], SE=se_sur[k1+1:end],
+              z=β_sur[k1+1:end]./se_sur[k1+1:end]))
+
+# Cross-equation residual correlation (corr option)
+rho = Σ̂[1,2] / sqrt(Σ̂[1,1] * Σ̂[2,2])
+@printf("\nCorrelation matrix of residuals:\n  ldrugexp  ltotothr\n  1.0000    %.4f\n  %.4f    1.0000\n", rho, rho)
+@printf("Breusch-Pagan test of independence: chi2(1) = %.3f, Pr = %.4f\n",
+        Ns * rho^2, 1 - cdf(Chisq(1), Ns * rho^2))
+
+# Save OLS-based models for later use (bootstrap, testparm)
+eq1 = FixedEffectModels.reg(sur_data, @formula(ldrugexp ~ age + age2 + actlim + totchr + medicaid + private))
+eq2 = FixedEffectModels.reg(sur_data, @formula(ltotothr ~ age + age2 + educyr + actlim + totchr + private))
+```
+
+```{julia}
+#* SUR estimation of a seemingly unrelated regressions model
+#sureg (ldrugexp age age2 actlim totchr medicaid private) ///
+#  (ltotothr age age2 educyr actlim totchr private), corr
+stata_sureg(df_sur,
+      :ldrugexp => [:age, :age2, :actlim, :totchr, :medicaid, :private],
+      :ltotothr => [:age, :age2, :educyr, :actlim, :totchr, :private])
+```
+
+### 5.4.4 Robust standard errors
+
+```{julia}
+#=
+* Bootstrap to get heteroskedasticity-robust SEs for SUR estimator 
+bootstrap, reps(400) seed(10101) nodots: sureg        ///
+  (ldrugexp age age2 actlim totchr medicaid private)  ///
+  (ltotothr age age2 educyr actlim totchr private) 
+=#
+# Bootstrap to obtain SEs for the two SUR equations (B = 400)
+Random.seed!(10101)
+B = 400
+β1_boot = Vector{Vector{Float64}}(undef, B)
+β2_boot = Vector{Vector{Float64}}(undef, B)
+for b in 1:B
+    idx = sample(1:nrow(sur_data), nrow(sur_data); replace = true)
+    sub = sur_data[idx, :]
+    m1 = FixedEffectModels.reg(sub, @formula(ldrugexp ~ age + age2 + actlim + totchr + medicaid + private))
+    m2 = FixedEffectModels.reg(sub, @formula(ltotothr ~ age + age2 + educyr + actlim + totchr + private))
+    β1_boot[b] = StatsBase.coef(m1)
+    β2_boot[b] = StatsBase.coef(m2)
+end
+β1_mat = reduce(hcat, β1_boot)'
+β2_mat = reduce(hcat, β2_boot)'
+println("Eq1 bootstrap SEs: ", round.(std(β1_mat, dims = 1), digits = 4))
+println("Eq2 bootstrap SEs: ", round.(std(β2_mat, dims = 1), digits = 4))
+```
+
+```{julia}
+#* Bootstrap to get heteroskedasticity-robust SEs for SUR estimator
+#bootstrap, reps(400) seed(10101) nodots: sureg        ///
+#  (ldrugexp age age2 actlim totchr medicaid private)  ///
+#  (ltotothr age age2 educyr actlim totchr private)
+stata_sureg(df_sur,
+      :ldrugexp => [:age, :age2, :actlim, :totchr, :medicaid, :private],
+      :ltotothr => [:age, :age2, :educyr, :actlim, :totchr, :private];
+      reps=400, seed=10101)
+```
+
+### 5.4.5 Testing cross-equation constraints
+
+```{julia}
+#=
+* Test of variables in both equations
+quietly sureg (ldrugexp age age2 actlim totchr medicaid private) ///
+   (ltotothr age age2 educyr actlim totchr private)
+test age age2
+=#
+# Joint Wald test of age and age2 in equation 1
+nm = StatsBase.coefnames(eq1)
+idx = [findfirst(==(n), nm) for n in ("age", "age2")]
+βt  = StatsBase.coef(eq1)[idx]; Vt = StatsBase.vcov(eq1)[idx, idx]
+W = try
+    βt' * LinearAlgebra.inv(Vt) * βt
+catch
+    NaN
+end
+@printf("W(2) = %.4f, p = %.4f\n", W, 1 - cdf(Chisq(2), W))
+```
+
+```{julia}
+#=
+* Test of variables in just the first equation
+test [ldrugexp]age [ldrugexp]age2
+=#
+# Test of age and age2 in equation 1 only (same as above)
+println("Same Wald test on equation 1; see above.")
+```
+
+```{julia}
+#=
+* Test of a restriction across the two equations
+test [ldrugexp]private = [ltotothr]private
+=#
+# Cross-equation restriction:  β_private (eq1) = β_private (eq2)
+# Test using the bootstrap distribution
+β1_priv = β1_mat[:, findfirst(==("private"), StatsBase.coefnames(eq1))]
+β2_priv = β2_mat[:, findfirst(==("private"), StatsBase.coefnames(eq2))]
+diff_b  = β1_priv .- β2_priv
+@printf("mean(diff) = %.4f  bootstrap SE = %.4f  z = %.3f\n",
+        mean(diff_b), std(diff_b), mean(diff_b) / std(diff_b))
+```
+
+```{julia}
+# sureg (ldrugexp age age2 actlim totchr medicaid private) ///
+#       (ltotothr age age2 educyr actlim totchr private)
+# test age age2
+#
+# Joint test of age and age2 across BOTH equations (4 restrictions).
+# Uses the bootstrap draws computed earlier (β1_mat, β2_mat) to estimate the
+# joint covariance — equation-by-equation OLS vcov misses the cross-equation
+# correlation that Stata's sureg accounts for via FGLS.
+i1 = [findfirst(==(n), StatsBase.coefnames(eq1)) for n in ("age", "age2")]
+i2 = [findfirst(==(n), StatsBase.coefnames(eq2)) for n in ("age", "age2")]
+
+β_joint = vcat(StatsBase.coef(eq1)[i1], StatsBase.coef(eq2)[i2])
+B_joint = hcat(β1_mat[:, i1], β2_mat[:, i2])      # B × 4 bootstrap draws
+V_joint = Statistics.cov(B_joint)
+
+W = β_joint' * (V_joint \ β_joint)
+q = length(β_joint)
+p = 1 - Distributions.cdf(Distributions.Chisq(q), W)
+Printf.@printf("Joint Wald test: H0 : age = age2 = 0 in both equations\n")
+Printf.@printf("  chi2(%d) = %.4f   p = %.4f\n", q, W, p)
+```
+
+```{julia}
+#* Test of variables in both equations
+#quietly sureg (ldrugexp age age2 actlim totchr medicaid private) ///
+#   (ltotothr age age2 educyr actlim totchr private)
+#test age age2
+fit_sur = stata_sureg_fit(df_sur,
+                    :ldrugexp => [:age, :age2, :actlim, :totchr, :medicaid, :private],
+                    :ltotothr => [:age, :age2, :educyr, :actlim, :totchr, :private])
+stata_test_sureg(fit_sur, [:age, :age2]);
+```
+
+```{julia}
+#* Test of variables in just the first equation
+#test [ldrugexp]age [ldrugexp]age2
+stata_test_sureg(fit_sur, ["[ldrugexp]age", "[ldrugexp]age2"]);
+```
+
+```{julia}
+#* Test of a restriction across the two equations
+#test [ldrugexp]private = [ltotothr]private
+stata_test_sureg(fit_sur, ["[ldrugexp]private = [ltotothr]private"]);
+```
+
+### 5.4.6 Imposing cross-equation constraints
+
+```{julia}
+#=
+* Specify a restriction across the two equations
+constraint 1 [ldrugexp]private = [ltotothr]private
+=#
+# constraint 1 [ldrugexp]private = [ltotothr]private
+# sureg (ldrugexp age age2 actlim totchr medicaid private) ///
+#       (ltotothr age age2 educyr actlim totchr private), constraints(1)
+#
+# Strategy: stack the two equations into a single regression where `private`
+# appears as ONE shared regressor (its coefficient is the constrained value).
+# All other regressors are "padded" with zeros in the other equation's block.
+# A first OLS pass on the stacked system gives a consistent restricted
+# estimate; a second FGLS pass uses Σ̂ from those residuals for efficiency,
+# matching what Stata's `sureg ... , constraints()` does.
+
+N = DataFrames.nrow(sur_data)
+pad1(v) = vcat(Float64.(v), zeros(N))
+pad2(v) = vcat(zeros(N), Float64.(v))
+
+Y  = vcat(Float64.(sur_data.ldrugexp), Float64.(sur_data.ltotothr))
+X  = hcat(
+    pad1(ones(N)),              # ldrugexp: intercept
+    pad1(sur_data.age),
+    pad1(sur_data.age2),
+    pad1(sur_data.actlim),
+    pad1(sur_data.totchr),
+    pad1(sur_data.medicaid),
+    pad2(ones(N)),              # ltotothr: intercept
+    pad2(sur_data.age),
+    pad2(sur_data.age2),
+    pad2(sur_data.educyr),
+    pad2(sur_data.actlim),
+    pad2(sur_data.totchr),
+    vcat(Float64.(sur_data.private), Float64.(sur_data.private))   # SHARED
+)
+cnames = ["eq1:_cons", "eq1:age", "eq1:age2", "eq1:actlim", "eq1:totchr", "eq1:medicaid",
+          "eq2:_cons", "eq2:age", "eq2:age2", "eq2:educyr", "eq2:actlim", "eq2:totchr",
+          "private (shared)"]
+k = size(X, 2)
+
+# --- First pass: OLS on the stacked system (restricted) ---
+β_ols = X \ Y
+e     = reshape(Y - X*β_ols, N, 2)            # per-observation residuals for the 2 equations
+
+# --- Second pass: FGLS using Σ̂ from first-pass residuals ---
+Σ̂    = (e' * e) / N                            # 2×2 cross-equation covariance
+Σinv = LinearAlgebra.inv(Σ̂)
+# Weight matrix W = Σ⁻¹ ⊗ I_N: efficient SUR moments are  X' W Y  and  X' W X
+W_lhs = Σinv[1,1]*(X[1:N,     :]'X[1:N,     :]) +
+        Σinv[2,2]*(X[N+1:end, :]'X[N+1:end, :]) +
+        Σinv[1,2]*(X[1:N,     :]'X[N+1:end, :]) +
+        Σinv[2,1]*(X[N+1:end, :]'X[1:N,     :])
+W_rhs = Σinv[1,1]*(X[1:N,     :]'Y[1:N])      +
+        Σinv[2,2]*(X[N+1:end, :]'Y[N+1:end]) +
+        Σinv[1,2]*(X[1:N,     :]'Y[N+1:end]) +
+        Σinv[2,1]*(X[N+1:end, :]'Y[1:N])
+β_fgls = W_lhs \ W_rhs
+V_fgls = LinearAlgebra.inv(W_lhs)              # joint FGLS vcov
+se     = sqrt.(max.(LinearAlgebra.diag(V_fgls), 0.0))
+z      = β_fgls ./ se
+pval   = 2 .* (1 .- Distributions.cdf.(Distributions.Normal(), abs.(z)))
+
+println("FGLS (SUR) with cross-equation constraint  [ldrugexp]private = [ltotothr]private")
+println("Residual cov matrix Σ̂ =")
+display(Σ̂)
+println("\nCoefficients:")
+println(DataFrames.DataFrame(variable=cnames, estimate=β_fgls, stderr=se, z=z, p=pval))
+```
+
+```{julia}
+#=
+* Estimate subject to the cross-equation constraint
+sureg (ldrugexp age age2 actlim totchr medicaid private)        ///
+  (ltotothr age age2 educyr actlim totchr private), constraints(1)
+=#
+#* Specify a restriction across the two equations
+#constraint 1 [ldrugexp]private = [ltotothr]private
+
+#* Estimate subject to the cross-equation constraint
+#sureg (ldrugexp age age2 actlim totchr medicaid private)        ///
+#  (ltotothr age age2 educyr actlim totchr private), constraints(1)
+stata_sureg(df_sur,
+      :ldrugexp => [:age, :age2, :actlim, :totchr, :medicaid, :private],
+      :ltotothr => [:age, :age2, :educyr, :actlim, :totchr, :private];
+      constraints = ["[ldrugexp]private = [ltotothr]private"])
+```
+
+## 5.5 Survey data: Weighting, clustering, and stratification
+
+### 5.5.1 Survey design
+
+```{julia}
+#=
+* Data from http://www.stata-press.com/data/r10/nhanes2.dta
+
+* Survey data example: NHANES II data
+clear all
+use musr/mus05nhanes2.dta
+quietly keep if age >= 21 & age <= 65
+describe sampl finalwgt strata psu
+summarize sampl finalwgt strata psu
+=#
+# NHANES II data
+df_nh = DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus05nhanes2.dta"))
+df_nh = filter(r -> 21 <= r.age <= 65, df_nh)
+@printf("N = %d\n", nrow(df_nh))
+DataFrames.describe(df_nh[:, [:sampl, :finalwgt, :strata, :psu]])
+```
+
+
+```{julia}
+#=
+* Declare survey design
+svyset psu [pweight=finalwgt], strata(strata)
+=#
+stata_summarize(df_nh[:, [:sampl, :finalwgt, :strata, :psu]])
+```
+
+```{julia}
+#=
+* Describe the survey design
+svydescribe
+=#
+# Stata's svyset is descriptive — record the design columns for later use
+println("Survey design: PSU = :psu, strata = :strata, weight = :finalwgt")
+```
+
+```{julia}
+# Describe the survey design (counts of strata and PSUs)
+@printf("Number of strata = %d\n", length(unique(df_nh.strata)))
+@printf("Number of PSUs   = %d\n",
+        length(unique(zip(df_nh.strata, df_nh.psu) |> collect)))
+```
+
+### 5.5.2 Survey mean estimation
+
+```{julia}
+#=
+* Estimate the population mean using svy:
+svy: mean hgb
+=#
+# Population mean of hgb using sampling weights
+let df = dropmissing(df_nh[:, [:hgb, :finalwgt]])
+    @printf("Weighted mean of hgb = %.4f\n",
+            sum(df.hgb .* df.finalwgt) / sum(df.finalwgt))
+end
+```
+
+```{julia}
+#=
+* Estimate the population mean using no weights and no cluster
+mean hgb
+=#
+# Unweighted mean of hgb
+@printf("Unweighted mean of hgb = %.4f\n",
+        mean(skipmissing(df_nh.hgb)))
+```
+
+
+```{julia}
+#* Estimate the population mean using svy:
+#svy: mean hgb
+stata_svy_mean(df_nh, :hgb; stratum=:strata, psu=:psu, weight=:finalwgt);
+```
+
+```{julia}
+#* Estimate the population mean using no weights and no cluster
+#mean hgb
+stata_mean(df_nh, :hgb);
+```
+
+### 5.5.3 Survey linear regression
+
+```{julia}
+#=
+* Regression using svy:
+svy: regress hgb age female
+=#
+# Regression with weights (no cluster correction)
+m_svy = FixedEffectModels.reg(df_nh, @formula(hgb ~ age + female),
+            weights = :finalwgt)
+```
+
+```{julia}
+#=
+* Regression using weights and cluster on PSU
+generate uniqpsu = 2*strata + psu  // make unique identifier for each psu
+regress hgb age female [pweight=finalwgt], vce(cluster uniqpsu)
+=#
+# Regression with weights + clustering on unique PSU = 2·strata + psu
+df_nh.uniqpsu = 2 .* df_nh.strata .+ df_nh.psu
+reg(df_nh, @formula(hgb ~ age + female),
+    weights = :finalwgt, Vcov.cluster(:uniqpsu))
+```
+
+```{julia}
+#=
+* Regression using no weights and no cluster
+regress hgb age female
+=#
+# Regression with no weights, no cluster
+reg(df_nh, @formula(hgb ~ age + female))
+```
+
+
+```{julia}
+#* Regression using svy:
+#svy: regress hgb age female
+stata_svy_regress(df_nh, :hgb, [:age, :female];
+            stratum=:strata, psu=:psu, weight=:finalwgt);
+```
+
+
+```{julia}
+#* Regression using weights and cluster on PSU
+#generate uniqpsu = 2*strata + psu  // make unique identifier for each psu
+#regress hgb age female [pweight=finalwgt], vce(cluster uniqpsu)
+df_nh.uniqpsu = 2 .* df_nh.strata .+ df_nh.psu
+stata_regress_cluster(df_nh, :hgb, [:age, :female];
+                cluster=:uniqpsu, weight=:finalwgt);
+```
+
+```{julia}
+#* Regression using no weights and no cluster
+#regress hgb age female
+stata_regress(df_nh, :hgb, [:age, :female]);
+```
+
+## 5.6 Stata resources
+
+## 5.7 Exercises

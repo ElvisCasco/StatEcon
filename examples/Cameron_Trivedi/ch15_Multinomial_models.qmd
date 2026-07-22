@@ -1,0 +1,1349 @@
+---
+title: "Cameron & Trivedi -- Ch. 15: Multinomial models (via StatEcon)"
+Authors:
+- Colin Cameron
+- Pravin Trivedi
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+# Julia setup
+
+```{julia}
+using StatEcon
+const DATA = first(filter(d -> isdir(d) && (isfile(joinpath(d, "auto.dta")) || isdir(joinpath(d, "musr"))), ["../../data", "data", raw"C:/EC/GitHub/StatEcon/data"]))
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+
+_rawval(x) = hasproperty(x, :value) ? x.value : x  # unwrap ReadStatTables.LabeledValue
+```
+
+The multinomial-model estimators for this chapter now live in `StatEcon`
+(`src/stata_mlogit.jl`, `stata_mprobit.jl`, `stata_ologit.jl`,
+`stata_asclogit.jl`, `stata_nlogit.jl`, `stata_asmprobit.jl`,
+`stata_mixlogit.jl`, `stata_biprobit.jl`, `stata_nlsur.jl`, …) and are called
+directly below:
+
+- multinomial logit — `stata_mlogit` (+ `stata_test_mlogit`,
+  `stata_margins_mlogit`, `stata_margins_dydx_mlogit`)
+- multinomial probit — `stata_mprobit`; alternative-specific MNP —
+  `stata_asmprobit` (with `stata_estat_covariance` / `stata_estat_correlation`)
+- ordered logit — `stata_ologit` (+ `stata_margins_dydx_ologit`)
+- conditional / alternative-specific logit — `stata_asclogit`, `stata_clogit`
+  (with `stata_estat_alternatives`, `stata_estat_mfx_asclogit`)
+- nested logit — `stata_nlogit` (+ `stata_nlogitgen`, `stata_nlogittree`)
+- mixed (random-parameters) logit — `stata_mixlogit`
+- bivariate probit — `stata_biprobit`; nonlinear SUR — `stata_nlsur`
+- Stata display / data helpers — `stata_table`, `stata_list`, `stata_encode`,
+  `stata_label_list`, `stata_tabulate_two_way`, `stata_estimates_table_compare`
+
+Each estimator's `predict`-style probability routine is a private helper and
+is called module-qualified: `StatEcon._c15_mnl_probs`,
+`StatEcon._c15_ologit_probs`, `StatEcon._c15_nlogit_probs`,
+`StatEcon._c15_clogit_probs`, `StatEcon._c15_biprobit_probs`. The canonical
+`stata_summarize`, `stata_tabulate`, `stata_correlate`, and `stata_probit`
+(already in `StatEcon`) are reused unchanged.
+
+# 15 Multinomial models
+
+## 15.1 Introduction
+
+## 15.2 Multinomial models overv1ew
+
+### 15.2.1 Probabilities and MEs
+
+### 15.2.2 Maximum likelihood estimation
+
+### 15.2.3 Case-specific and alternative-specific regressors
+
+### 15.2.4 Additive random-utility model
+
+### 15.2.5 Stata multinomial model commands
+
+## 15.3 Multinomial example: Choice of fishing mode
+
+### 15.3.1 Data description
+
+The fishing-mode data come from Herriges and Kling (1999), "Nonlinear Income
+Effects in Random Utility Models", *Review of Economics and Statistics*.
+Each observation has the chosen mode plus prices and catch rates for all four
+alternatives (beach, pier, private, charter).
+
+```{julia}
+#=
+* File mus15data is from 
+* J. A. Herriges and C. L. Kling, 
+* "Nonlinear Income Effects in Random Utility Models", 
+* Review of Economics and Statistics, 81(1999): 62-72
+* Also analyzed in Cameron and Trivedi (2005) chapter 15
+
+* File mus18data.dta is from
+* Rand Health Insurance Experiment data 
+* Essentially same data as in P. Deb and P.K. Trivedi (2002)
+* "The Structure of Demand for Medical Care: Latent Class versus
+* Two-Part Models", Journal of Health Economics, 21, 601-625
+* except that paper used different outcome (counts rather than $)
+* Each observation is for an individual over a year.
+* Individuals may appear in up to five years.
+* All available sample is used except only fee for service plans included.
+* If panel data used then clustering is on id (person id)
+=#
+# Read in dataset and describe
+df15 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus15data.dta"))
+DataFrames.describe(df15)
+```
+
+```{julia}
+#=
+* Read in dataset and describe dependent variable and regressors
+use musr/mus15data.dta, clear
+describe
+=#
+# Summary
+DataFrames.describe(df15, :mean, :std, :min, :max, :nmissing)
+```
+
+```{julia}
+#=
+* Summarize dependent variable and regressors
+summarize, separator(0) 
+=#
+# Tabulate the dependent variable
+DataFrames.combine(DataFrames.groupby(df15, :mode), DataFrames.nrow => :freq)
+```
+
+```{julia}
+#=
+* Tabulate the dependent variable
+tabulate mode
+=#
+#=
+* Summarize dependent variable and regressors
+summarize, separator(0)
+=#
+
+# Stata's `summarize` with no varlist summarizes *all* variables in
+# memory; `separator(0)` suppresses the dashed line Stata draws every
+# 5 rows of a long varlist. The chunk-1 `stata_summarize` helper does
+# not emit that separator by default, so the option is a no-op here —
+# the only effective change is widening the table to every column of
+# `df15`.
+stata_summarize(df15);
+```
+
+```{julia}
+#=
+* Tabulate the dependent variable
+tabulate mode
+=#
+
+# `stata_tabulate` (chunk 1) is Stata's one-way `tabulate`: sorts by
+# the raw labeled-value key (so categories appear in `1 = beach,
+# 2 = pier, 3 = private, 4 = charter` order) and prints the standard
+# Freq / Percent / Cum table with a trailing Total row.
+stata_tabulate(df15, :mode);
+```
+
+### 15.3.2 Case-specific regressors
+
+```{julia}
+#=
+* Table of income by fishing mode
+table mode, statistic(count income) statistic(mean income) statistic(sd income)
+=#
+# Income by fishing mode
+DataFrames.combine(DataFrames.groupby(df15, :mode),
+    :income => length      => :count,
+    :income => Statistics.mean => :mean,
+    :income => Statistics.std  => :sd)
+```
+
+```{julia}
+#=
+* Table of income by fishing mode
+table mode, statistic(count income) statistic(mean income) statistic(sd income)
+=#
+
+# Stata-formatted version of the previous DataFrames.combine chunk:
+# `stata_table` (chunk 1) reproduces Stata 17+ `table <byvar>,
+# statistic(<stat> <var>) ...` output — one column per `(stat, var)`
+# pair with auto headers `N(income)`, `Mean(income)`, `SD(income)`, a
+# section row for the by-variable name, and a trailing Total row.
+stata_table(df15, :mode,
+    [(:count, :income), (:mean, :income), (:sd, :income)]);
+```
+
+### 15.3.3 Alternative-specific regressors
+
+```{julia}
+#=
+* Table of fishing price by fishing mode
+table mode, statistic(mean pbeach) statistic(mean ppier) statistic(mean pprivate) statistic(mean pcharter) nformat(%6.0f)
+=#
+# Mean fishing price by mode (mean of pbeach, ppier, pprivate, pcharter)
+DataFrames.combine(DataFrames.groupby(df15, :mode),
+    :pbeach   => Statistics.mean => :mean_pbeach,
+    :ppier    => Statistics.mean => :mean_ppier,
+    :pprivate => Statistics.mean => :mean_pprivate,
+    :pcharter => Statistics.mean => :mean_pcharter)
+```
+
+```{julia}
+#=
+* Table of fishing catch rate by fishing mode
+table mode, statistic(mean qbeach) statistic(mean qpier) statistic(mean qprivate) statistic(mean qcharter) nformat(%6.2f)
+=#
+# Mean catch rate by mode
+DataFrames.combine(DataFrames.groupby(df15, :mode),
+    :qbeach   => Statistics.mean => :mean_qbeach,
+    :qpier    => Statistics.mean => :mean_qpier,
+    :qprivate => Statistics.mean => :mean_qprivate,
+    :qcharter => Statistics.mean => :mean_qcharter)
+```
+
+```{julia}
+#=
+* Table of fishing price by fishing mode
+table mode, statistic(mean pbeach) statistic(mean ppier) statistic(mean pprivate) statistic(mean pcharter) nformat(%6.0f)
+=#
+
+# Same `stata_table` (chunk 1) helper, now with the Stata `nformat()`
+# option threaded through: pass the raw Stata format string (`"%6.0f"`)
+# and the helper feeds it to `Printf.format` to render every non-count
+# cell as a fixed-point integer.
+stata_table(df15, :mode,
+    [(:mean, :pbeach), (:mean, :ppier),
+     (:mean, :pprivate), (:mean, :pcharter)];
+    nformat = "%6.0f");
+```
+
+```{julia}
+#=
+* Table of fishing catch rate by fishing mode
+table mode, statistic(mean qbeach) statistic(mean qpier) statistic(mean qprivate) statistic(mean qcharter) nformat(%6.2f)
+=#
+
+# Same shape as the previous price-by-mode table, with the four catch-
+# rate variables and `%6.2f` (fixed-point, 2 decimal places) instead.
+stata_table(df15, :mode,
+    [(:mean, :qbeach), (:mean, :qpier),
+     (:mean, :qprivate), (:mean, :qcharter)];
+    nformat = "%6.2f");
+```
+
+## 15.4 Multinomial logit model
+
+### 15.4.1 Multinomial logit in Julia
+
+There is no canonical Julia package for multinomial logit; we implement it
+manually with `Optim.jl`.
+
+### 15.4.2 Application
+
+```{julia}
+#=
+* Multinomial logit with base outcome alternative 1
+mlogit mode income, baseoutcome(1) nolog
+=#
+
+# `stata_mlogit` (chunk 1) fits a multinomial logistic regression by
+# ML (LBFGS with autodiff gradient; OIM via FD Hessian) and prints
+# Stata's `mlogit` output block — Number of obs / LR chi2(p) / Log
+# likelihood / Pseudo R2, then one coefficient sub-block per outcome
+# (base outcome flagged with `(base outcome)`). The returned
+# NamedTuple binds `B` (K × J−1 coefficient matrix in `[_cons; regs...]`
+# row order), `X`, `J`, and the cleaned `dfc` so the downstream
+# §15.4.3–§15.4.5 chunks can read `β_mnl`, `X15`, `J`, `df15c` directly.
+mlogit_res = stata_mlogit(df15, :mode, [:income]; baseoutcome = 1)
+β_mnl  = mlogit_res.B
+X15    = mlogit_res.X
+J      = mlogit_res.J
+df15c  = mlogit_res.dfc;
+```
+
+```{julia}
+#=
+* Wald test of the joint significance of income
+test income
+=#
+
+# `stata_test_mlogit` (chunk 1) is Stata's post-`mlogit` `test <var>`:
+# joint Wald test that the income coefficient equals zero in *every*
+# outcome equation. Stata enumerates one constraint per outcome (the
+# base-category row is flagged with `o.` for "omitted"), drops the
+# base constraint, and reports `chi2(J-1)` / `Prob > chi2` on the
+# remaining (J-1) active restrictions.
+stata_test_mlogit(mlogit_res, :income);
+```
+
+### 15.4.3 Coefficient interpretation
+
+```{julia}
+#=
+* Relative-risk option reports exp(b) rather than b
+mlogit mode income, rr baseoutcome(1) nolog
+=#
+# Relative-risk ratios = exp(β)
+println("\n— Relative-risk ratios (exp(β)) —")
+for (j, alt) in enumerate(("pier", "private", "charter"))
+    @printf("%-10s  exp(intercept) = %9.6f   exp(β_income) = %9.6f\n",
+            alt, exp(β_mnl[1, j]), exp(β_mnl[2, j]))
+end
+```
+
+```{julia}
+#=
+* Relative-risk option reports exp(b) rather than b
+mlogit mode income, rr baseoutcome(1) nolog
+=#
+
+# Same `stata_mlogit` (chunk 1) call, with `rrr = true` to mirror Stata's
+# `, rr` option: the coefficient column switches to "RRR" and reports
+# exp(β); SE uses the delta method (exp(β)·SE(β)); z and P>|z| are
+# unchanged (testing β = 0 ⇔ RRR = 1); CI endpoints are exp(β ± crit·SE(β)).
+stata_mlogit(df15, :mode, [:income]; baseoutcome = 1, rrr = true);
+```
+
+### 15.4.4 Predicted probabilities
+
+```{julia}
+#=
+// Following used below
+estimates store MNL
+=#
+#=
+// Following used below
+estimates store MNL
+=#
+
+# `estimates store MNL` snapshots the current estimation results under
+# the name "MNL" for later retrieval (e.g., `hausman MNL CL`). In Julia
+# we just bind the full NamedTuple returned by `stata_mlogit` to a
+# variable — `MNL.B`, `MNL.V`, `MNL.X`, `MNL.J`, etc. are all
+# accessible by downstream sections.
+MNL = mlogit_res;
+```
+
+```{julia}
+#=
+* Predict probabilities of choice of each mode and compare to actual freqs
+predict pmlogit1 pmlogit2 pmlogit3 pmlogit4, pr
+summarize pmlogit* dbeach dpier dprivate dcharter, separator(4)
+=#
+#=
+* Predict probabilities of choice of each mode and compare to actual freqs
+predict pmlogit1 pmlogit2 pmlogit3 pmlogit4, pr
+summarize pmlogit* dbeach dpier dprivate dcharter, separator(4)
+=#
+
+# `StatEcon._c15_mnl_probs` (chunk 1) evaluates the fitted MNL probabilities
+# P(y = j | x) for each outcome j — Stata's `predict pmlogit*, pr`.
+P_mnl = StatEcon._c15_mnl_probs(β_mnl, X15, J)
+df15c.pmlogit1 = P_mnl[:, 1]
+df15c.pmlogit2 = P_mnl[:, 2]
+df15c.pmlogit3 = P_mnl[:, 3]
+df15c.pmlogit4 = P_mnl[:, 4]
+
+# Indicator dummies for the actual choice (mirrors Stata's pre-built
+# `dbeach`/`dpier`/`dprivate`/`dcharter` — easier than relying on the
+# dataset's pre-computed columns and uses the same `_rawval` unwrap we
+# need everywhere else for labeled outcomes).
+df15c.dbeach    = Float64.(_rawval.(df15c.mode) .== 1)
+df15c.dpier     = Float64.(_rawval.(df15c.mode) .== 2)
+df15c.dprivate  = Float64.(_rawval.(df15c.mode) .== 3)
+df15c.dcharter  = Float64.(_rawval.(df15c.mode) .== 4)
+
+# Stata's `separator(4)` only controls the dashed line drawn every N
+# vars in long varlists; our `stata_summarize` helper never emits that
+# separator, so it's a no-op here.
+stata_summarize(df15c,
+    [:pmlogit1, :pmlogit2, :pmlogit3, :pmlogit4,
+     :dbeach, :dpier, :dprivate, :dcharter]);
+```
+
+### 15.4.5 Marginal effects
+
+```{julia}
+#=
+* Sample average predicted probability of the third outcome
+margins, predict(outcome(3)) noatlegend
+=#
+
+# `stata_margins_mlogit` (chunk 1) computes Stata's `margins,
+# predict(outcome(<k>)) noatlegend` after `mlogit`: the sample-average
+# predicted probability P̄ = (1/N) Σᵢ P̂ᵢ(outcome) with delta-method SE
+# from the closed-form per-obs gradient ∂Pᵢ(j)/∂β and `MNL.V`.
+# `noatlegend` only suppresses the at-values legend block (which we
+# don't emit anyway), so it's a no-op here.
+stata_margins_mlogit(MNL; outcome = 3);
+
+```
+
+```{julia}
+#=
+* Marginal effect at mean of income change for outcome 3
+margins, dydx(*) predict(outcome(3)) atmean noatlegend
+=#
+
+# `stata_margins_dydx_mlogit` (chunk 1) computes Stata's
+# `margins, dydx(*) predict(outcome(<k>)) atmean noatlegend`: the
+# closed-form MNL partial derivative
+#     ∂Pᵢ(target)/∂x_c = Pᵢ(target)·(β_{target,c} − Σₗ β_{l,c}·Pᵢ(l))
+# evaluated at the sample means of `X` (`at = :mean`), with a delta-
+# method SE built from a central-FD Jacobian w.r.t. vec(B) and `MNL.V`.
+stata_margins_dydx_mlogit(MNL; outcome = 3, at = :mean);
+
+```
+
+```{julia}
+#=
+* Average marginal effect of income change for outcome 3
+margins, dydx(*) predict(outcome(3)) noatlegend
+=#
+
+# Same `stata_margins_dydx_mlogit` (chunk 1) helper, with
+# `at = :asobserved` to get the *average* marginal effect: evaluate
+# the closed-form ∂Pᵢ(target)/∂x_c at every estimation-sample row and
+# average. SE is delta-method on the gradient of that average.
+# Stata's title switches from "Conditional marginal effects" (atmean)
+# to "Average marginal effects" — the helper does the same.
+stata_margins_dydx_mlogit(MNL; outcome = 3, at = :asobserved);
+
+```
+
+## 15.5 Conditional logit model
+
+### 15.5.1 Wide-form to long-form conversion
+
+```{julia}
+#=
+* Data are in wide form
+list mode price pbeach ppier pprivate pcharter in 1, clean
+=#
+
+# `stata_list` (chunk 1) is Stata's `list <varlist> in <range>, clean`:
+# clean format (no border/`|` separators), obs-number prefix, %9.0g
+# numerics, and labeled values unwrapped to their string label. Stata's
+# `in 1` picks just the first row.
+stata_list(df15, [:mode, :price, :pbeach, :ppier, :pprivate, :pcharter];
+           in_range = 1);
+```
+
+```{julia}
+#=
+* Convert data from wide form to long form
+generate id = _n
+reshape long d p q, i(id) j(fishmode beach pier private charter) string
+save musr/mus15datalong.dta, replace
+=#
+
+# Stata's wide→long reshape: for each obs `id ∈ 1..N`, create one row
+# per alternative (beach, pier, private, charter), with `d`/`p`/`q`
+# pulled from `d<mode>`/`p<mode>`/`q<mode>` and `fishmode` the string
+# alternative label. Per-obs invariants (`mode`, `income`) are
+# replicated across the 4 long rows so `clogit_nll` can read them on
+# any single row of a group.
+df15.id = 1:DataFrames.nrow(df15)
+df15long = DataFrames.DataFrame()
+for m in ("beach", "pier", "private", "charter")
+    DataFrames.append!(df15long, DataFrames.DataFrame(
+        id       = df15.id,
+        fishmode = fill(m, DataFrames.nrow(df15)),
+        d        = df15[!, Symbol("d", m)],
+        p        = df15[!, Symbol("p", m)],
+        q        = df15[!, Symbol("q", m)],
+        mode     = df15.mode,
+        income   = df15.income,
+    ))
+end
+DataFrames.sort!(df15long, [:id])
+
+# Stata's `save … , replace` writes the long file to disk for later
+# scripts; in Julia `df15long` lives in memory and downstream chunks
+# read it directly. A CSV mirror is kept on disk for parity (the
+# textbook's downstream Stata sessions reload from .dta — Julia
+# sessions can `CSV.read("musr/mus15datalong.csv", DataFrame)` instead).
+CSV.write("$(DATA)/musr/mus15datalong.csv", df15long);
+```
+
+```{julia}
+#=
+* List data for the first case after reshape
+list in 1/4, clean noobs
+=#
+
+# Same `stata_list` (chunk 1) helper applied to *every* column of
+# `df15long` for rows 1..4 — the four alternative rows of the first
+# id. `noobs = true` suppresses the obs-number prefix to match
+# Stata's `, clean noobs`.
+stata_list(df15long, Symbol.(DataFrames.names(df15long));
+           in_range = 1:4, noobs = true);
+```
+
+### 15.5.2 Conditional logit (manual)
+
+### 15.5.3 The dogit model
+
+### 15.5.4 Application
+
+```{julia}
+#=
+* Conditional logit with alternative-specific and case-specific regressors
+asclogit d p q, case(id) alternatives(fishmode) casevars(income) basealternative(beach) nolog
+=#
+
+# `stata_asclogit` (chunk 1) fits Stata's alternative-specific
+# conditional logit on the long-form `df15long`: utility
+#     U_ij = β_p·p_ij + β_q·q_ij + α_j + γ_j·income_i + ε_ij
+# with `beach` pinning α_beach = γ_beach = 0. The returned NamedTuple
+# binds `β_cl` (the concatenated parameter vector `[β_p; β_q;
+# α_pier,α_private,α_charter; γ_pier,γ_private,γ_charter]`) so the
+# downstream §15.5.7 / §15.5.8 chunks can call `StatEcon._c15_clogit_probs(β_cl, …)`
+# directly.
+asclogit_res = stata_asclogit(df15long;
+    case_var      = :id,
+    alt_var       = :fishmode,
+    depvar        = :d,
+    alt_specific  = [:p, :q],
+    case_vars     = [:income],
+    basealt       = "beach")
+β_cl = asclogit_res.β_cl;
+```
+
+```{julia}
+#=
+// Following used below
+estimates store CL
+=#
+
+# Stata `estimates store CL` snapshots the current `asclogit` fit for
+# later retrieval (e.g., the `hausman MNL CL` IIA test in §15.5.5).
+# In Julia we just bind the NamedTuple returned by `stata_asclogit` —
+# `CL.β_cl`, `CL.V`, `CL.alts`, `CL.nonbase`, etc. all accessible
+# downstream.
+CL = asclogit_res;
+```
+
+### 15.5.5 Relationship to multinomial logit
+
+### 15.5.6 Coefficient interpretation
+
+### 15.5.7 Predicted probabilities
+
+```{julia}
+#=
+* Predicted probabilities of choice of each mode and compare to actual freqs
+*capture drop pasclogit
+predict pasclogit, pr
+table fishmode, statistic(mean d) statistic(mean pasclogit) statistic(sd pasclogit)
+=#
+#=
+* Predicted probabilities of choice of each mode and compare to actual freqs
+*capture drop pasclogit
+predict pasclogit, pr
+table fishmode, statistic(mean d) statistic(mean pasclogit) statistic(sd pasclogit)
+=#
+
+# `predict pasclogit, pr` after `asclogit` is the same per-(case,
+# alternative) softmax that `StatEcon._c15_clogit_probs` (chunk 1) implements:
+# stable softmax over each case's J utilities given `β_cl`. The Stata
+# `table` then aggregates by `fishmode` — mean(d) recovers the
+# empirical share per alternative, and mean(pasclogit) /
+# sd(pasclogit) summarise the fitted probabilities. Both go through
+# `stata_table` (chunk 1) for a Stata-formatted block.
+df15long.pasclogit = StatEcon._c15_clogit_probs(β_cl, df15long)
+stata_table(df15long, :fishmode,
+    [(:mean, :d), (:mean, :pasclogit), (:sd, :pasclogit)]);
+```
+
+### 15.5.8 Marginal effects
+
+```{julia}
+#=
+// Following not included in book
+estat alternatives
+=#
+
+# `stata_estat_alternatives` (chunk 1) is Stata's post-`asclogit`
+# diagnostic: per-alternative counts (cases-available, % cases, times-
+# chosen, % chosen). Reads alternatives from `CL.alts` (order in which
+# `stata_asclogit` first saw them in the data) and tallies against
+# `df15long`.
+stata_estat_alternatives(CL, df15long;
+    depvar = :d, alt_var = :fishmode, case_var = :id);
+```
+
+```{julia}
+#=
+* Marginal effect at mean of change in price
+estat mfx, varlist(p)
+=#
+
+# `stata_estat_mfx_asclogit` (chunk 1) is Stata's `estat mfx,
+# varlist(<var>)` after `asclogit`. At the per-alternative means of
+# all regressors, it reports the closed-form alt-specific marginal
+# effect
+#     ∂P̄_k / ∂x_j = P̄_k · (δ_kj − P̄_j) · β_var
+# for every (target outcome k, varied alternative j) pair — Stata's
+# "own" (k = j) and "cross" (k ≠ j) effects — with delta-method SE
+# from a numerical Jacobian on `CL.V`.
+stata_estat_mfx_asclogit(CL, df15long; var = :p);
+```
+
+```{julia}
+#=
+* Alternative-specific example: AME of beach price change computed manually
+preserve
+quietly summarize p
+generate delta = r(sd)/1000
+quietly replace p = p + delta if fishmode == "beach"
+predict pnew, pr
+generate dpdbeach = (pnew - pasclogit)/delta
+tabulate fishmode, summarize(dpdbeach)
+restore
+=#
+
+# Manual finite-difference AME of beach price change. Stata's
+# `preserve`/`restore` is a temporary-edit pattern — we get the same
+# effect by working on a `copy` of `df15long`. The step δ is the
+# textbook's `sd(p)/1000`. The Stata `tabulate fishmode,
+# summarize(dpdbeach)` produces mean / SD / freq of `dpdbeach` per
+# alternative; we feed those three stats to `stata_table` (chunk 1).
+df15long_p = copy(df15long)
+δ = Statistics.std(df15long_p.p) / 1000
+df15long_p.p[df15long_p.fishmode .== "beach"] .+= δ
+df15long_p.pnew    = StatEcon._c15_clogit_probs(β_cl, df15long_p)
+df15long_p.dpdbeach = (df15long_p.pnew .- df15long_p.pasclogit) ./ δ
+stata_table(df15long_p, :fishmode,
+    [(:mean, :dpdbeach), (:sd, :dpdbeach), (:count, :dpdbeach)]);
+```
+
+## 15.6 Nested logit model
+
+### 15.6.1 Relaxing the IIA assumption
+
+### 15.6.2 NL model
+
+```{julia}
+#=
+* Define the Tree for Nested logit
+*       with nesting structure 
+*             /     \
+*           /  \   /  \
+
+* Convert string variable fishmode to integer values and attach labels
+* encode fishmode, gen(intmode)
+* label list intmode     // Check ordering of intmode
+=#
+#=
+* Define the Tree for Nested logit
+*       with nesting structure
+*             /     \
+*           /  \   /  \
+
+* Convert string variable fishmode to integer values and attach labels
+encode fishmode, gen(intmode)
+label list intmode     // Check ordering of intmode
+=#
+
+# `stata_encode` (chunk 1) builds Stata's 1-based integer encoding of
+# `df15long.fishmode` (sorted alphabetically — beach/charter/pier/
+# private), writes it into `df15long.intmode`, and returns the
+# `Int ⇒ String` label dictionary. `stata_label_list` then prints it
+# in Stata's two-column `label list` layout.
+intmode_lbl = stata_encode(df15long, :fishmode; gen = :intmode)
+stata_label_list(intmode_lbl; name = "intmode");
+```
+
+### 15.6.3 Nested logit in Julia
+
+### 15.6.4 Model estimates
+
+```{julia}
+#=
+* Define the tree for nested logit
+nlogitgen type = fishmode(shore: pier | beach, boat: private | charter)
+=#
+#=
+* Define the tree for nested logit
+nlogitgen type = fishmode(shore: pier | beach, boat: private | charter)
+=#
+
+# `stata_nlogitgen` (chunk 1) is Stata's `nlogitgen`: assigns each
+# alternative to a nest, writes the integer-coded nest column into
+# `df15long.type` (1 = shore, 2 = boat — left-to-right order in the
+# call), and prints the standard "new variable … generated with 2
+# groups" notice plus the `label list type` block.
+type_lbl = stata_nlogitgen(df15long, :fishmode;
+    gen   = :type,
+    nests = ["shore" => ["pier", "beach"],
+             "boat"  => ["private", "charter"]]);
+```
+
+```{julia}
+#=
+* Check the tree
+nlogittree fishmode type, choice(d)
+=#
+#=
+* Check the tree
+nlogittree fishmode type, choice(d)
+=#
+
+# `stata_nlogittree` (chunk 1) is Stata's `nlogittree`: lists the
+# nesting tree with per-nest / per-alternative row counts and a `k`
+# column (# times each alternative was chosen, i.e. `d == 1`). Passing
+# the original `nests` vector preserves Stata's within-nest order
+# (pier|beach for shore, private|charter for boat).
+stata_nlogittree(df15long, :fishmode, :type;
+    choice = :d,
+    nests  = ["shore" => ["pier", "beach"],
+              "boat"  => ["private", "charter"]]);
+```
+
+```{julia}
+#=
+* Nested logit model estimate
+nlogit d p q || type:, base(shore) || fishmode: income, case(id) notree nolog
+=#
+#=
+* Nested logit model estimate
+nlogit d p q || type:, base(shore) || fishmode: income, case(id) notree nolog
+=#
+
+# `stata_nlogit` (chunk 1) fits Stata's two-level nested logit by ML
+# (LBFGS with autodiff gradient; dissimilarity τ_k re-parametrised
+# through a logistic to keep it in (0, 1)). The chunk uses the same
+# long-form `df15long` and nest spec we set up in §15.6.2. Stata
+# picks the alphabetically-first alternative within the entire
+# fishmode set as the global base — `beach` here — and we follow.
+nlogit_res = stata_nlogit(df15long;
+    case_var     = :id,
+    alt_var      = :fishmode,
+    nest_col     = :type,
+    depvar       = :d,
+    alt_specific = [:p, :q],
+    case_vars    = [:income],
+    basealt      = "beach",
+    nests        = ["shore" => ["pier", "beach"],
+                    "boat"  => ["private", "charter"]]);
+```
+
+### 15.6.5 Predicted probabilities
+
+```{julia}
+#=
+// Following used below
+estimates store NL
+=#
+#=
+// Following used below
+estimates store NL
+
+* Predict level 1 and level 2 probabilities from NL model
+predict plevel1 plevel2, pr
+tabulate fishmode, summarize(plevel2)
+=#
+
+# Three Stata commands in one chunk:
+#   • `estimates store NL` → bind `NL = nlogit_res` for downstream
+#     `hausman MNL NL` (IIA test) and re-use.
+#   • `predict plevel1 plevel2, pr` → `StatEcon._c15_nlogit_probs` (chunk 1) returns
+#     the within-nest conditional (level-1) and the nest-level
+#     marginal (level-2) probabilities, plus the joint.
+#   • `tabulate fishmode, summarize(plevel2)` → `stata_table` with
+#     mean / SD / N of `plevel2` by `fishmode`.
+NL = nlogit_res
+plv = StatEcon._c15_nlogit_probs(NL, df15long; case_var = :id, alt_var = :fishmode)
+df15long.plevel1 = plv.plevel1   # P(nest)         — top level
+df15long.plevel2 = plv.plevel2   # P(alternative)  — joint, bottom level
+
+# `tabulate fishmode, summarize(plevel2)` — mean / SD / N of the
+# unconditional alternative probability by fishmode. With this RUM-
+# consistent nlogit, the per-alternative mean of plevel2 collapses
+# to the empirical choice share (the same identity that holds for
+# any saturated discrete-choice MLE).
+stata_table(df15long, :fishmode,
+    [(:mean, :plevel2), (:sd, :plevel2), (:count, :plevel2)]);
+
+```
+
+### 15.6.6 Marginal effects
+
+```{julia}
+#=
+// Following not included in book
+list d plevel1 plevel2 in 1/4, clean
+estat alternatives
+=#
+
+# `stata_list` (chunk 1) for the first case's four alternative rows,
+# then `stata_estat_alternatives` re-applied to the nlogit fit `NL`
+# (the helper reads `res.alts` so it works for both `asclogit` and
+# `nlogit` results).
+stata_list(df15long, [:d, :plevel1, :plevel2]; in_range = 1:4)
+stata_estat_alternatives(NL, df15long;
+    depvar = :d, alt_var = :fishmode, case_var = :id);
+```
+
+```{julia}
+#=
+* AME of beach price change computed manually
+preserve
+quietly summarize p
+generate delta = r(sd)/1000
+quietly replace p = p + delta if fishmode == "beach"
+predict pnew1 pnew2, pr
+generate dpdbeach = (pnew2 - plevel2)/delta
+tabulate fishmode, summarize(dpdbeach)
+restore
+=#
+
+# Same manual-FD recipe used after `asclogit`, applied to the nested
+# logit fit `NL`. `preserve`/`restore` is mimicked by working on a
+# `copy(df15long)`. We bump only the beach rows' `p` by δ = SD(p)/1000,
+# recompute the joint alternative probability via `StatEcon._c15_nlogit_probs`
+# (Stata's `plevel2` = bottom-level joint), form (pnew2 − plevel2)/δ,
+# and summarize by fishmode.
+df15long_nl = copy(df15long)
+δ_nl = Statistics.std(df15long_nl.p) / 1000
+df15long_nl.p[df15long_nl.fishmode .== "beach"] .+= δ_nl
+plv_new = StatEcon._c15_nlogit_probs(NL, df15long_nl; case_var = :id, alt_var = :fishmode)
+df15long_nl.pnew2    = plv_new.plevel2
+df15long_nl.dpdbeach = (df15long_nl.pnew2 .- df15long.plevel2) ./ δ_nl
+stata_table(df15long_nl, :fishmode,
+    [(:mean, :dpdbeach), (:sd, :dpdbeach), (:count, :dpdbeach)]);
+```
+
+### 15.6.7 Comparison of logit models
+
+```{julia}
+#=
+* Summary statistics for the logit models
+estimates table MNL CL NL, keep(p q) stats(N ll aic bic) equation(1) b(%7.3f) stfmt(%7.0f)
+=#
+#=
+* Summary statistics for the logit models
+estimates table MNL CL NL, keep(p q) stats(N ll aic bic) equation(1) b(%7.3f) stfmt(%7.0f)
+=#
+
+# `stata_estimates_table_compare` (chunk 1) compares the three stored
+# fits side-by-side. The `keep` block looks up `p` and `q` in each
+# model: MNL has no alt-specific p/q (case-specific-only mlogit), so
+# its cells print as `.`; CL (`asclogit`) and NL (`nlogit`) report
+# their β_alt coefficients. Statistics block (N / ll / aic / bic)
+# uses `res.n_obs` (or `res.n` for MNL) and `res.nparam` for the IC
+# formulas. Distinct from the older `estimates_table_stata` helper,
+# which is for full regression-output tables with t-stats.
+stata_estimates_table_compare([
+    "MNL" => MNL,
+    "CL"  => CL,
+    "NL"  => NL
+]; keep = [:p, :q]);
+
+```
+
+## 15.7 Multinomial probit model
+
+### 15.7.1 MNP
+
+### 15.7.2 The mprobit-style model
+
+```{julia}
+#=
+// Following not included in book
+* Multinomial Probit with independent errors and case-invariant regressors
+use musr/mus15data.dta, clear
+mprobit mode income, baseoutcome(1)
+=#
+
+# `stata_mprobit` (chunk 1) is the independent-errors multinomial
+# probit: same case-specific design as `stata_mlogit` but with iid
+# normal latent errors instead of Gumbel. The choice probability
+# becomes a single 1-D integral
+#     P(j*|i) = ∫ ∏_{k ≠ j*} Φ(z + V_ij* − V_ik) φ(z) dz
+# evaluated by 20-point Gauss–Hermite quadrature. Estimation by ML
+# (LBFGS + autodiff gradient), OIM via FD Hessian.
+stata_mprobit(df15, :mode, [:income]; baseoutcome = 1);
+
+```
+
+### 15.7.3 Maximum simulated likelihood
+
+### 15.7.4 The asmprobit-style model
+
+### 15.7.5 Application
+
+```{julia}
+#=
+* Multinomial probit wuth unstructured errors when charter is dropped
+use musr/mus15datalong.dta, clear
+drop if fishmode=="charter" | mode == 4
+asmprobit d p q, case(id) alternatives(fishmode) casevars(income) correlation(unstructured) structural vce(robust)
+=#
+
+# Stata's full `asmprobit, correlation(unstructured) structural vce(robust)`
+# is one of the most complex estimators in the package (BVN/MVN CDF
+# integration + sandwich SEs); pure-Julia chunk-1 helpers we have
+# implement the simpler **independent-errors** variant. Coefficients
+# land in the right neighbourhood but won't exactly match Stata's
+# unstructured fit — see `stata_asmprobit`'s docstring.
+df15long_sub = filter(:fishmode => !=("charter"), df15long)
+df15long_sub = filter(:mode => v -> _rawval(v) != 4, df15long_sub)
+
+asmprobit_res = stata_asmprobit(df15long_sub;
+    case_var     = :id,
+    alt_var      = :fishmode,
+    depvar       = :d,
+    alt_specific = [:p, :q],
+    case_vars    = [:income],
+    basealt      = "beach");
+
+```
+
+```{julia}
+#=
+* Show correlations and covariance
+estat correlation
+estat covariance
+=#
+
+# `stata_estat_correlation` / `stata_estat_covariance` (chunk 1)
+# after `stata_asmprobit`. Since our helper uses **independent
+# errors**, the structural (J×J) matrices are the identity — no free
+# correlation parameters. The differenced (J-1)×(J-1) form has 2 on
+# the diagonal and 1 off-diagonal (correlation 0.5) because every
+# differenced pair shares the base alternative's latent error.
+stata_estat_correlation(asmprobit_res)
+stata_estat_covariance(asmprobit_res);
+```
+
+### 15.7.6 Predicted probabilities and MEs
+
+## 15.8 Random-parameters logit
+
+### 15.8.1 Random-parameters logit
+
+### 15.8.2 Mixed logit estimator
+
+### 15.8.3 Data preparation
+
+```{julia}
+# Add case-invariant regressors interacted with alternative dummies
+df15long.dpier    = Int.(df15long.fishmode .== "pier")
+df15long.dprivate = Int.(df15long.fishmode .== "private")
+df15long.dcharter = Int.(df15long.fishmode .== "charter")
+df15long.ypier    = df15long.dpier    .* df15long.income
+df15long.yprivate = df15long.dprivate .* df15long.income
+df15long.ycharter = df15long.dcharter .* df15long.income
+DataFrames.describe(df15long[:, [:dpier, :dprivate, :dcharter,
+                                  :ypier, :yprivate, :ycharter]])
+```
+
+```{julia}
+#=
+* Data set up to include case-invariant regressors
+use musr/mus15datalong.dta, clear
+generate dbeach = fishmode=="pier"
+generate dprivate = fishmode=="private"
+generate dcharter = fishmode=="charter"
+generate ybeach = dbeach*income
+generate yprivate = dprivate*income
+generate ycharter = dcharter*income
+=#
+
+# Translates the textbook's data-setup block literally, including the
+# apparent typo on `dbeach` (Stata's code defines it as
+# `fishmode == "pier"`, NOT `"beach"`; the others follow the matching
+# alternative name). We preserve the snippet verbatim — flag the
+# inconsistency rather than silently fix it.
+df15long.dbeach   = Float64.(df15long.fishmode .== "pier")     # NB: matches textbook typo
+df15long.dprivate = Float64.(df15long.fishmode .== "private")
+df15long.dcharter = Float64.(df15long.fishmode .== "charter")
+income_long       = Float64.(_rawval.(df15long.income))
+df15long.ybeach   = df15long.dbeach   .* income_long
+df15long.yprivate = df15long.dprivate .* income_long
+df15long.ycharter = df15long.dcharter .* income_long;
+```
+
+### 15.8.4 Application
+
+```{julia}
+#=
+*ssc install mixlogit
+* Mixed logit or random parameters logit estimation
+drop if fishmode=="charter" | mode == 4
+capture noisily mixlogit d q dbeach dprivate ybeach yprivate, group(id) rand(p)
+if _rc != 0 {
+    display "Note: mixlogit convergence failed (flat region encountered)"
+}
+=#
+
+# Same `stata_mixlogit` (chunk 1) call as §15.8.2 above, now run on the
+# §15.8.3 data setup that builds `dbeach`/`dprivate`/`ybeach`/`yprivate`
+# on `df15long` in-place (preserving the textbook typo where `dbeach`
+# is `fishmode == "pier"`). We subset to drop the charter alt rows
+# and the cases that chose charter, then fit with `p` as the random
+# coefficient. See the §15.8.2 chunk for the local-optimum caveat —
+# the LL will be close to Stata's reported value but the fixed-
+# coefficient block may land at a different basin.
+df15long_mix2 = filter(:fishmode => !=("charter"), df15long)
+df15long_mix2 = filter(:mode => v -> _rawval(v) != 4, df15long_mix2)
+
+stata_mixlogit(df15long_mix2;
+    case_var    = :id,
+    depvar      = :d,
+    fixed_regs  = [:q, :dbeach, :dprivate, :ybeach, :yprivate],
+    random_reg  = :p);
+```
+
+```{julia}
+#=
+// Following not included in book
+* Conditional logit using clogit as comparison
+clogit d p q dbeach dprivate dcharter ybeach yprivate ycharter, group(id)
+=#
+
+# Stata's `clogit` runs on the charter-dropped subset that's already
+# in memory from §15.8.4 (the `drop if fishmode=="charter" | mode==4`
+# modifies the dataset in place). After that filter, `dcharter` and
+# `ycharter` are identically zero so Stata flags them `(omitted)` —
+# we just leave them out of `regs`. Because the §15.8.3 setup defines
+# `dbeach = fishmode == "pier"` (textbook typo), the coefficient on
+# `dbeach` is the *pier vs beach* contrast; with beach as the
+# implicit base, both `dbeach` and `dprivate` get positive signs
+# (matching the empirical shares pier > beach, private > beach).
+df15long_clcmp = filter(:fishmode => !=("charter"), df15long)
+df15long_clcmp = filter(:mode => v -> _rawval(v) != 4, df15long_clcmp)
+
+stata_clogit(df15long_clcmp;
+    case_var = :id,
+    depvar   = :d,
+    regs     = [:p, :q, :dbeach, :dprivate, :ybeach, :yprivate]);
+```
+
+## 15.9 Ordered outcome models
+
+### 15.9.1 Data summary
+
+```{julia}
+#=
+* Create multinomial ordered outcome variables takes values y = 1, 2, 3
+use musr/mus18data.dta, clear
+quietly keep if year==2
+generate hlthpf = hlthp + hlthf
+generate hlthe = (1 - hlthpf - hlthg)
+quietly generate hlthstat = 1 if hlthpf == 1
+quietly replace hlthstat = 2 if hlthg == 1
+quietly replace hlthstat = 3 if hlthe == 1
+label variable hlthstat "health status"
+label define hsvalue 1 poor_or_fair 2 good 3 excellent
+label values hlthstat hsvalue
+tabulate hlthstat
+=#
+#=
+* Create multinomial ordered outcome variables takes values y = 1, 2, 3
+use musr/mus18data.dta, clear
+quietly keep if year==2
+generate hlthpf = hlthp + hlthf
+generate hlthe = (1 - hlthpf - hlthg)
+quietly generate hlthstat = 1 if hlthpf == 1
+quietly replace hlthstat = 2 if hlthg == 1
+quietly replace hlthstat = 3 if hlthe == 1
+label variable hlthstat "health status"
+label define hsvalue 1 poor_or_fair 2 good 3 excellent
+label values hlthstat hsvalue
+tabulate hlthstat
+=#
+
+# §15.9 switches dataset to `mus18data.dta` (medical-care panel) and
+# keeps only year == 2 for the cross-section example. We construct
+# the 3-level ordered outcome `hlthstat` (1 = poor_or_fair,
+# 2 = good, 3 = excellent) from the binary health indicators, then
+# print the value-label legend via `stata_label_list` and the
+# frequency table via `stata_tabulate` (both chunk 1).
+df18_y2 = let
+    df = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus18data.dta"))
+    DataFrames.filter(:year => v -> _rawval(v) == 2, df)
+end
+df18_y2.hlthpf = Int.(_rawval.(df18_y2.hlthp)) .+ Int.(_rawval.(df18_y2.hlthf))
+df18_y2.hlthe  = 1 .- df18_y2.hlthpf .- Int.(_rawval.(df18_y2.hlthg))
+df18_y2.hlthstat = [pf == 1 ? 1 : (g == 1 ? 2 : 3)
+                    for (pf, g) in zip(df18_y2.hlthpf,
+                                       Int.(_rawval.(df18_y2.hlthg)))]
+
+hsvalue = Dict(1 => "poor_or_fair", 2 => "good", 3 => "excellent")
+println("Variable label: hlthstat — \"health status\"")
+stata_label_list(hsvalue; name = "hsvalue")
+println()
+stata_tabulate(df18_y2, :hlthstat);
+```
+
+```{julia}
+#=
+* Summarize dependent and explanatory variables
+summarize hlthstat age linc ndisease
+=#
+#=
+* Summarize dependent and explanatory variables
+summarize hlthstat age linc ndisease
+=#
+
+# `linc` (= log(income)) is pre-computed in `mus18data.dta`, so we
+# don't need to regenerate it — just feed the four variables directly
+# to `stata_summarize` (chunk 1) for Stata's standard Obs / Mean /
+# Std / Min / Max block.
+stata_summarize(df18_y2, [:hlthstat, :age, :linc, :ndisease]);
+```
+
+### 15.9.2 Ordered outcomes
+
+### 15.9.3 Ordered logit MLE
+
+```{julia}
+#=
+* Ordered logit estimates
+ologit hlthstat age linc ndisease, nolog
+=#
+
+# `stata_ologit` (chunk 1) fits an ordered logit by ML (LBFGS with
+# autodiff gradient). Cut-points are parametrised as
+# τ_1 = θ_{cut,1}, τ_j = τ_{j−1} + exp(θ_{cut,j}) so the optimiser
+# never crosses cut-point ordering; SEs for τ are delta-method
+# corrected. Returns β / τ / X / J / dfc and likelihood diagnostics
+# for downstream `StatEcon._c15_ologit_probs` and marginal-effects chunks.
+ologit_res = stata_ologit(df18_y2, :hlthstat, [:age, :linc, :ndisease])
+β_ol   = ologit_res.β
+τ_ol   = ologit_res.τ
+X_ol   = ologit_res.X
+J_o    = ologit_res.J
+df18_ol = ologit_res.dfc;
+
+```
+
+### 15.9.4 Predicted probabilities
+
+```{julia}
+#=
+* Calculate predicted probability that y=1, 2, or 3 for each person
+predict p1ologit p2ologit p3ologit, pr
+summarize hlthpf hlthg hlthe p1ologit p2ologit p3ologit, separator(0)
+=#
+#=
+* Calculate predicted probability that y=1, 2, or 3 for each person
+predict p1ologit p2ologit p3ologit, pr
+summarize hlthpf hlthg hlthe p1ologit p2ologit p3ologit, separator(0)
+=#
+
+# `StatEcon._c15_ologit_probs` (chunk 1) is the ordered-logit `predict, pr`:
+# P[:, j] = Λ(τ_j − Xβ) − Λ(τ_{j-1} − Xβ) with end-point handling.
+# Stata's `separator(0)` only suppresses the every-5-rows dashed
+# line in long summarize tables — `stata_summarize` (chunk 1) never
+# emits that separator, so the option is a no-op.
+P_ol = StatEcon._c15_ologit_probs(β_ol, τ_ol, X_ol, J_o)
+df18_ol.p1ologit = P_ol[:, 1]
+df18_ol.p2ologit = P_ol[:, 2]
+df18_ol.p3ologit = P_ol[:, 3]
+
+# Re-attach the binary health indicators to the cleaned subset
+# (dropmissing kept only the model columns).
+df18_ol.hlthpf = Int.(df18_ol.hlthstat .== 1)
+df18_ol.hlthg  = Int.(df18_ol.hlthstat .== 2)
+df18_ol.hlthe  = Int.(df18_ol.hlthstat .== 3)
+
+stata_summarize(df18_ol,
+    [:hlthpf, :hlthg, :hlthe, :p1ologit, :p2ologit, :p3ologit]);
+```
+
+### 15.9.5 Marginal effects
+
+```{julia}
+#=
+* Marginal effect at mean for 3rd outcome (health status excellent)
+margins, dydx(*) predict(outcome(3)) atmean noatlegend
+=#
+
+# `stata_margins_dydx_ologit` (chunk 1) is Stata's `margins, dydx(*)
+# predict(outcome(<j>)) atmean noatlegend` after `ologit`. Closed-
+# form ∂P(y = j)/∂x_c = β_c · [λ(τ_{j−1} − x'β) − λ(τ_j − x'β)] at
+# the column means of `res.X`, with delta-method SE from a central-FD
+# Jacobian against `res.V` (which jointly covers β and τ).
+stata_margins_dydx_ologit(ologit_res; outcome = 3, at = :mean);
+```
+
+### 15.9.6 Other ordered models
+
+## 15.10 Multivariate outcomes
+
+### 15.10.1 Bivariate probit
+
+```{julia}
+#=
+* Two binary dependent variables: hlthe and dmdu
+tabulate hlthe dmdu
+correlate hlthe dmdu
+=#
+#=
+* Two binary dependent variables: hlthe and dmdu
+tabulate hlthe dmdu
+correlate hlthe dmdu
+=#
+
+# `stata_tabulate_two_way` (chunk 1) — Stata's two-way `tabulate` with
+# row/column/grand totals. Then `stata_correlate` (chunk 1) prints
+# the standard Pearson correlation matrix. Both run on `df18_y2`
+# which already carries the binary `hlthe` indicator built in §15.9.1
+# and the original `dmdu` column from mus18.
+stata_tabulate_two_way(df18_y2, :hlthe, :dmdu)
+stata_correlate(df18_y2, [:hlthe, :dmdu]);
+```
+
+```{julia}
+#=
+* Bivariate probit estimates
+biprobit hlthe dmdu age linc ndisease, nolog
+=#
+#=
+* Bivariate probit estimates
+biprobit hlthe dmdu age linc ndisease, nolog
+=#
+
+# `stata_biprobit` (chunk 1) fits bivariate probit by ML using the
+# equi-correlation decomposition: ε_1, ε_2 share a common factor Z
+# weighted by √|ρ|, with the rest carried by independent η_j. That
+# reduces the joint probability to a 1-D integral over Z which
+# `integration_pts`-point Gauss–Hermite (default 24) handles cheaply.
+# ρ is parametrised as `tanh(θ_ρ)` so the optimiser walks an
+# unbounded line; SEs are delta-method-transformed back to (−1, 1).
+# Both equations share the regressor list `[age, linc, ndisease]`.
+biprobit_res = stata_biprobit(df18_y2, [:hlthe, :dmdu],
+                              [:age, :linc, :ndisease]);
+```
+
+```{julia}
+#=
+* Predicted probabilities
+predict biprob1, pmarg1
+predict biprob2, pmarg2
+predict biprob11, p11
+predict biprob10, p10
+predict biprob01, p01
+predict biprob00, p00
+summarize hlthe dmdu biprob1 biprob2 biprob11 biprob10 biprob01 biprob00
+=#
+#=
+* Predicted probabilities
+predict biprob1, pmarg1
+predict biprob2, pmarg2
+predict biprob11, p11
+predict biprob10, p10
+predict biprob01, p01
+predict biprob00, p00
+summarize hlthe dmdu biprob1 biprob2 biprob11 biprob10 biprob01 biprob00
+=#
+
+# `StatEcon._c15_biprobit_probs` (chunk 1) returns the two marginals and the four
+# joint cells of the 2×2 outcome table, computed via the same
+# equi-correlation 1-D Gauss–Hermite scheme that `stata_biprobit`
+# used at fit time. Attach the six columns to `df18_y2` and feed
+# the eight variables (two indicators + six predictions) to
+# `stata_summarize`. As a saturated MLE sanity check:
+# mean(biprob1) ≈ mean(hlthe), mean(biprob2) ≈ mean(dmdu).
+plv = StatEcon._c15_biprobit_probs(biprobit_res, df18_y2)
+df18_y2.biprob1  = plv.pmarg1
+df18_y2.biprob2  = plv.pmarg2
+df18_y2.biprob11 = plv.p11
+df18_y2.biprob10 = plv.p10
+df18_y2.biprob01 = plv.p01
+df18_y2.biprob00 = plv.p00
+stata_summarize(df18_y2,
+    [:hlthe, :dmdu, :biprob1, :biprob2,
+     :biprob11, :biprob10, :biprob01, :biprob00]);
+```
+
+```{julia}
+#=
+// Following not included in book
+* Bivariate probit with different sets of regressors
+biprobit (hlthe = age linc) (dmdu = age linc ndisease), nolog
+=#
+#=
+// Following not included in book
+* Bivariate probit with different sets of regressors
+biprobit (hlthe = age linc) (dmdu = age linc ndisease), nolog
+=#
+
+# Same `stata_biprobit` (chunk 1) helper, now with a `regs2` keyword
+# for the dmdu equation. `regs` carries the hlthe equation's
+# regressors (age, linc); `regs2` adds `ndisease` for the dmdu
+# equation. The negll, Hessian, and printout all index by per-
+# equation `k1`/`k2` so the two regressor lists need not have the
+# same length.
+stata_biprobit(df18_y2, [:hlthe, :dmdu], [:age, :linc];
+    regs2 = [:age, :linc, :ndisease]);
+```
+
+### 15.10.2 Nonlinear SUR
+
+```{julia}
+#=
+* Nonlinear seemingly unrelated regressions estimator
+nlsur (hlthe = normal({a1}*age+{a2}*linc+{a3}*ndisease+{a4})) ///
+  (dmdu = normal({b1}*age+{b2}*linc+{b3}*ndisease+{b4})), vce(robust) nolog
+=#
+#=
+* Nonlinear seemingly unrelated regressions estimator
+nlsur (hlthe = normal({a1}*age+{a2}*linc+{a3}*ndisease+{a4})) ///
+  (dmdu = normal({b1}*age+{b2}*linc+{b3}*ndisease+{b4})), vce(robust) nolog
+=#
+
+# `stata_nlsur` (chunk 1) — two-equation NLSUR where each
+# conditional mean is `Φ(α'·[regs; 1])`. Two-step FGLS: unweighted NLS
+# for an initial Σ̂, then re-minimise with Σ̂⁻¹ weighting. `vce =
+# :robust` builds a sandwich SE from the per-obs score outer product.
+stata_nlsur(df18_y2, [:hlthe, :dmdu],
+    [:age, :linc, :ndisease]);
+```
+
+```{julia}
+#=
+// Following not included in book
+* Separate probits
+probit hlthe age linc ndisease
+probit dmdu age linc ndisease
+=#
+#=
+// Following not included in book
+* Separate probits
+probit hlthe age linc ndisease
+probit dmdu age linc ndisease
+=#
+
+# Two univariate probits as a benchmark for the joint biprobit and
+# NLSUR fits above. `stata_probit` (chunk 1) is the Stata-style probit
+# helper; we just run it once per outcome on the same `df18_y2`.
+stata_probit(df18_y2, StatsModels.@formula(hlthe ~ age + linc + ndisease))
+stata_probit(df18_y2, StatsModels.@formula(dmdu  ~ age + linc + ndisease));
+```
+
+## 15.11 Stata resources
+
