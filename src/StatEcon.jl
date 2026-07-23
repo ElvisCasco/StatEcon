@@ -166,6 +166,7 @@ include("stata_estat_overid_2sls.jl")
 include("stata_mlogit.jl")   # primary: houses _c15_raw / _c15_erf / _c15_optimize
 include("stata_mprobit.jl")
 include("stata_ologit.jl")
+include("stata_oprobit.jl")
 include("stata_biprobit.jl")
 include("stata_nlogit.jl")
 include("stata_asclogit.jl")
@@ -244,7 +245,7 @@ export dataset, datasets, datapath, datadir,
        stata_estat_classification, stata_estat_gof, stata_estat_overid_2sls,
        # ch15 — multinomial models
        stata_mlogit, stata_test_mlogit, stata_margins_mlogit, stata_margins_dydx_mlogit,
-       stata_mprobit, stata_ologit, stata_margins_dydx_ologit,
+       stata_mprobit, stata_ologit, stata_oprobit, stata_margins_dydx_ologit,
        stata_biprobit, stata_nlogit, stata_nlogitgen, stata_nlogittree,
        stata_asclogit, stata_clogit, stata_estat_alternatives, stata_estat_mfx_asclogit,
        stata_asmprobit, stata_mixlogit,

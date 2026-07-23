@@ -277,4 +277,27 @@ df = DataFrame(
         @test isapprox(se("grant_1"), 0.4292842; atol = 5e-6)
     end
 
+
+    @testset "stata_oprobit matches Stata (Wooldridge Ex. 15.5)" begin
+        # Ordered probit MLE. Values are Stata's published oprobit output for
+        #   oprobit pctstck choice age educ female black married finc25 finc35
+        #           finc50 finc75 finc100 finc101 wealth89 prftshr   (pension)
+        pension = dataset("pension")
+        XP = [:choice, :age, :educ, :female, :black, :married, :finc25, :finc35,
+              :finc50, :finc75, :finc100, :finc101, :wealth89, :prftshr]
+        r = redirect_stdout(devnull) do
+            stata_oprobit(pension, :pctstck, XP)
+        end
+        ci = findfirst(==(:choice), r.regs)
+        @test isapprox(r.β[ci],    0.371171;  atol = 1e-4)
+        @test isapprox(r.se_β[ci], 0.1841121; atol = 1e-4)
+        @test length(r.τ) == 2
+        @test isapprox(r.τ[1], -3.087373; atol = 1e-3)
+        @test isapprox(r.τ[2], -2.053553; atol = 1e-3)
+        @test issorted(r.τ)
+        @test isapprox(r.ll,        -201.9865; atol = 1e-2)
+        @test isapprox(r.LR,          20.77;   atol = 5e-2)
+        @test isapprox(r.pseudo_r2,    0.0489; atol = 1e-3)
+    end
+
 end
