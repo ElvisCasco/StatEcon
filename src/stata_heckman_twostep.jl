@@ -107,7 +107,11 @@ function stata_heckman_twostep(df, outcome::StatsModels.FormulaTerm,
     p_lam = 2 * (1 - Distributions.cdf(Distributions.Normal(), abs(z_lam)))
     lo_lam = α_lam - crit * se_lam; hi_lam = α_lam + crit * se_lam
 
-    se_pr = sqrt.(LinearAlgebra.diag(Matrix(GLM.vcov(m_pr))))
+    # Observed information, matching Stata's vce(oim) and `stata_probit`.
+    # `GLM.vcov` here is the expected (IRLS) information, which left the
+    # selection-block standard errors ~2% above Stata's.
+    se_pr = sqrt.(max.(LinearAlgebra.diag(
+        _probit_oim_vcov(Z, Float64.(GLM.response(m_pr)), γ̂)), 0.0))
     z_pr  = γ̂ ./ se_pr
     p_pr  = 2 .* (1 .- Distributions.cdf.(Distributions.Normal(), abs.(z_pr)))
     lo_pr = γ̂ .- crit .* se_pr; hi_pr = γ̂ .+ crit .* se_pr

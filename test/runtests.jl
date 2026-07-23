@@ -231,6 +231,20 @@ df = DataFrame(
         @test isapprox(b("nwifeinc"), -0.0120237; atol = 1e-5)
         @test isapprox(b("kidslt6"),  -0.8683285; atol = 1e-5)
         @test isapprox(r.ll, -401.30219; atol = 1e-4)
+
+        # stata_heckman_twostep's stage-1 probit shares the same observed-
+        # information vcov, so its selection-block SEs match Stata too (they
+        # were ~2% high while it used GLM.vcov directly). Wooldridge Ex. 17.6.
+        h = redirect_stdout(devnull) do
+            stata_heckman_twostep(mroz,
+                @formula(lwage ~ educ + exper + expersq),
+                @formula(inlf ~ nwifeinc + educ + exper + expersq + age +
+                                kidslt6 + kidsge6);
+                depvar_y = "lwage", depvar_d = "inlf")
+        end
+        snm = string.(h.selection_coefnames)
+        @test isapprox(h.se_selection[findfirst(==("nwifeinc"), snm)],
+                       0.0048398; atol = 5e-7)
     end
 
 end

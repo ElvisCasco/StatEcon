@@ -1,4 +1,29 @@
 """
+    _probit_oim_vcov(X, y, beta) -> Matrix
+
+Inverse of the OBSERVED information for a probit fit — the variance Stata's
+`vce(oim)` default reports. `GLM.vcov` gives the EXPECTED (IRLS/Fisher)
+information instead; for the non-canonical probit link the two differ, which
+left probit standard errors about 1-2% above Stata's.
+
+With `q = 2y-1`, `z = q*(X*beta)` and `lambda = q*phi(z)/Phi(z)`, the negative
+Hessian of the log-likelihood is `sum_i lambda_i (lambda_i + eta_i) x_i x_i'`.
+
+Shared by `stata_probit` and the stage-1 probit of `stata_heckman_twostep` so
+the two cannot drift apart.
+"""
+function _probit_oim_vcov(X::AbstractMatrix, y::AbstractVector, β::AbstractVector)
+    η  = X * β
+    q  = 2 .* y .- 1
+    z  = q .* η
+    Φz = Distributions.cdf.(Distributions.Normal(), z)
+    φz = Distributions.pdf.(Distributions.Normal(), z)
+    λ  = q .* (φz ./ max.(Φz, 1e-12))
+    w  = λ .* (λ .+ η)
+    return LinearAlgebra.inv(LinearAlgebra.Symmetric(X' * (w .* X)))
+end
+
+"""
     stata_probit(df, formula; vce=:oim, level=0.95, quiet=false) -> NamedTuple
 
 Stata-style `probit <depvar> <regs> [, vce(robust)]`. Fits a Binomial GLM
@@ -65,20 +90,7 @@ function stata_probit(df, formula; vce::Symbol=:oim, level::Float64=0.95,
     yv = Float64.(GLM.response(m))
     Xm = GLM.modelmatrix(m)
 
-    # Observed information, which is what Stata's vce(oim) default reports.
-    # `GLM.vcov` is the EXPECTED information from IRLS; for the non-canonical
-    # probit link the two differ, which left every probit standard error about
-    # 1-2% above Stata's. With q = 2y-1, z = q*eta and lambda = q*phi(z)/Phi(z),
-    # the negative Hessian is  sum_i lambda_i (lambda_i + eta_i) x_i x_i'.
-    A_oim = let η = Xm * β
-        q  = 2 .* yv .- 1
-        z  = q .* η
-        Φz = Distributions.cdf.(Distributions.Normal(), z)
-        φz = Distributions.pdf.(Distributions.Normal(), z)
-        λ  = q .* (φz ./ max.(Φz, 1e-12))
-        w  = λ .* (λ .+ η)
-        LinearAlgebra.inv(LinearAlgebra.Symmetric(Xm' * (w .* Xm)))
-    end
+    A_oim = _probit_oim_vcov(Xm, yv, β)
 
     V = if vce == :robust
         # Robust sandwich: V = A · meat · A · (n/(n-1)) with A the observed-
