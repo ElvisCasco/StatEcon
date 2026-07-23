@@ -38,6 +38,17 @@ function stata_heckman_twostep(df, outcome::StatsModels.FormulaTerm,
     df_h = DataFrames.dropmissing(df[:, needed], sel_vars)
     n_full = DataFrames.nrow(df_h)
 
+    # Coerce selection-formula columns to Float64. .dta files often store
+    # variables single-precision (Float32); GLM's probit fit then errors with
+    # a delbeta! MethodError when its Float64 Cholesky meets a Float32 model
+    # matrix. Matches the Float64 coercion in stata_probit/stata_tobit.
+    for v in sel_vars
+        col = df_h[!, v]
+        if eltype(col) <: Union{Missing, Real} && !(eltype(col) <: Union{Missing, Float64})
+            df_h[!, v] = Float64.(col)
+        end
+    end
+
     m_pr = GLM.glm(selection, df_h,
                    Distributions.Binomial(), GLM.ProbitLink())
     γ̂   = GLM.coef(m_pr); cn_pr = GLM.coefnames(m_pr)
