@@ -47,7 +47,7 @@ outpath(f) = joinpath(OUT, f)
 The datasets are bundled with `StatEcon` and load by name.
 
 ```{julia}
-mroz    = DataFrames.DataFrame(dataset("mroz"))      # 753 x 22
+mroz    = DataFrames.DataFrame(dataset("wooldridge/mroz"))      # 753 x 22
 nls80   = DataFrames.DataFrame(dataset("nls80"))     # 935 x 17
 jtrain1 = DataFrames.DataFrame(dataset("jtrain1"))   # 471 x 30
 size(mroz), size(nls80), size(jtrain1)

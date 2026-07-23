@@ -56,7 +56,7 @@ The chapter's estimators map onto `StatEcon` as follows:
 * `stata_ivregress_2sls`     — `ivreg y (x1 = z…) x2…`
 
 ```{julia}
-mroz = DataFrames.DataFrame(dataset("mroz"))   # 753 x 22
+mroz = DataFrames.DataFrame(dataset("wooldridge/mroz"))   # 753 x 22
 size(mroz)
 ```
 

@@ -45,7 +45,7 @@ outpath(f) = joinpath(OUT, f)
 # Data
 
 ```{julia}
-mroz    = DataFrames.DataFrame(dataset("mroz"))
+mroz    = DataFrames.DataFrame(dataset("wooldridge/mroz"))
 keane   = DataFrames.DataFrame(dataset("keane"))
 pension = DataFrames.DataFrame(dataset("pension"))
 (size(mroz), size(keane), size(pension))

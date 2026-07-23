@@ -45,10 +45,10 @@ outpath(f) = joinpath(OUT, f)
 ```
 
 ```{julia}
-mroz   = DataFrames.DataFrame(dataset("mroz"))     # 753 x 22
-card   = DataFrames.DataFrame(dataset("card"))     # 3010 x 34
+mroz   = DataFrames.DataFrame(dataset("wooldridge/mroz"))     # 753 x 22
+card   = DataFrames.DataFrame(dataset("wooldridge/card"))     # 3010 x 34
 nls80  = DataFrames.DataFrame(dataset("nls80"))    # 935 x 17
-injury = DataFrames.DataFrame(dataset("injury"))   # 7150 x 30
+injury = DataFrames.DataFrame(dataset("wooldridge/injury"))   # 7150 x 30
 size(mroz), size(card), size(nls80), size(injury)
 ```
 

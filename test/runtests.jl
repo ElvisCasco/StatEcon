@@ -176,7 +176,7 @@ df = DataFrame(
         # Plain `regress` shows Source/SS/df/MS and Adj R-squared; vce(robust)
         # does not. Values are Stata's published output for
         #   reg lwage exper expersq educ age kidslt6 kidsge6   (mroz.dta)
-        mroz = dataset("mroz")
+        mroz = dataset("wooldridge/mroz")
         capture(f) = mktemp() do path, io
             redirect_stdout(io) do; f(); end
             flush(io); read(path, String)
@@ -209,7 +209,7 @@ df = DataFrame(
         # non-canonical probit link, which left every probit SE 1-2% high.
         # Values are Stata's published output for
         #   probit inlf nwifeinc educ exper expersq age kidslt6 kidsge6  (mroz)
-        mroz = dataset("mroz")
+        mroz = dataset("wooldridge/mroz")
         r = redirect_stdout(devnull) do
             stata_probit(mroz, @formula(inlf ~ nwifeinc + educ + exper +
                                                expersq + age + kidslt6 + kidsge6))

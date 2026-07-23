@@ -43,7 +43,7 @@ outpath(f) = joinpath(OUT, f)
 ```
 
 ```{julia}
-mroz = dataset("mroz")     # 753 x 22
+mroz = dataset("wooldridge/mroz")     # 753 x 22
 size(mroz)
 ```
 

@@ -18,60 +18,74 @@ Absolute path of the data directory bundled with StatEcon.
 """
 datadir() = normpath(joinpath(@__DIR__, "..", "data"))
 
-# name (with and without extension) => absolute path
-function _dataset_registry()
-    reg = Dict{String,String}()
+# Every bundled file as (relative-path-under-data, absolute-path). Relative
+# paths use '/' on all platforms so subfolder-qualified lookups are portable.
+function _all_data_files()
     root = datadir()
-    isdir(root) || return reg
-    for (dir, _, files) in walkdir(root)
-        for f in files
-            full = joinpath(dir, f)
-            stem = splitext(f)[1]
-            reg[f] = full                                   # exact filename wins
-            # bare stem: prefer .dta when several extensions share a stem
-            if !haskey(reg, stem) || (lowercase(splitext(f)[2]) == ".dta")
-                reg[stem] = full
-            end
-        end
+    out = Tuple{String,String}[]
+    isdir(root) || return out
+    for (dir, _, files) in walkdir(root), f in files
+        full = joinpath(dir, f)
+        rel  = replace(relpath(full, root), '\\' => '/')
+        push!(out, (rel, full))
     end
-    return reg
+    return out
 end
 
 """
     datasets() -> Vector{String}
 
-Sorted list of the dataset names understood by [`dataset`](@ref) — the file
-names bundled under `data/`. Pass the name with or without its extension.
+Sorted list of every bundled data file, as its path relative to the data
+directory (e.g. `"auto.dta"`, `"musr/mus10data.dta"`,
+`"wooldridge_intro/wage1.dta"`). Pass any of these to [`dataset`](@ref) /
+[`datapath`](@ref) with or without the extension, and — when a bare name is
+shared by more than one folder — with the folder prefix to disambiguate.
 """
-function datasets()
-    root = datadir()
-    out = String[]
-    isdir(root) || return out
-    for (_, _, files) in walkdir(root), f in files
-        push!(out, f)
-    end
-    return sort(out)
-end
+datasets() = sort(first.(_all_data_files()))
 
 """
     datapath(name) -> String
 
 Absolute path of a bundled data file, looked up by name with or without its
-extension (`datapath("auto")`, `datapath("mus202file2.csv")`). Use this when a
-file needs non-standard parsing, or as the target of a write.
+extension: `datapath("auto")`, `datapath("mus202file2.csv")`, or a
+folder-qualified `datapath("wooldridge_intro/mroz")`.
+
+A bare name that resolves to files in more than one folder (e.g. `"mroz"`,
+which the panel and introductory Wooldridge sets both ship, with different
+contents) raises an error listing the candidates rather than silently
+returning one — qualify it with the folder. A stem shared only across
+extensions in the same folder (e.g. `mus14gdata.dta`/`.csv`) resolves to the
+`.dta` unless the extension is given.
 """
 function datapath(name::AbstractString)
-    reg = _dataset_registry()
-    haskey(reg, String(name)) && return reg[String(name)]
-    # tolerate a path-ish argument such as "musr/mus10data.dta"
-    base = basename(String(name))
-    haskey(reg, base) && return reg[base]
-    stem = splitext(base)[1]
-    haskey(reg, stem) && return reg[stem]
-    near = sort([k for k in keys(reg) if occursin(lowercase(stem), lowercase(k))])
-    hint = isempty(near) ? "Call `datasets()` to list what is bundled." :
-                           "Did you mean: " * join(first(near, 5), ", ") * "?"
-    error("No bundled dataset named \"$name\". $hint")
+    q = replace(String(name), '\\' => '/')
+    files = _all_data_files()
+    _stem(p) = first(splitext(p))
+    matches(rel) = q == rel || q == _stem(rel) ||
+                   q == basename(rel) || q == _stem(basename(rel))
+    cands = unique([full for (rel, full) in files if matches(rel)])
+
+    if length(cands) > 1
+        # prefer .dta when the collision is only across extensions
+        dtas = filter(p -> lowercase(splitext(p)[2]) == ".dta", cands)
+        length(dtas) == 1 && (cands = dtas)
+    end
+
+    if length(cands) == 1
+        return cands[1]
+    elseif length(cands) > 1
+        rels = sort([replace(relpath(p, datadir()), '\\' => '/') for p in cands])
+        error("Ambiguous dataset \"$name\" — it matches several bundled files:\n  " *
+              join(rels, "\n  ") *
+              "\nQualify it with the folder, e.g. dataset(\"$(rels[1])\").")
+    else
+        qstem = lowercase(_stem(basename(q)))
+        near = sort(unique([_stem(basename(rel)) for (rel, _) in files
+                            if occursin(qstem, lowercase(_stem(basename(rel))))]))
+        hint = isempty(near) ? "Call `datasets()` to list what is bundled." :
+                               "Did you mean: " * join(first(near, 5), ", ") * "?"
+        error("No bundled dataset named \"$name\". $hint")
+    end
 end
 
 # Coerce a readdlm column to a concrete numeric vector when every entry parses.

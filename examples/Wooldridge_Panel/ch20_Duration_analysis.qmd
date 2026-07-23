@@ -55,7 +55,7 @@ outpath(f) = joinpath(OUT, f)
 ```
 
 ```{julia}
-recid = DataFrames.DataFrame(dataset("recid"))   # 1445 x 18
+recid = DataFrames.DataFrame(dataset("wooldridge/recid"))   # 1445 x 18
 size(recid)
 ```
 
