@@ -108,4 +108,28 @@ df = DataFrame(
         @test_throws ErrorException dataset("no_such_dataset_here")
     end
 
+
+    @testset "stata_ologit (3+ categories)" begin
+        # Regression test for two bugs found by the Wooldridge verification:
+        #  1. the cut-point warm start accumulated cumulative shares, so cum > 1
+        #     and log(cum/(1-cum)) threw a DomainError for any J >= 3;
+        #  2. the inner likelihood accumulators were named `ll`, which Julia bound
+        #     to the enclosing `ll` rather than a local, so later calls (the FD
+        #     Hessian, then the null fit) clobbered the fitted log-likelihood and
+        #     LR chi2 / pseudo R2 always came out 0.
+        pension = dataset("pension")
+        xs = [:choice, :age, :educ, :female, :black, :married, :finc25,
+              :finc35, :finc50, :finc75, :finc100, :finc101, :wealth89, :prftshr]
+        r = redirect_stdout(devnull) do
+            stata_ologit(pension, :pctstck, xs)      # must not throw
+        end
+        @test length(r.τ) == 2                        # J = 3 -> 2 cut-points
+        @test issorted(r.τ)                           # cut-points increasing
+        @test r.ll > r.ll_null                        # fitted beats intercept-only
+        @test r.LR > 0                                # not clobbered to 0
+        @test r.pseudo_r2 > 0
+        @test isapprox(r.LR, 2 * (r.ll - r.ll_null); atol = 1e-8)
+        @test isapprox(r.ll, -201.9227; atol = 1e-3)  # verified by hand
+    end
+
 end

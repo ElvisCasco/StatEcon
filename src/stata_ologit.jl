@@ -54,10 +54,16 @@ function stata_ologit(df::DataFrames.AbstractDataFrame, depvar::Symbol,
         return β, τ
     end
 
+    # NOTE: the accumulator below is deliberately NOT called `ll`. A variable of
+    # that name lives in the enclosing scope, so an inner `ll = ...` would assign
+    # to the captured outer one instead of creating a local. Every later call --
+    # the finite-difference Hessian evaluates this ~500 times, and the null fit
+    # runs afterwards -- then overwrote the fitted log-likelihood, which is how
+    # the reported LR chi2 and pseudo R2 ended up as 0.
     function negll(θ)
         β, τ = unpack(θ)
         η = X * β
-        ll = zero(eltype(θ))
+        acc = zero(eltype(θ))
         for i in 1:N
             j = y_idx[i]
             p = if j == 1
@@ -67,16 +73,19 @@ function stata_ologit(df::DataFrames.AbstractDataFrame, depvar::Symbol,
             else
                 Λ(τ[j] - η[i]) - Λ(τ[j - 1] - η[i])
             end
-            ll += log(max(p, eps(Float64)))
+            acc += log(max(p, eps(Float64)))
         end
-        return -ll
+        return -acc
     end
 
     # Warm start: β = 0, cut-points at the empirical quantile gaps.
     θ0 = zeros(nparam)
     cum = 0.0
     for j in 1:(J - 1)
-        cum += sum(y_idx .<= j) / N
+        # `sum(y_idx .<= j)/N` is already the cumulative share P(y <= j); it must
+        # be assigned, not accumulated. Accumulating drove cum past 1 for J >= 3,
+        # so log(cum/(1-cum)) took the log of a negative and threw a DomainError.
+        cum = sum(y_idx .<= j) / N
         τj_warm = log(cum / (1 - cum))
         if j == 1
             θ0[k + 1] = τj_warm
@@ -92,7 +101,11 @@ function stata_ologit(df::DataFrames.AbstractDataFrame, depvar::Symbol,
                          autodiff = :forward)
     θ̂  = Optim.minimizer(res)
     β̂, τ̂  = unpack(θ̂)
-    ll = -Optim.minimum(res)
+    # Re-evaluate at the minimizer rather than trusting `Optim.minimum`, which
+    # can hand back a cached/stale value (the null fit below already does this).
+    # Taking it directly made `ll` the value at the warm start -- which is exactly
+    # the intercept-only fit -- so LR chi2 and pseudo R2 always came out 0.
+    ll = -negll(θ̂)
 
     function _fd_hessian(f, x)
         nθ = length(x); H = zeros(nθ, nθ)
@@ -139,16 +152,16 @@ function stata_ologit(df::DataFrames.AbstractDataFrame, depvar::Symbol,
         τ = zeros(eltype(τθ), J - 1)
         τ[1] = τθ[1]
         for j in 2:(J - 1); τ[j] = τ[j - 1] + exp(τθ[j]); end
-        ll = zero(eltype(τθ))
+        acc = zero(eltype(τθ))   # not `ll` -- see the note on `negll` above
         for i in 1:N
             j = y_idx[i]
             p = if j == 1; Λ(τ[1])
                 elseif j == J; 1 - Λ(τ[J - 1])
                 else; Λ(τ[j]) - Λ(τ[j - 1])
                 end
-            ll += log(max(p, eps(Float64)))
+            acc += log(max(p, eps(Float64)))
         end
-        return -ll
+        return -acc
     end
     τθ0 = θ0[k+1:end]
     res_null = _c15_optimize(negll_null, τθ0, Optim.LBFGS();
