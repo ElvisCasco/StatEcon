@@ -51,7 +51,11 @@ function stata_glm(df, formula; family::Symbol=:poisson, link::Symbol=:log,
         H = Xm' * LinearAlgebra.Diagonal(μ) * Xm
         meat = Xm' * LinearAlgebra.Diagonal((yv .- μ).^2) * Xm
         Hinv = LinearAlgebra.inv(LinearAlgebra.cholesky(LinearAlgebra.Symmetric(H)))
-        V = Hinv * meat * Hinv * (n / (n - k))
+        # Stata's `glm, vce(robust)` uses the n/(n-1) finite-sample correction
+        # (same as `poisson, vce(robust)`), NOT n/(n-k). Verified on Wooldridge
+        # Ex. 19.1: n/(n-1) gives educ SE .0025918, matching Stata exactly, where
+        # n/(n-k) gave .0025938 (+0.08%).
+        V = Hinv * meat * Hinv * (n / (n - 1))
     else
         V = Matrix(GLM.vcov(m))
     end

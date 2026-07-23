@@ -318,7 +318,7 @@ function stata_xtreg_re(df, y::Symbol, xvars::AbstractVector{Symbol}, idvar::Sym
     T_counts  = T_obs.T
     T_min, T_max = minimum(T_counts), maximum(T_counts)
 
-    return (; β, se, z, p=pv, V, coefnames=cnames,
+    return (; β, se, z, p=pv, V, coefnames=cnames, idvar,
               σ_ε = sqrt(σ2_ε), σ_u = sqrt(σ2_u),
               ρ   = σ2_u / (σ2_u + σ2_ε),
               θ, T̄, T_min, T_max,
@@ -351,7 +351,8 @@ function stata_xtreg_re_print(res; level::Float64=0.95)
     # ── Header block
     Printf.@printf("%-48s%-18s= %10s\n", "Random-effects GLS regression",
                    "Number of obs", _fmtn(res.n_obs))
-    Printf.@printf("%-48s%-18s= %10s\n", "Group variable: id",
+    Printf.@printf("%-48s%-18s= %10s\n",
+                   "Group variable: " * (hasproperty(res, :idvar) ? string(res.idvar) : "id"),
                    "Number of groups", _fmtn(res.n_panels))
     println()
     Printf.@printf("%-48s%s\n", "R-squared:", "Obs per group:")

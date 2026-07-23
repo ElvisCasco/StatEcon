@@ -1,5 +1,6 @@
 using StatEcon
 using DataFrames, FixedEffectModels, Statistics, Test
+using GLM
 
 # Deterministic little panel: y depends on x, grouped by g, with a 0/1 flag t.
 df = DataFrame(
@@ -245,6 +246,35 @@ df = DataFrame(
         snm = string.(h.selection_coefnames)
         @test isapprox(h.se_selection[findfirst(==("nwifeinc"), snm)],
                        0.0048398; atol = 5e-7)
+    end
+
+
+    @testset "robust-VCE finite-sample corrections match Stata" begin
+        # stata_glm's robust sandwich used n/(n-k); Stata's glm, vce(robust)
+        # uses n/(n-1). Wooldridge Ex. 19.1 (fertil2), educ SE = .0025918.
+        fert = dataset("fertil2")
+        g = redirect_stdout(devnull) do
+            stata_glm(fert, @formula(children ~ educ + age + agesq + evermarr +
+                                                urban + electric + tv);
+                      family = :poisson, link = :log, vce = :robust)
+        end
+        gi = findfirst(==("educ"), GLM.coefnames(g.model))
+        @test isapprox(g.se[gi], 0.0025918; atol = 5e-7)
+
+        # stata_xtgls iid/independent used n-k; xtgls reports ML variances
+        # (divisor n). Wooldridge Ex. 7.7, all four SEs.
+        jt77 = dropmissing(dataset("jtrain1"),
+                           [:lscrap, :d89, :d88, :grant, :grant_1, :fcode, :year])
+        x = redirect_stdout(devnull) do
+            stata_xtgls(jt77, :lscrap, [:d89, :d88, :grant, :grant_1];
+                        panelvar = :fcode, timevar = :year,
+                        panels = :iid, corr = :independent)
+        end
+        se(v) = x.se[findfirst(==(v), string.(x.coefnames))]
+        @test isapprox(se("d89"),     0.3326723; atol = 5e-6)
+        @test isapprox(se("d88"),     0.3060290; atol = 5e-6)
+        @test isapprox(se("grant"),   0.3330233; atol = 5e-6)
+        @test isapprox(se("grant_1"), 0.4292842; atol = 5e-6)
     end
 
 end

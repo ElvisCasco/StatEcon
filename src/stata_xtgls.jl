@@ -303,7 +303,12 @@ function stata_xtgls(df, y, xvars; panelvar::Symbol, timevar::Symbol,
     idx_Σ(i) = drop_first ? pidx[i][2:end] : pidx[i]
     T_eff = drop_first ? (T - 1) : T          # effective T used in Σ̂ estimation
     Σ_inv = if panels == :iid
-        denom = drop_first ? (n - N - k) : (n - k)
+        # xtgls reports ML (asymptotic) variances -- divisor is the number of
+        # observations used in Sigma-hat, with NO parameter correction, the same
+        # convention the heteroskedastic/correlated branches use below. Using
+        # n-k here left the iid SEs a factor sqrt(n/(n-k)) too large. Verified on
+        # Wooldridge Ex. 7.7: divisor n gives d89 SE .3326723, matching Stata.
+        denom = drop_first ? (n - N) : n
         σ2    = sum(abs2, vcat([e_pw[idx_Σ(i)] for i in 1:N]...)) / max(denom, 1)
         Matrix{Float64}(LinearAlgebra.I(N) ./ σ2)
     elseif panels == :heteroskedastic
