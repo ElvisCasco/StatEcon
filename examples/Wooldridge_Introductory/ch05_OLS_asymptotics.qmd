@@ -1,0 +1,162 @@
+---
+title: "Wooldridge Introductory Econometrics -- Ch. 5: Multiple regression: OLS asymptotics (via StatEcon)"
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    code-fold: true
+    code-tools: true
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+**Source.** Stata examples reproduced from Wooldridge, *Introductory Econometrics: A Modern Approach* (Cengage). Data are the book's companion files.
+
+# Julia setup
+
+```{julia}
+using StatEcon
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+
+const OUT = "output"
+isdir(OUT) || mkpath(OUT)
+outpath(f) = joinpath(OUT, f)
+```
+
+Residuals aligned to the rows of the original data frame (Stata's `predict r, resid`).
+
+```{julia}
+predict_res(m, df, y) = df[!, y] .- FixedEffectModels.predict(m, df)
+```
+
+## Standard Errors in a Birth Weight Equation
+
+Stata runs the same log birth-weight equation on the first 694 observations and
+then on the full sample of 1,388, illustrating how standard errors shrink as
+*n* grows (OLS asymptotics).
+
+```{julia}
+#=
+use "data/bwght.dta", clear
+reg lbwght cigs lfaminc in 1/694
+
+      Source |       SS           df       MS      Number of obs   =       694
+-------------+----------------------------------   F(2, 691)       =     10.52
+       Model |   .80921458         2   .40460729   Prob > F        =    0.0000
+    Residual |  26.5787136       691   .03846413   R-squared       =    0.0295
+-------------+----------------------------------   Adj R-squared   =    0.0267
+       Total |  27.3879282       693   .03952082   Root MSE        =    .19612
+
+------------------------------------------------------------------------------
+      lbwght | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        cigs |  -.0046368   .0013319    -3.48   0.001    -.0072519   -.0020216
+     lfaminc |   .0194044   .0081884     2.37   0.018     .0033273    .0354815
+       _cons |   4.705583    .027053   173.94   0.000     4.652467    4.758699
+------------------------------------------------------------------------------
+=#
+bwght = DataFrames.DataFrame(dataset("bwght"))
+ols_694 = stata_regress(bwght[1:694, :]; y = :lbwght, x = [:cigs, :lfaminc])
+```
+
+```{julia}
+#=
+reg lbwght cigs lfaminc
+
+      Source |       SS           df       MS      Number of obs   =     1,388
+-------------+----------------------------------   F(2, 1385)      =     18.31
+       Model |  1.29879229         2  .649396147   Prob > F        =    0.0000
+    Residual |  49.1215413     1,385  .035466817   R-squared       =    0.0258
+-------------+----------------------------------   Adj R-squared   =    0.0244
+       Total |  50.4203336     1,387  .036352079   Root MSE        =    .18833
+
+------------------------------------------------------------------------------
+      lbwght | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        cigs |  -.0040816   .0008582    -4.76   0.000    -.0057651    -.002398
+     lfaminc |   .0162657   .0055833     2.91   0.004      .005313    .0272183
+       _cons |   4.718594   .0182445   258.63   0.000     4.682804    4.754384
+------------------------------------------------------------------------------
+=#
+ols_full = stata_regress(bwght; y = :lbwght, x = [:cigs, :lfaminc])
+```
+
+Both fits reproduce the published coefficients, standard errors, *t*-statistics
+and confidence limits to the printed digits (`cigs = -.0046368` at *n*=694,
+`-.0040816` at *n*=1388). The full-sample SE on `cigs` (`.0008582`) is roughly
+55% of the subsample SE (`.0013319`), consistent with the `1/√n` shrinkage.
+
+## Example 5.3: Economic Model of Crime
+
+```{julia}
+#=
+use "data/crime1.dta", clear
+reg narr86 pcnv ptime86 qemp86
+
+      Source |       SS           df       MS      Number of obs   =     2,725
+-------------+----------------------------------   F(3, 2721)      =     39.10
+       Model |  83.0741941         3   27.691398   Prob > F        =    0.0000
+    Residual |  1927.27296     2,721  .708295833   R-squared       =    0.0413
+-------------+----------------------------------   Adj R-squared   =    0.0403
+       Total |  2010.34716     2,724  .738012906   Root MSE        =     .8416
+
+------------------------------------------------------------------------------
+      narr86 | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        pcnv |  -.1499274   .0408653    -3.67   0.000    -.2300576   -.0697973
+     ptime86 |  -.0344199    .008591    -4.01   0.000    -.0512655   -.0175744
+      qemp86 |   -.104113   .0103877   -10.02   0.000    -.1244816   -.0837445
+       _cons |   .7117715   .0330066    21.56   0.000      .647051     .776492
+------------------------------------------------------------------------------
+=#
+crime1 = DataFrames.DataFrame(dataset("crime1"))
+crime53 = stata_regress(crime1; y = :narr86, x = [:pcnv, :ptime86, :qemp86])
+```
+
+The auxiliary regression regresses the OLS residual on the original regressors
+plus two excluded variables (`avgsen`, `tottime`). Because the residual is
+orthogonal to the fitted regressors, the coefficients on `pcnv`, `ptime86`,
+`qemp86` collapse to ~0; the *F*-test on the added regressors is the LM idea.
+
+```{julia}
+#=
+predict ubar, resid
+reg ubar pcnv ptime86 qemp86 avgsen tottime
+
+      Source |       SS           df       MS      Number of obs   =     2,725
+-------------+----------------------------------   F(5, 2719)      =      0.81
+       Model |  2.87904835         5  .575809669   Prob > F        =    0.5398
+    Residual |  1924.39392     2,719  .707757969   R-squared       =    0.0015
+-------------+----------------------------------   Adj R-squared   =   -0.0003
+       Total |  1927.27297     2,724  .707515773   Root MSE        =    .84128
+
+------------------------------------------------------------------------------
+        ubar | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        pcnv |  -.0012971    .040855    -0.03   0.975    -.0814072    .0788129
+     ptime86 |  -.0048386   .0089166    -0.54   0.587    -.0223226    .0126454
+      qemp86 |   .0010221   .0103972     0.10   0.922    -.0193652    .0214093
+      avgsen |  -.0070487   .0124122    -0.57   0.570     -.031387    .0172897
+     tottime |   .0120953   .0095768     1.26   0.207    -.0066833     .030874
+       _cons |  -.0057108   .0331524    -0.17   0.863    -.0707173    .0592956
+------------------------------------------------------------------------------
+=#
+crime1.ubar = predict_res(crime53, crime1, :narr86)
+aux53 = stata_regress(crime1; y = :ubar,
+                       x = [:pcnv, :ptime86, :qemp86, :avgsen, :tottime])
+```
+
+The Julia residual regression reproduces Stata exactly: coefficients on the
+originally included regressors are ~0 (`pcnv = -.0012971`), the two added
+variables are jointly insignificant (`F(5, 2719) = 0.81`, `Prob > F = 0.5398`),
+and `R² = 0.0015`. This matches the published table to the printed digits.

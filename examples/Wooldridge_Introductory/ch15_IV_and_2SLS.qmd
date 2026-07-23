@@ -1,0 +1,597 @@
+---
+title: "Wooldridge Introductory Econometrics -- Ch. 15: Instrumental variables and 2SLS (via StatEcon)"
+Authors:
+- Jeffrey M. Wooldridge
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+**Source.** Stata code and output reproduced from Wooldridge, J. M.,
+*Introductory Econometrics: A Modern Approach* (Cengage), Chapter 15:
+*Instrumental Variables Estimation and Two Stage Least Squares*.
+
+# Julia setup
+
+```{julia}
+using StatEcon
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+
+# Artifacts this notebook produces go to `output/`.
+const OUT = "output"
+isdir(OUT) || mkpath(OUT)
+outpath(f) = joinpath(OUT, f)
+```
+
+::: {.callout-note}
+The book uses Stata's legacy `ivreg`, which reports an *F* statistic and *t*
+statistics with *t*-based confidence intervals. `stata_ivregress_2sls` follows
+the modern `ivregress 2sls` convention: a Wald *χ²* and *z* statistics with
+normal-based intervals. **Point estimates and standard errors are identical**;
+only the reference distribution used for p-values and CI limits differs
+(`χ²(k) = k · F`). Comparison notes flag this wherever it appears.
+
+`mroz` and `card` collide with the panel-data sets of the same name, so they are
+loaded with the qualified `wooldridge_intro/` prefix; `wage2`, `bwght`, and
+`fertil1` are loaded by bare name.
+:::
+
+```{julia}
+mroz    = DataFrames.DataFrame(dataset("wooldridge_intro/mroz"))    # 753 x 22
+card    = DataFrames.DataFrame(dataset("wooldridge_intro/card"))    # 3010 x 34
+wage2   = DataFrames.DataFrame(dataset("wage2"))                    # 935 x 17
+bwght   = DataFrames.DataFrame(dataset("bwght"))                    # 1388 x 14
+fertil1 = DataFrames.DataFrame(dataset("fertil1"))                  # 1129 x 27
+# The "if lwage<." estimation sample (working women, N = 428):
+mroz_w  = mroz[.!ismissing.(mroz.lwage), :]
+size(mroz), size(mroz_w)
+```
+
+# Example 15.1: Estimating the Return to Education for Married Women
+
+```{julia}
+#=
+use "data/mroz.dta", clear
+reg lwage educ
+
+------------------------------------------------------------------------------
+       lwage | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        educ |   .1086487   .0143998     7.55   0.000     .0803451    .1369523
+       _cons |  -.1851968   .1852259    -1.00   0.318    -.5492673    .1788736
+------------------------------------------------------------------------------
+N = 428 ; R-squared = 0.1179
+=#
+ols151 = stata_regress(mroz; y = :lwage, x = [:educ])
+```
+
+```{julia}
+#=
+ivreg lwage (educ = fatheduc)
+
+Instrumental variables 2SLS regression
+------------------------------------------------------------------------------
+       lwage | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        educ |   .0591735   .0351418     1.68   0.093    -.0098994    .1282463
+       _cons |   .4411034   .4461018     0.99   0.323    -.4357312    1.317938
+------------------------------------------------------------------------------
+Endogenous: educ ; Exogenous: fatheduc ; N = 428
+=#
+iv151 = stata_ivregress_2sls(mroz, :lwage, :educ => :fatheduc;
+    robust = false, first = false)
+```
+
+Both reproduce exactly. Instrumenting `educ` with `fatheduc` roughly halves the
+estimated return to schooling (from `.1086` OLS to `.0592` IV) and renders it
+insignificant, illustrating the imprecision of just-identified IV. Stata's
+`t = 1.68` corresponds to Julia's `z = 1.68` (same SE, normal vs t reference).
+
+# Example 15.2: Estimating the Return to Education for Men
+
+```{julia}
+#=
+use "data/wage2.dta", clear
+ivreg lwage (educ = sibs)
+
+------------------------------------------------------------------------------
+       lwage | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        educ |   .1224326   .0263506     4.65   0.000     .0707194    .1741459
+       _cons |   5.130026   .3551712    14.44   0.000     4.432999    5.827053
+------------------------------------------------------------------------------
+Endogenous: educ ; Exogenous: sibs ; N = 935
+=#
+iv152 = stata_ivregress_2sls(wage2, :lwage, :educ => :sibs;
+    robust = false, first = false)
+```
+
+```{julia}
+#=
+reg lwage educ
+
+------------------------------------------------------------------------------
+       lwage | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        educ |   .0598392   .0059631    10.03   0.000     .0481366    .0715418
+       _cons |   5.973063   .0813737    73.40   0.000     5.813366    6.132759
+------------------------------------------------------------------------------
+=#
+ols152 = stata_regress(wage2; y = :lwage, x = [:educ])
+```
+
+Using the number of siblings as an IV *raises* the return to education (from
+`.0598` OLS to `.1224` IV) — the opposite direction from Example 15.1. Both fits
+reproduce Stata exactly.
+
+# Example 15.3: Estimating the Effect of Smoking on Birth Weight
+
+```{julia}
+#=
+use "data/bwght.dta", clear
+ivreg lbwght (packs = cigprice), first
+
+First-stage regressions
+------------------------------------------------------------------------------
+       packs | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+    cigprice |   .0002829    .000783     0.36   0.718    -.0012531    .0018188
+       _cons |   .0674257   .1025384     0.66   0.511    -.1337215    .2685728
+------------------------------------------------------------------------------
+First stage: F(1, 1386) = 0.13, R-squared = 0.0001
+
+Instrumental variables 2SLS regression
+------------------------------------------------------------------------------
+      lbwght | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+       packs |   2.988676   8.698888     0.34   0.731    -14.07573    20.05309
+       _cons |   4.448136   .9081552     4.90   0.000     2.666629    6.229644
+------------------------------------------------------------------------------
+Endogenous: packs ; Exogenous: cigprice ; N = 1,388
+=#
+iv153 = stata_ivregress_2sls(bwght, :lbwght, :packs => :cigprice;
+    robust = false, first = true)
+```
+
+The first stage shows `cigprice` is a hopelessly weak instrument for `packs`
+(`t = 0.36`, first-stage `R² = 0.0001`), so the 2SLS `packs` coefficient
+(`2.99`, SE `8.70`) is meaningless. Both stages reproduce exactly.
+
+# Example 15.4: Using College Proximity as an IV for Education
+
+```{julia}
+#=
+use "data/card.dta", clear
+ivreg lwage (educ = nearc4) exper expersq black smsa south, first
+
+First-stage regressions (educ)
+------------------------------------------------------------------------------
+        educ | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+       exper |  -.4100081   .0336939   -12.17   0.000    -.4760735   -.3439427
+     expersq |   .0007323   .0016499     0.44   0.657    -.0025029    .0039674
+       black |  -1.006138   .0896454   -11.22   0.000    -1.181911   -.8303656
+        smsa |   .4038769   .0848872     4.76   0.000     .2374339    .5703199
+       south |   -.291464   .0792247    -3.68   0.000    -.4468042   -.1361238
+      nearc4 |   .3373208   .0825004     4.09   0.000     .1755577    .4990839
+       _cons |   16.65917   .1763889    94.45   0.000     16.31332    17.00503
+------------------------------------------------------------------------------
+First stage: F(6, 3003) = 451.87, R-squared = 0.4745
+
+Instrumental variables 2SLS regression
+------------------------------------------------------------------------------
+       lwage | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        educ |   .1322888   .0492332     2.69   0.007     .0357546    .2288231
+       exper |    .107498   .0213006     5.05   0.000     .0657327    .1492632
+     expersq |  -.0022841   .0003341    -6.84   0.000    -.0029392   -.0016289
+       black |  -.1308019   .0528723    -2.47   0.013    -.2344715   -.0271323
+        smsa |   .1313237   .0301298     4.36   0.000     .0722465    .1904009
+       south |  -.1049005   .0230731    -4.55   0.000    -.1501412   -.0596598
+       _cons |   3.752781   .8293409     4.53   0.000     2.126648    5.378915
+------------------------------------------------------------------------------
+N = 3,010
+=#
+iv154 = stata_ivregress_2sls(card, :lwage, :educ => :nearc4,
+    [:exper, :expersq, :black, :smsa, :south]; robust = false, first = true)
+```
+
+```{julia}
+#=
+reg lwage educ exper expersq black smsa south
+
+------------------------------------------------------------------------------
+       lwage | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        educ |    .074009   .0035054    21.11   0.000     .0671357    .0808823
+       exper |   .0835958   .0066478    12.57   0.000     .0705612    .0966305
+     expersq |  -.0022409   .0003178    -7.05   0.000    -.0028641   -.0016177
+       black |  -.1896315   .0176266   -10.76   0.000    -.2241929   -.1550702
+        smsa |    .161423   .0155733    10.37   0.000     .1308876    .1919583
+       south |  -.1248615   .0151182    -8.26   0.000    -.1545046   -.0952184
+       _cons |   4.733664   .0676026    70.02   0.000     4.601112    4.866216
+------------------------------------------------------------------------------
+=#
+ols154 = stata_regress(card; y = :lwage,
+    x = [:educ, :exper, :expersq, :black, :smsa, :south])
+```
+
+Proximity to a four-year college is a strong instrument (first-stage
+`F = 451.87`). The IV return to education (`.1323`) is nearly double the OLS
+estimate (`.0740`), though much less precise. First stage, 2SLS, and OLS all
+reproduce Stata exactly.
+
+# Example 15.5: Return to Education for Working Women
+
+The reduced-form regression of `educ` on the instruments is estimated here on the
+**full** sample (`N = 753`), which differs from the 2SLS estimation sample
+(`N = 428`, working women only) — a distinction the book makes explicitly.
+
+```{julia}
+#=
+use "data/mroz.dta", clear
+reg educ exper expersq motheduc fatheduc
+
+------------------------------------------------------------------------------
+        educ | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+       exper |    .085378   .0255485     3.34   0.001     .0352228    .1355333
+     expersq |  -.0018564   .0008276    -2.24   0.025    -.0034812   -.0002317
+    motheduc |   .1856173   .0259869     7.14   0.000     .1346014    .2366331
+    fatheduc |   .1845745   .0244979     7.53   0.000     .1364817    .2326674
+       _cons |   8.366716   .2667111    31.37   0.000     7.843125    8.890307
+------------------------------------------------------------------------------
+N = 753 ; R-squared = 0.2624
+=#
+fs155 = stata_regress(mroz; y = :educ,
+    x = [:exper, :expersq, :motheduc, :fatheduc])
+```
+
+```{julia}
+#=
+test motheduc fatheduc
+
+       F(  2,   748) =  124.76
+            Prob > F =    0.0000
+=#
+stata_test(fs155, ["motheduc", "fatheduc"])
+```
+
+```{julia}
+#=
+ivreg lwage (educ = motheduc fatheduc) exper expersq
+
+------------------------------------------------------------------------------
+       lwage | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        educ |   .0613966   .0314367     1.95   0.051    -.0003945    .1231878
+       exper |   .0441704   .0134325     3.29   0.001     .0177679    .0705729
+     expersq |   -.000899   .0004017    -2.24   0.026    -.0016885   -.0001094
+       _cons |   .0481003   .4003281     0.12   0.904    -.7387744     .834975
+------------------------------------------------------------------------------
+Endogenous: educ ; Exogenous: exper expersq motheduc fatheduc ; N = 428
+=#
+iv155 = stata_ivregress_2sls(mroz, :lwage,
+    :educ => [:motheduc, :fatheduc], [:exper, :expersq];
+    robust = false, first = false)
+```
+
+The parents' education instruments are jointly very strong on the full sample
+(`F(2, 748) = 124.76`). Over-identified 2SLS gives a return to education of
+`.0614` (SE `.0314`), marginally significant. All numbers reproduce exactly; the
+first-stage `test` F is identical because `stata_test` uses the OLS/F reference.
+
+# Example 15.6: Using Two Test Scores as Indicators of Ability
+
+```{julia}
+#=
+use "data/wage2.dta", clear
+ivreg lwage educ exper tenure married south urban black (IQ = KWW)
+
+------------------------------------------------------------------------------
+       lwage | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+          IQ |   .0130473   .0049341     2.64   0.008     .0033641    .0227305
+        educ |   .0250321   .0166068     1.51   0.132    -.0075591    .0576234
+       exper |     .01442   .0033208     4.34   0.000     .0079029    .0209371
+      tenure |   .0104562   .0026012     4.02   0.000     .0053512    .0155612
+     married |   .2006903   .0406775     4.93   0.000     .1208595    .2805211
+       south |  -.0515532   .0311279    -1.66   0.098    -.1126426    .0095361
+       urban |   .1767058   .0282117     6.26   0.000     .1213394    .2320722
+       black |  -.0225612   .0739597    -0.31   0.760    -.1677093    .1225869
+       _cons |   4.592453   .3257807    14.10   0.000     3.953099    5.231807
+------------------------------------------------------------------------------
+Endogenous: IQ ; Exogenous: educ exper tenure married south urban black KWW
+N = 935
+=#
+iv156 = stata_ivregress_2sls(wage2, :lwage, :IQ => :KWW,
+    [:educ, :exper, :tenure, :married, :south, :urban, :black];
+    robust = false, first = false)
+```
+
+Treating IQ as an error-ridden proxy for ability and instrumenting it with the
+KWW score gives a significant ability effect (`IQ = .0130`) and drives the
+schooling coefficient down to an insignificant `.025`. Exact reproduction.
+
+# Example 15.7: Return to Education for Working Women (control function)
+
+The regression-based (control-function) test for endogeneity: add the first-stage
+residual `uhat1` to the OLS equation and test its significance. The first stage
+is estimated on the working-women sample (`N = 428`).
+
+```{julia}
+#=
+use "data/mroz.dta", clear
+qui reg educ exper expersq motheduc fatheduc if lwage<.
+predict double uhat1, res
+reg lwage educ exper expersq uhat1
+
+------------------------------------------------------------------------------
+       lwage | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        educ |   .0613966   .0309849     1.98   0.048      .000493    .1223003
+       exper |   .0441704   .0132394     3.34   0.001     .0181471    .0701937
+     expersq |   -.000899   .0003959    -2.27   0.024    -.0016772   -.0001208
+       uhat1 |   .0581666   .0348073     1.67   0.095    -.0102502    .1265834
+       _cons |   .0481003   .3945753     0.12   0.903    -.7274721    .8236727
+------------------------------------------------------------------------------
+=#
+fs157 = stata_regress(mroz_w; y = :educ,
+    x = [:exper, :expersq, :motheduc, :fatheduc])
+mroz_cf = copy(mroz_w)
+mroz_cf[!, :uhat1] = mroz_w.educ .- FixedEffectModels.predict(fs157, mroz_w)
+cf157 = stata_regress(mroz_cf; y = :lwage, x = [:educ, :exper, :expersq, :uhat1])
+```
+
+```{julia}
+#=
+reg lwage educ exper expersq
+
+------------------------------------------------------------------------------
+       lwage | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        educ |   .1074896   .0141465     7.60   0.000     .0796837    .1352956
+       exper |   .0415665   .0131752     3.15   0.002     .0156697    .0674633
+     expersq |  -.0008112   .0003932    -2.06   0.040    -.0015841   -.0000382
+       _cons |  -.5220406   .1986321    -2.63   0.009    -.9124667   -.1316144
+------------------------------------------------------------------------------
+=#
+ols157 = stata_regress(mroz_w; y = :lwage, x = [:educ, :exper, :expersq])
+```
+
+```{julia}
+#=
+ivreg lwage (educ = motheduc fatheduc) exper expersq, first
+   (first-stage on N = 428:  motheduc = .157597,  fatheduc = .1895484)
+=#
+iv157 = stata_ivregress_2sls(mroz_w, :lwage,
+    :educ => [:motheduc, :fatheduc], [:exper, :expersq];
+    robust = false, first = true)
+```
+
+The control-function coefficient on `uhat1` (`.0582`, `t = 1.67`) is the Hausman
+test for endogeneity of `educ`: marginally significant, weak evidence of
+endogeneity. Crucially, the `educ` coefficient in the control-function
+regression (`.0613966`) is **identical** to the 2SLS estimate — this is the
+regression form of 2SLS. The `iv157` first stage runs on the same `N = 428`
+sample, so its `motheduc`/`fatheduc` coefficients match Stata's `first` output
+(and differ from the full-sample first stage of Example 15.5).
+
+# Example 15.8: Return to Education for Working Women (overidentification)
+
+```{julia}
+#=
+use "data/mroz.dta", clear
+ivreg lwage (educ = motheduc fatheduc) exper expersq
+   educ = .0613966 (.0314367)   [2 instruments]
+=#
+iv158a = stata_ivregress_2sls(mroz, :lwage,
+    :educ => [:motheduc, :fatheduc], [:exper, :expersq];
+    robust = false, first = false)
+```
+
+```{julia}
+#=
+ivreg lwage (educ = motheduc fatheduc huseduc) exper expersq
+
+------------------------------------------------------------------------------
+       lwage | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        educ |   .0803918    .021774     3.69   0.000     .0375934    .1231901
+       exper |   .0430973   .0132649     3.25   0.001     .0170242    .0691704
+     expersq |  -.0008628   .0003962    -2.18   0.030    -.0016415   -.0000841
+       _cons |  -.1868572   .2853959    -0.65   0.513    -.7478242    .3741097
+------------------------------------------------------------------------------
+Endogenous: educ ; Exogenous: exper expersq motheduc fatheduc huseduc ; N = 428
+=#
+iv158b = stata_ivregress_2sls(mroz, :lwage,
+    :educ => [:motheduc, :fatheduc, :huseduc], [:exper, :expersq];
+    robust = false, first = false)
+```
+
+```{julia}
+#=
+overid   (user-written; Sargan/Basmann test of the 2 overidentifying restrictions)
+=#
+estat_overid(mroz, :lwage, :educ, [:motheduc, :fatheduc, :huseduc],
+    [:exper, :expersq])
+```
+
+Adding `huseduc` as a third instrument (two overidentifying restrictions) raises
+the return to education to `.0804`. Both 2SLS fits reproduce Stata exactly.
+`estat_overid` implements the same overidentification test as the user-written
+`overid` command; a large p-value indicates the extra instruments are not
+rejected as valid.
+
+# Example 15.9: Return of Education to Fertility
+
+```{julia}
+#=
+use "data/fertil1.dta", clear
+ivreg kids (educ = meduc feduc) age agesq black east northcen west farm othrural town smcity y74 y76 y78 y80 y82 y84
+
+------------------------------------------------------------------------------
+        kids | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        educ |  -.1527395   .0392232    -3.89   0.000    -.2296993   -.0757796
+        ...
+       _cons |  -7.241244   3.136642    -2.31   0.021    -13.39565   -1.086834
+------------------------------------------------------------------------------
+Endogenous: educ ; N = 1,129
+=#
+exog159 = [:age, :agesq, :black, :east, :northcen, :west, :farm, :othrural,
+           :town, :smcity, :y74, :y76, :y78, :y80, :y82, :y84]
+iv159 = stata_ivregress_2sls(fertil1, :kids, :educ => [:meduc, :feduc], exog159;
+    robust = false, first = false)
+```
+
+```{julia}
+#=
+reg kids educ age agesq ... y84
+        educ |  -.1284268   .0183486    -7.00   0.000
+=#
+ols159 = stata_regress(fertil1; y = :kids, x = vcat(:educ, exog159))
+```
+
+```{julia}
+#=
+reg educ meduc feduc age agesq ... y84   (first stage, N = 1,129)
+       meduc |   .1723015   .0221964     7.76   0.000
+       feduc |   .2074188   .0254604     8.15   0.000
+=#
+fs159 = stata_regress(fertil1; y = :educ, x = vcat(:meduc, :feduc, exog159))
+```
+
+```{julia}
+#=
+predict v, res
+reg kids educ age agesq ... y84 v      (control function)
+           v |   .0311374   .0443634     0.70   0.483    -.0559081    .1181829
+        educ |  -.1527395   .0392012    -3.90   0.000
+=#
+fertil_cf = copy(fertil1)
+fertil_cf[!, :v] = fertil1.educ .- FixedEffectModels.predict(fs159, fertil1)
+cf159 = stata_regress(fertil_cf; y = :kids, x = vcat(:educ, exog159, :v))
+```
+
+The IV return of education to fertility (`-.1527`) is larger in magnitude than
+OLS (`-.1284`): an extra year of schooling lowers completed fertility by about
+0.15 children. The control-function residual `v` is insignificant (`t = 0.70`),
+so the endogeneity of `educ` is not statistically detectable here. The
+control-function `educ` coefficient again equals the 2SLS estimate exactly. All
+four regressions reproduce Stata.
+
+# Example 15.10: Job Training and Worker Productivity
+
+First-differenced IV: after `tsset fcode year` and dropping 1989, the change
+`D.lscrap` is instrumented by `D.grant` through `D.hrsemp`. The `D.` operator is
+reproduced with a self-join on `(fcode, year − 1)`.
+
+```{julia}
+#=
+use "data/jtrain.dta", clear
+tsset fcode year
+sort fcode year
+drop if year==1989
+ivreg D.lscrap (D.hrsemp = D.grant)
+
+------------------------------------------------------------------------------
+    D.lscrap | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+      hrsemp |
+         D1. |  -.0141532   .0079147    -1.79   0.081    -.0301148    .0018084
+       _cons |  -.0326684   .1269512    -0.26   0.798    -.2886898     .223353
+------------------------------------------------------------------------------
+Endogenous: D.hrsemp ; Exogenous: D.grant ; N = 45
+=#
+jt = DataFrames.DataFrame(dataset("jtrain"))
+jt = jt[jt.year .!= 1989, :]                        # drop if year==1989
+lagd = DataFrames.DataFrame(fcode = jt.fcode, year = jt.year .+ 1,
+    lscrap_lag = jt.lscrap, hrsemp_lag = jt.hrsemp, grant_lag = jt.grant)
+jd = DataFrames.leftjoin(jt, lagd, on = [:fcode, :year])
+jd[!, :D_lscrap] = jd.lscrap .- jd.lscrap_lag
+jd[!, :D_hrsemp] = jd.hrsemp .- jd.hrsemp_lag
+jd[!, :D_grant]  = jd.grant  .- jd.grant_lag
+jd = DataFrames.dropmissing(jd, [:D_lscrap, :D_hrsemp, :D_grant])   # N = 45
+iv1510 = stata_ivregress_2sls(jd, :D_lscrap, :D_hrsemp => :D_grant;
+    robust = false, first = false)
+```
+
+```{julia}
+#=
+reg D.lscrap D.hrsemp
+
+------------------------------------------------------------------------------
+    D.lscrap | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+      hrsemp |
+         D1. |  -.0076007   .0045112    -1.68   0.099    -.0166984    .0014971
+       _cons |  -.1035161    .103736    -1.00   0.324    -.3127197    .1056875
+------------------------------------------------------------------------------
+=#
+ols1510 = stata_regress(jd; y = :D_lscrap, x = [:D_hrsemp])
+```
+
+Instrumenting the change in training hours by the change in grant status roughly
+doubles the estimated productivity effect (`D.hrsemp = -.0142` IV vs `-.0076`
+OLS): another hour of per-worker training lowers the scrap rate by about 1.4%.
+The differenced sample (`N = 45`) and both estimates reproduce Stata exactly.
+
+# Verification summary
+
+| Example | Quantity | Stata (`ivreg`/`reg`) | Julia | Match |
+|---|---|---|---|---|
+| 15.1 OLS | `educ` | .1086487 / .0143998 | same | yes |
+| 15.1 IV | `educ` | .0591735 / .0351418 | same | yes |
+| 15.2 IV | `educ` | .1224326 / .0263506 | same | yes |
+| 15.2 OLS | `educ` | .0598392 / .0059631 | same | yes |
+| 15.3 first stage | `cigprice` | .0002829 / .000783 | same | yes |
+| 15.3 IV | `packs` | 2.988676 / 8.698888 | same | yes |
+| 15.4 first stage | `nearc4` | .3373208 / .0825004 | same | yes |
+| 15.4 IV | `educ` | .1322888 / .0492332 | same | yes |
+| 15.4 OLS | `educ` | .074009 / .0035054 | same | yes |
+| 15.5 first stage (N=753) | `motheduc` | .1856173 / .0259869 | same | yes |
+| 15.5 | `test motheduc fatheduc` | F(2,748)=124.76 | F=124.76 | yes |
+| 15.5 IV | `educ` | .0613966 / .0314367 | same | yes |
+| 15.6 IV | `IQ` | .0130473 / .0049341 | same | yes |
+| 15.6 IV | `educ` | .0250321 / .0166068 | same | yes |
+| 15.7 CF | `educ` | .0613966 / .0309849 | same | yes |
+| 15.7 CF | `uhat1` | .0581666 / .0348073 | same | yes |
+| 15.7 first stage (N=428) | `motheduc` | .157597 / .0358941 | same | yes |
+| 15.8 IV (3 IVs) | `educ` | .0803918 / .021774 | same | yes |
+| 15.9 IV | `educ` | -.1527395 / .0392232 | same | yes |
+| 15.9 CF | `v` | .0311374 / .0443634 | same | yes |
+| 15.9 first stage | `meduc` | .1723015 / .0221964 | same | yes |
+| 15.10 IV | `D.hrsemp` | -.0141532 / .0079147 | same | yes |
+| 15.10 OLS | `D.hrsemp` | -.0076007 / .0045112 | same | yes |
+
+Every 2SLS/IV point estimate, first-stage coefficient, OLS coefficient, standard
+error, and joint `test` F-statistic reproduces the book's `ivreg`/`reg` output.
+The one systematic presentational difference is the reference distribution:
+`stata_ivregress_2sls` reports *z* statistics with a Wald *χ²(k)* (following
+`ivregress 2sls`) where legacy `ivreg` reports *t* statistics with `F(k, N−K)`;
+the standard errors are identical and `χ²(k) = k · F`, so p-values agree to
+rounding and confidence limits differ only by the normal-vs-*t* critical value in
+the fourth decimal. Control-function `educ` coefficients equal their 2SLS
+counterparts exactly, and the first-stage estimation sample (full vs
+working-women) is handled explicitly so Examples 15.5 and 15.7 match their
+respective Stata `first` outputs.

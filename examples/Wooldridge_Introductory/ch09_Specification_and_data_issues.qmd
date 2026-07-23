@@ -1,0 +1,430 @@
+---
+title: "Wooldridge Introductory Econometrics -- Ch. 9: More on Specification and Data Issues (via StatEcon)"
+Authors:
+- Jeffrey M. Wooldridge
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+**Source.** Wooldridge, J. M., *Introductory Econometrics: A Modern Approach*
+(Cengage Learning). Chapter 9: *More on Specification and Data Issues*. The
+Stata commands and their published output are reproduced verbatim in each
+`#= … =#` block; the Julia translation uses the
+[StatEcon](https://github.com/ElvisCasco/StatEcon) package.
+
+# Julia setup
+
+```{julia}
+using StatEcon
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+
+# Artifacts this notebook produces go to `output/`.
+const OUT = "output"
+isdir(OUT) || mkpath(OUT)
+outpath(f) = joinpath(OUT, f)
+```
+
+Datasets are loaded **by name** from the bundle shipped with StatEcon.
+
+# Example 9.1: Economic Model of Crime
+
+```{julia}
+#=
+use "data/crime1.dta", clear
+reg narr86 pcnv avgsen tottime ptime86 qemp86 inc86 black hispan
+
+------------------------------------------------------------------------------
+      narr86 | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        pcnv |  -.1332344   .0403502    -3.30   0.001    -.2123546   -.0541141
+      avgsen |  -.0113177   .0122401    -0.92   0.355    -.0353185    .0126831
+     tottime |   .0120224   .0094352     1.27   0.203    -.0064785    .0305233
+     ptime86 |  -.0408417    .008812    -4.63   0.000    -.0581206   -.0235627
+      qemp86 |  -.0505398   .0144397    -3.50   0.000    -.0788538   -.0222258
+       inc86 |  -.0014887   .0003406    -4.37   0.000    -.0021566   -.0008207
+       black |   .3265035   .0454156     7.19   0.000     .2374508    .4155561
+      hispan |   .1939144   .0397113     4.88   0.000     .1160469    .2717818
+       _cons |   .5686855   .0360461    15.78   0.000     .4980048    .6393661
+------------------------------------------------------------------------------
+=#
+crime1 = DataFrame(dataset("crime1"))
+m91a = stata_regress(crime1; y = :narr86,
+    x = [:pcnv, :avgsen, :tottime, :ptime86, :qemp86, :inc86, :black, :hispan])
+```
+
+```{julia}
+#=
+reg narr86 pcnv pcnvsq avgsen tottime ptime86 pt86sq qemp86 inc86 inc86sq black hispan
+
+------------------------------------------------------------------------------
+      narr86 | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        pcnv |   .5525236   .1542372     3.58   0.000     .2500892     .854958
+      pcnvsq |  -.7302119   .1561177    -4.68   0.000    -1.036334   -.4240903
+      avgsen |  -.0170216   .0120539    -1.41   0.158    -.0406574    .0066142
+     tottime |    .011954   .0092825     1.29   0.198    -.0062474    .0301554
+     ptime86 |   .2874334   .0442582     6.49   0.000     .2006501    .3742166
+      pt86sq |  -.0296076   .0038634    -7.66   0.000     -.037183   -.0220321
+      qemp86 |  -.0140941   .0173612    -0.81   0.417    -.0481366    .0199485
+       inc86 |  -.0034152   .0008037    -4.25   0.000    -.0049912   -.0018392
+     inc86sq |   7.19e-06   2.56e-06     2.81   0.005     2.17e-06    .0000122
+       black |    .292296     .04483     6.52   0.000     .2043916    .3802004
+      hispan |   .1636175   .0394507     4.15   0.000     .0862609     .240974
+       _cons |   .5046065   .0368353    13.70   0.000     .4323784    .5768347
+------------------------------------------------------------------------------
+=#
+m91b = stata_regress(crime1; y = :narr86,
+    x = [:pcnv, :pcnvsq, :avgsen, :tottime, :ptime86, :pt86sq, :qemp86,
+         :inc86, :inc86sq, :black, :hispan])
+```
+
+Both fits reproduce Stata exactly. Adding the quadratic terms in `pcnv`,
+`ptime86` and `inc86` raises R² from 0.072 to 0.104 and the F-statistic on the
+three squares is highly significant, exactly as Wooldridge reports.
+
+# Example 9.2: Housing Price Equation
+
+```{julia}
+#=
+use "data/hprice1.dta", clear
+reg price lotsize sqrft bdrms
+
+------------------------------------------------------------------------------
+       price | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+     lotsize |   .0020677   .0006421     3.22   0.002     .0007908    .0033446
+       sqrft |   .1227782   .0132374     9.28   0.000     .0964541    .1491022
+       bdrms |   13.85252   9.010145     1.54   0.128    -4.065141    31.77018
+       _cons |  -21.77031   29.47504    -0.74   0.462    -80.38466    36.84405
+------------------------------------------------------------------------------
+=#
+hprice1 = DataFrame(dataset("hprice1"))
+m92 = stata_regress(hprice1; y = :price, x = [:lotsize, :sqrft, :bdrms])
+```
+
+RESET test in levels — add `ŷ²` and `ŷ³` and jointly test them:
+
+```{julia}
+#=
+predict double r1
+gen double r2=r1*r1
+gen double r3=r2*r1
+qui reg price lotsize sqrft bdrms r2 r3
+test r2 r3
+
+       F(  2,    82) =    4.67
+            Prob > F =    0.0120
+=#
+hprice1.r1 = FixedEffectModels.predict(m92, hprice1)
+hprice1.r2 = hprice1.r1 .^ 2
+hprice1.r3 = hprice1.r2 .* hprice1.r1
+m92r = stata_regress(hprice1; y = :price, x = [:lotsize, :sqrft, :bdrms, :r2, :r3])
+stata_test(m92r, [:r2, :r3])
+```
+
+```{julia}
+#=
+reg lprice llotsize lsqrft bdrms
+
+------------------------------------------------------------------------------
+      lprice | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+    llotsize |   .1679667   .0382812     4.39   0.000     .0918404     .244093
+      lsqrft |   .7002324   .0928652     7.54   0.000     .5155597    .8849051
+       bdrms |   .0369584   .0275313     1.34   0.183    -.0177906    .0917074
+       _cons |  -1.297042   .6512836    -1.99   0.050    -2.592191    -.001893
+------------------------------------------------------------------------------
+=#
+hprice1.lprice   = log.(hprice1.price)
+hprice1.llotsize = log.(hprice1.lotsize)
+hprice1.lsqrft   = log.(hprice1.sqrft)
+m92log = stata_regress(hprice1; y = :lprice, x = [:llotsize, :lsqrft, :bdrms])
+```
+
+RESET test in logs:
+
+```{julia}
+#=
+predict lphat
+gen lph2=lphat*lphat
+gen lph3=lphat*lph2
+qui reg lprice llotsize lsqrft bdrms lph2 lph3
+test lph2 lph3
+
+       F(  2,    82) =    2.57
+            Prob > F =    0.0831
+=#
+hprice1.lphat = FixedEffectModels.predict(m92log, hprice1)
+hprice1.lph2  = hprice1.lphat .^ 2
+hprice1.lph3  = hprice1.lph2 .* hprice1.lphat
+m92logr = stata_regress(hprice1; y = :lprice, x = [:llotsize, :lsqrft, :bdrms, :lph2, :lph3])
+stata_test(m92logr, [:lph2, :lph3])
+```
+
+The RESET F-statistic is `4.67` (p `0.0120`) in levels and `2.57` (p `0.0831`)
+in logs — both match Stata to the printed precision. The level specification is
+rejected at 5%; the log form is much less strongly rejected.
+
+# Example 9.3: IQ as a Price for Ability
+
+```{julia}
+#=
+use "data/wage2.dta", clear
+gen educIQ=educ*IQ
+reg lwage educ exper tenure married south urban black
+
+------------------------------------------------------------------------------
+       lwage | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        educ |   .0654307   .0062504    10.47   0.000     .0531642    .0776973
+       exper |    .014043   .0031852     4.41   0.000      .007792     .020294
+      tenure |   .0117473    .002453     4.79   0.000     .0069333    .0165613
+     married |   .1994171   .0390502     5.11   0.000     .1227801     .276054
+       south |  -.0909036   .0262485    -3.46   0.001     -.142417   -.0393903
+       urban |   .1839121   .0269583     6.82   0.000     .1310056    .2368185
+       black |  -.1883499   .0376666    -5.00   0.000    -.2622717   -.1144281
+       _cons |   5.395497    .113225    47.65   0.000      5.17329    5.617704
+------------------------------------------------------------------------------
+=#
+wage2 = DataFrame(dataset("wage2"))
+wage2.educIQ = wage2.educ .* wage2.IQ
+m93a = stata_regress(wage2; y = :lwage,
+    x = [:educ, :exper, :tenure, :married, :south, :urban, :black])
+```
+
+```{julia}
+#=
+reg lwage educ exper tenure married south urban black IQ
+
+------------------------------------------------------------------------------
+       lwage | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        educ |   .0544106   .0069285     7.85   0.000     .0408133     .068008
+       exper |   .0141458   .0031651     4.47   0.000     .0079342    .0203575
+      tenure |   .0113951   .0024394     4.67   0.000     .0066077    .0161825
+     married |   .1997644   .0388025     5.15   0.000     .1236134    .2759154
+       south |  -.0801695   .0262529    -3.05   0.002    -.1316916   -.0286473
+       urban |   .1819463   .0267929     6.79   0.000     .1293645    .2345281
+       black |  -.1431253   .0394925    -3.62   0.000    -.2206304   -.0656202
+          IQ |   .0035591   .0009918     3.59   0.000     .0016127    .0055056
+       _cons |   5.176439   .1280006    40.44   0.000     4.925234    5.427644
+------------------------------------------------------------------------------
+=#
+m93b = stata_regress(wage2; y = :lwage,
+    x = [:educ, :exper, :tenure, :married, :south, :urban, :black, :IQ])
+```
+
+```{julia}
+#=
+reg lwage educ exper tenure married south urban black IQ educIQ
+
+------------------------------------------------------------------------------
+       lwage | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        educ |   .0184559   .0410608     0.45   0.653    -.0621272    .0990391
+       exper |   .0139072   .0031768     4.38   0.000     .0076725    .0201418
+      tenure |   .0113929   .0024397     4.67   0.000     .0066049    .0161808
+     married |   .2008658   .0388267     5.17   0.000     .1246671    .2770644
+       south |  -.0802354    .026256    -3.06   0.002    -.1317637   -.0287072
+       urban |   .1835758   .0268586     6.83   0.000     .1308649    .2362867
+       black |  -.1466989   .0397013    -3.70   0.000    -.2246139   -.0687839
+          IQ |  -.0009418   .0051625    -0.18   0.855    -.0110734    .0091899
+      educIQ |   .0003399   .0003826     0.89   0.375    -.0004109    .0010907
+       _cons |   5.648248   .5462963    10.34   0.000     4.576124    6.720372
+------------------------------------------------------------------------------
+=#
+m93c = stata_regress(wage2; y = :lwage,
+    x = [:educ, :exper, :tenure, :married, :south, :urban, :black, :IQ, :educIQ])
+```
+
+All three fits match Stata exactly. Adding `IQ` lowers the return to schooling
+from `.0654` to `.0544`; the `educ×IQ` interaction is insignificant (t `0.89`),
+so there is little evidence that the ability proxy interacts with education.
+
+# Example 9.4: City Crime Rates
+
+```{julia}
+#=
+use "data/crime2.dta", clear
+reg lcrmrte unem llawexpc if d87==1
+
+------------------------------------------------------------------------------
+     lcrmrte | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        unem |  -.0290032   .0323387    -0.90   0.375    -.0942205    .0362141
+    llawexpc |   .2033652   .1726534     1.18   0.245    -.1448236    .5515539
+       _cons |   3.342899   1.250527     2.67   0.011     .8209721    5.864826
+------------------------------------------------------------------------------
+=#
+crime2 = DataFrame(dataset("crime2"))
+crime2_87 = crime2[crime2.d87 .== 1, :]     # the "if d87==1" cross-section, N = 46
+m94a = stata_regress(crime2_87; y = :lcrmrte, x = [:unem, :llawexpc])
+```
+
+```{julia}
+#=
+reg lcrmrte unem llawexpc lcrmrt_1
+
+------------------------------------------------------------------------------
+     lcrmrte | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        unem |    .008621   .0195166     0.44   0.661    -.0307652    .0480072
+    llawexpc |  -.1395764   .1086412    -1.28   0.206    -.3588231    .0796704
+    lcrmrt_1 |   1.193923   .1320985     9.04   0.000     .9273371    1.460508
+       _cons |   .0764511   .8211433     0.09   0.926    -1.580683    1.733585
+------------------------------------------------------------------------------
+=#
+m94b = stata_regress(crime2_87; y = :lcrmrte, x = [:unem, :llawexpc, :lcrmrt_1])
+```
+
+Both fits match Stata exactly. `lcrmrt_1` is the 1982 (lagged) crime rate;
+including it in the 1987 cross-section absorbs most of the variation
+(R² jumps from 0.057 to 0.680) and drives the coefficients on `unem` and
+`llawexpc` toward zero.
+
+# Examples 9.5–9.7: Measurement Error
+
+Wooldridge's Examples 9.5 (Saving Function with Measurement Error), 9.6
+(Measurement Error in Scrap Rates) and 9.7 (GPA Equation with Measurement
+Error) are worked examples with **no accompanying dataset** in the source
+materials, so there is nothing to reproduce here.
+
+# Example 9.8: R&D Intensity and Firm Size
+
+```{julia}
+#=
+use "data/rdchem.dta", clear
+reg rdintens sales profmarg
+
+------------------------------------------------------------------------------
+    rdintens | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+       sales |   .0000534   .0000441     1.21   0.236    -.0000368    .0001435
+    profmarg |   .0446166   .0461805     0.97   0.342    -.0498332    .1390664
+       _cons |   2.625261   .5855328     4.48   0.000     1.427712     3.82281
+------------------------------------------------------------------------------
+=#
+rdchem = DataFrame(dataset("rdchem"))
+m98a = stata_regress(rdchem; y = :rdintens, x = [:sales, :profmarg])
+```
+
+```{julia}
+#=
+reg rdintens sales profmarg if sales<20000
+
+------------------------------------------------------------------------------
+    rdintens | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+       sales |   .0001856   .0000842     2.20   0.036     .0000131    .0003581
+    profmarg |   .0478411   .0444831     1.08   0.291    -.0432784    .1389605
+       _cons |   2.296851   .5918045     3.88   0.001     1.084594    3.509107
+------------------------------------------------------------------------------
+=#
+rdchem_sub = rdchem[rdchem.sales .< 20000, :]     # drops the one large-sales outlier, N = 31
+m98b = stata_regress(rdchem_sub; y = :rdintens, x = [:sales, :profmarg])
+```
+
+Both fits match Stata exactly. Dropping the single firm with `sales ≥ 20000`
+roughly triples the estimated `sales` coefficient and makes it significant —
+the classic influential-observation lesson of this example.
+
+# Example 9.9: R&D Intensity (log specification)
+
+```{julia}
+#=
+use "data/rdchem.dta", clear
+reg lrd lsales profmarg
+
+------------------------------------------------------------------------------
+         lrd | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+      lsales |    1.08422    .060195    18.01   0.000     .9611073    1.207333
+    profmarg |   .0216557   .0127826     1.69   0.101    -.0044877    .0477991
+       _cons |  -4.378273   .4680185    -9.35   0.000    -5.335479   -3.421068
+------------------------------------------------------------------------------
+=#
+m99a = stata_regress(rdchem; y = :lrd, x = [:lsales, :profmarg])
+```
+
+```{julia}
+#=
+reg lrd lsales profmarg if sales<20000
+
+------------------------------------------------------------------------------
+         lrd | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+      lsales |   1.088047   .0671137    16.21   0.000     .9505712    1.225524
+    profmarg |   .0217552    .013024     1.67   0.106    -.0049232    .0484335
+       _cons |   -4.40414   .5110218    -8.62   0.000    -5.450921   -3.357359
+------------------------------------------------------------------------------
+=#
+m99b = stata_regress(rdchem_sub; y = :lrd, x = [:lsales, :profmarg])
+```
+
+Both fits match Stata exactly. In the log–log specification the elasticity of
+R&D with respect to sales is essentially `1` and barely changes when the large
+firm is dropped — confirming that the level result in 9.8 was driven by that
+outlier, not by the log form.
+
+# Example 9.10: State Infant Mortality Rates
+
+```{julia}
+#=
+use "data/infmrt.dta", clear
+reg infmort lpcinc lphysic lpopul if year==1990
+
+------------------------------------------------------------------------------
+     infmort | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+      lpcinc |  -4.684662   2.604124    -1.80   0.078    -9.923484    .5541607
+     lphysic |   4.153261   1.512659     2.75   0.009     1.110185    7.196338
+      lpopul |  -.0878224     .28725    -0.31   0.761    -.6656948    .4900499
+       _cons |   33.85931   20.42785     1.66   0.104    -7.236219    74.95484
+------------------------------------------------------------------------------
+=#
+infmrt = DataFrame(dataset("infmrt"))
+infmrt90 = infmrt[infmrt.year .== 1990, :]     # 51 states + DC
+m910a = stata_regress(infmrt90; y = :infmort, x = [:lpcinc, :lphysic, :lpopul])
+```
+
+```{julia}
+#=
+reg infmort lpcinc lphysic lpopul if infmort<20 & year==1990
+
+------------------------------------------------------------------------------
+     infmort | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+      lpcinc |  -.5669275   1.641216    -0.35   0.731    -3.870524    2.736669
+     lphysic |  -2.741837   1.190773    -2.30   0.026    -5.138739   -.3449347
+      lpopul |   .6292349   .1911062     3.29   0.002     .2445581    1.013912
+       _cons |   23.95479   12.41946     1.93   0.060    -1.044288    48.95388
+------------------------------------------------------------------------------
+=#
+infmrt90b = infmrt[(infmrt.year .== 1990) .& (infmrt.infmort .< 20), :]   # drops DC, N = 50
+m910b = stata_regress(infmrt90b; y = :infmort, x = [:lpcinc, :lphysic, :lpopul])
+```
+
+Both fits match Stata exactly. Dropping the District of Columbia
+(`infmort ≥ 20`) flips the sign on `lphysic` from `+4.15` to `−2.74` and makes
+`lpopul` significantly positive — a dramatic single-observation influence,
+which is the point of the example.

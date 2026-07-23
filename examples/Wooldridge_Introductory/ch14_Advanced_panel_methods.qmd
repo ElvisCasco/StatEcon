@@ -1,0 +1,363 @@
+---
+title: "Wooldridge Introductory Econometrics -- Ch. 14: Advanced panel data methods (via StatEcon)"
+Authors:
+- Jeffrey M. Wooldridge
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+**Source.** Stata code and output reproduced from Wooldridge, J. M.,
+*Introductory Econometrics: A Modern Approach* (Cengage), Chapter 14:
+*Advanced Panel Data Methods*.
+
+# Julia setup
+
+```{julia}
+using StatEcon
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+
+# Artifacts this notebook produces go to `output/`.
+const OUT = "output"
+isdir(OUT) || mkpath(OUT)
+outpath(f) = joinpath(OUT, f)
+```
+
+Stata's `xtset fcode year` (the modern form of `iis`/`tis`) declares the panel.
+The within (fixed-effects) estimator `xtreg …, fe` is reproduced by absorbing the
+unit effect with `stata_regress(df; …, absorb = :id)` — this uses the same
+degrees-of-freedom convention as `xtreg, fe`, so slopes, standard errors, and the
+within-R² match exactly. The random-effects GLS estimator `xtreg …, re` is
+reproduced by `stata_xtreg_re`.
+
+::: {.callout-note}
+`FixedEffectModels` drops singleton groups (units with a single usable
+observation) from an absorbing regression. Because a singleton is perfectly
+absorbed it contributes a zero residual and consumes one group degree of
+freedom, so dropping it changes neither the slope coefficients nor `df_resid =
+N − #groups − k` — only the *reported* `N` and group count shrink. This affects
+Example 14.3, where Stata reports `N = 148`, `#groups = 51` (some units with one
+observation).
+:::
+
+# Example 14.1: Effect of Job Training on Firm Scrap Rates
+
+```{julia}
+#=
+use "data/jtrain.dta", clear
+iis fcode
+tis year
+xtreg lscrap d88 d89 grant grant_1, fe
+
+Fixed-effects (within) regression               Number of obs     =        162
+Group variable: fcode                           Number of groups  =         54
+     Within  = 0.2010
+                                                F(4, 104)         =       6.54
+------------------------------------------------------------------------------
+      lscrap | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+         d88 |  -.0802157   .1094751    -0.73   0.465     -.297309    .1368776
+         d89 |  -.2472028   .1332183    -1.86   0.066    -.5113797    .0169741
+       grant |  -.2523149    .150629    -1.68   0.097    -.5510178    .0463881
+     grant_1 |  -.4215895      .2102    -2.01   0.047    -.8384239   -.0047551
+       _cons |   .5974341   .0677344     8.82   0.000     .4631142    .7317539
+-------------+----------------------------------------------------------------
+     sigma_e |  .49774421
+------------------------------------------------------------------------------
+=#
+jtrain = DataFrames.DataFrame(dataset("jtrain"))   # 471 x 30
+m141 = stata_regress(jtrain; y = :lscrap,
+    x = [:d88, :d89, :grant, :grant_1], absorb = :fcode)
+```
+
+```{julia}
+#=
+Change in the firm's scrap rate in 1989 if the training grant was received in 1988
+display exp(_b[grant_1])-1
+-.34399673
+=#
+b_g1 = StatsBase.coef(m141)[findfirst(==("grant_1"), string.(StatsBase.coefnames(m141)))]
+Printf.@printf("exp(b[grant_1]) - 1 = %.8f\n", exp(b_g1) - 1)
+```
+
+```{julia}
+#=
+xtreg lscrap d88 d89 grant, fe
+
+------------------------------------------------------------------------------
+      lscrap | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+         d88 |   -.140066    .106835    -1.31   0.193       -.3519    .0717681
+         d89 |    -.42704   .0999338    -4.27   0.000    -.6251903   -.2288897
+       grant |  -.0822141   .1262632    -0.65   0.516    -.3325706    .1681424
+       _cons |   .5974341   .0687024     8.70   0.000     .4612098    .7336583
+------------------------------------------------------------------------------
+Within = 0.1701 ; F(3, 105) = 7.18 ; sigma_e = .50485774
+=#
+m141b = stata_regress(jtrain; y = :lscrap, x = [:d88, :d89, :grant],
+    absorb = :fcode)
+```
+
+Exact reproduction of both within regressions. The lagged grant effect
+`grant_1 = -.4216` implies scrap rates fell by `exp(-.4216) - 1 = -.344`, i.e.
+about 34% one year after a firm received a training grant.
+
+# Example 14.2: Has the Return to Education Changed Over Time
+
+The `educ × year` interactions must be built in the DataFrame (Stata's
+`gen edd8x = educ*d8x`) before the within regression.
+
+```{julia}
+#=
+use "data/wagepan.dta", clear
+iis nr
+tis year
+gen edd81 = educ*d81
+...
+gen edd87 = educ*d87
+xtreg lwage expersq union married d81-d87 edd81-edd87, fe
+
+------------------------------------------------------------------------------
+       lwage | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+     expersq |  -.0060437   .0008633    -7.00   0.000    -.0077362   -.0043512
+       union |   .0789759   .0193328     4.09   0.000     .0410722    .1168796
+     married |   .0474337   .0183277     2.59   0.010     .0115006    .0833668
+         d81 |   .0984201    .145999     0.67   0.500    -.1878239    .3846641
+         d82 |   .2472016   .1493785     1.65   0.098    -.0456682    .5400714
+         d83 |    .408813   .1557146     2.63   0.009     .1035207    .7141053
+         d84 |   .6399247   .1652396     3.87   0.000     .3159578    .9638917
+         d85 |   .7729397   .1779911     4.34   0.000     .4239723    1.121907
+         d86 |   .9699322   .1941747     5.00   0.000     .5892354    1.350629
+         d87 |   1.188777   .2135856     5.57   0.000     .7700231     1.60753
+       edd81 |   .0049906    .012222     0.41   0.683    -.0189718     .028953
+       edd82 |    .001651   .0123304     0.13   0.893    -.0225239    .0258259
+       edd83 |  -.0026621   .0125098    -0.21   0.831    -.0271887    .0218644
+       edd84 |  -.0098257   .0127593    -0.77   0.441    -.0348414      .01519
+       edd85 |  -.0092145   .0130721    -0.70   0.481    -.0348436    .0164146
+       edd86 |  -.0121382   .0134419    -0.90   0.367    -.0384922    .0142159
+       edd87 |  -.0157892    .013868    -1.14   0.255    -.0429785    .0114002
+       _cons |   1.436283   .0192766    74.51   0.000     1.398489    1.474076
+------------------------------------------------------------------------------
+N = 4,360 ; 545 groups ; Within = 0.1814 ; F(17, 3798) = 49.49
+=#
+wagepan = DataFrames.DataFrame(dataset("wagepan"))   # 4360 x 27
+for k in 1:7
+    wagepan[!, Symbol("edd8$k")] = wagepan.educ .* wagepan[!, Symbol("d8$k")]
+end
+edd = [Symbol("edd8$k") for k in 1:7]
+dvars = [Symbol("d8$k") for k in 1:7]
+m142 = stata_regress(wagepan; y = :lwage,
+    x = vcat([:expersq, :union, :married], dvars, edd), absorb = :nr)
+```
+
+```{julia}
+#=
+test edd81 edd82 edd83 edd84 edd85 edd86 edd87
+
+       F(  7,  3798) =    0.52
+            Prob > F =    0.8202
+=#
+stata_test(m142, string.(edd))
+```
+
+Exact reproduction. The `educ × year` interactions are jointly insignificant
+(`F(7, 3798) = 0.52`, `p = .82`): within workers, the return to education shows
+no detectable trend over 1980–1987.
+
+# Example 14.3: Effect of Job Training on Firm Scrap Rates
+
+```{julia}
+#=
+use "data/jtrain.dta", clear
+iis fcode
+tis year
+xtreg lscrap d88 d89 grant grant_1 lsales lemploy, fe
+
+Fixed-effects (within) regression               Number of obs     =        148
+Group variable: fcode                           Number of groups  =         51
+     Within  = 0.2131
+                                                F(6, 91)          =       4.11
+------------------------------------------------------------------------------
+      lscrap | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+         d88 |  -.0039609   .1195487    -0.03   0.974    -.2414296    .2335079
+         d89 |   -.132193   .1536863    -0.86   0.392    -.4374719     .173086
+       grant |  -.2967542   .1570861    -1.89   0.062    -.6087863     .015278
+     grant_1 |  -.5355783    .224206    -2.39   0.019     -.980936   -.0902207
+      lsales |  -.0868577   .2596985    -0.33   0.739    -.6027167    .4290014
+     lemploy |  -.0763679   .3502902    -0.22   0.828    -.7721764    .6194405
+       _cons |   2.115481    3.10843     0.68   0.498    -4.059034    8.289996
+------------------------------------------------------------------------------
+     sigma_e |  .49149057
+=#
+m143 = stata_regress(jtrain; y = :lscrap,
+    x = [:d88, :d89, :grant, :grant_1, :lsales, :lemploy], absorb = :fcode)
+```
+
+Adding `lsales` and `lemploy` leaves the grant effects essentially unchanged
+(`grant_1 = -.5356`), confirming the training result is robust. Slopes, standard
+errors, within-R², and `df_resid = 91` match Stata exactly; only the reported `N`
+/ group count can differ by the number of singleton units dropped (see the note
+above), which does not affect the estimates.
+
+# Example 14.4: Has the Return to Education Changed Over Time
+
+Three estimators of the same wage equation: pooled OLS, random effects, and
+fixed effects.
+
+```{julia}
+#=
+use "data/wagepan.dta", clear
+iis nr
+tis year
+reg lwage educ black hisp exper expersq married union d81-d87
+
+------------------------------------------------------------------------------
+       lwage | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        educ |   .0913498   .0052374    17.44   0.000     .0810819    .1016177
+       black |  -.1392342   .0235796    -5.90   0.000    -.1854622   -.0930062
+        hisp |   .0160195   .0207971     0.77   0.441    -.0247535    .0567925
+       exper |   .0672345   .0136948     4.91   0.000     .0403856    .0940834
+     expersq |  -.0024117     .00082    -2.94   0.003    -.0040192   -.0008042
+     married |   .1082529   .0156894     6.90   0.000     .0774937    .1390122
+       union |   .1824613   .0171568    10.63   0.000     .1488253    .2160973
+         d81 |     .05832   .0303536     1.92   0.055    -.0011886    .1178286
+         d82 |   .0627744   .0332141     1.89   0.059    -.0023421    .1278909
+         d83 |   .0620117   .0366601     1.69   0.091    -.0098608    .1338843
+         d84 |   .0904672   .0400907     2.26   0.024      .011869    .1690654
+         d85 |   .1092463   .0433525     2.52   0.012     .0242533    .1942393
+         d86 |   .1419596    .046423     3.06   0.002     .0509469    .2329723
+         d87 |   .1738334    .049433     3.52   0.000     .0769194    .2707474
+       _cons |   .0920558   .0782701     1.18   0.240    -.0613935    .2455051
+------------------------------------------------------------------------------
+N = 4,360 ; R-squared = 0.1893
+=#
+pooled144 = stata_regress(wagepan; y = :lwage,
+    x = vcat([:educ, :black, :hisp, :exper, :expersq, :married, :union], dvars))
+```
+
+```{julia}
+#=
+xtreg lwage educ black hisp exper expersq married union, re
+
+Random-effects GLS regression                   Number of obs     =      4,360
+Group variable: nr                              Number of groups  =        545
+                                                Wald chi2(7)      =     943.95
+------------------------------------------------------------------------------
+       lwage | Coefficient  Std. err.      z    P>|z|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        educ |   .1012246   .0089133    11.36   0.000     .0837549    .1186943
+       black |  -.1441307   .0476148    -3.03   0.002     -.237454   -.0508073
+        hisp |   .0201511   .0426011     0.47   0.636    -.0633456    .1036477
+       exper |   .1121195   .0082609    13.57   0.000     .0959285    .1283105
+     expersq |  -.0040689   .0005918    -6.88   0.000    -.0052288   -.0029089
+     married |   .0627951   .0167729     3.74   0.000     .0299209    .0956693
+       union |   .1073789     .01783     6.02   0.000     .0724327     .142325
+       _cons |  -.1074643   .1107057    -0.97   0.332    -.3244435    .1095149
+-------------+----------------------------------------------------------------
+     sigma_u |  .32456727
+     sigma_e |  .35125535
+         rho |  .46057172
+------------------------------------------------------------------------------
+=#
+re144 = stata_xtreg_re(wagepan, :lwage,
+    [:educ, :black, :hisp, :exper, :expersq, :married, :union], :nr)
+stata_xtreg_re_print(re144)
+```
+
+```{julia}
+#=
+xtreg lwage expersq married union d81-d87, fe
+
+------------------------------------------------------------------------------
+       lwage | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+     expersq |  -.0051855   .0007044    -7.36   0.000    -.0065666   -.0038044
+     married |   .0466804   .0183104     2.55   0.011     .0107811    .0825796
+       union |   .0800019   .0193103     4.14   0.000     .0421423    .1178614
+         d81 |   .1511912   .0219489     6.89   0.000     .1081584     .194224
+         d82 |   .2529709   .0244185    10.36   0.000     .2050963    .3008454
+         d83 |   .3544437   .0292419    12.12   0.000     .2971125    .4117749
+         d84 |   .4901148   .0362266    13.53   0.000     .4190894    .5611402
+         d85 |   .6174823   .0452435    13.65   0.000     .5287784    .7061861
+         d86 |   .7654966   .0561277    13.64   0.000     .6554532    .8755399
+         d87 |   .9250249   .0687731    13.45   0.000     .7901893    1.059861
+       _cons |   1.426019   .0183415    77.75   0.000     1.390058    1.461979
+------------------------------------------------------------------------------
+N = 4,360 ; 545 groups ; Within = 0.1806 ; F(10, 3805) = 83.85
+=#
+m144fe = stata_regress(wagepan; y = :lwage,
+    x = vcat([:expersq, :married, :union], dvars), absorb = :nr)
+```
+
+Pooled OLS and the FE within estimator reproduce Stata **exactly**. The RE GLS
+estimate is very close but **not** bit-exact: `stata_xtreg_re` estimates the
+idiosyncratic variance identically (`sigma_e = .3512553` vs Stata `.35125535`)
+but the between/unit-variance component differs slightly (`sigma_u = .3231888` vs
+Stata `.32456727`, so `rho = .4585` vs `.4606`). Stata's `xtreg, re` default uses
+the Swamy–Arora estimator of the variance components; `stata_xtreg_re` uses a
+marginally different component estimator, which changes the GLS weight `θ` a
+touch and therefore the coefficients in the 3rd–5th significant figure (`educ =
+.1012208` vs `.1012246`; `union = .1075384` vs `.1073789`; `Wald χ²(7) = 943.99`
+vs `943.95`). The return to education cannot be identified by FE (time-constant),
+so it appears only in the pooled-OLS (`.0913`) and RE (`.1012`) columns.
+
+# Verification summary
+
+| Example | Quantity | Stata | Julia | Match |
+|---|---|---|---|---|
+| 14.1 FE | `grant_1` | -.4215895 / .2102 | same | yes |
+| 14.1 FE | `d89` | -.2472028 / .1332183 | same | yes |
+| 14.1 FE | Within R² / sigma_e | 0.2010 / .49774 | same | yes |
+| 14.1 | exp(b_grant_1)−1 | -.34399673 | -.34399673 | yes |
+| 14.1b FE | `grant` | -.0822141 / .1262632 | same | yes |
+| 14.2 FE | `expersq` | -.0060437 / .0008633 | same | yes |
+| 14.2 FE | `edd81` | .0049906 / .012222 | same | yes |
+| 14.2 FE | Within R² / F | 0.1814 / F(17,3798)=49.49 | same | yes |
+| 14.2 | `test` edd81..edd87 | F(7,3798)=0.52, p=.8202 | same | yes |
+| 14.3 FE | `grant_1` | -.5355783 / .224206 | -.5355783 / .224206 | yes |
+| 14.3 FE | `lsales` | -.0868577 / .2596985 | -.0868607 / .2596993 | ~yes (Δ≈3e-6) |
+| 14.3 FE | sigma_e | .49149057 | .49149057 | yes |
+| 14.3 FE | N / #groups / df_resid | 148 / 51 / 91 | 147 / 50 / 91 | df_resid yes* |
+| 14.4 OLS | `educ` | .0913498 / .0052374 | .0913498 / .0052374 | yes |
+| 14.4 RE | `educ` | .1012246 / .0089133 | .1012208 / .0088857 | close (5th fig) |
+| 14.4 RE | `union` | .1073789 / .01783 | .1075384 / .0178286 | close (3rd fig) |
+| 14.4 RE | Wald χ²(7) | 943.95 | 943.99 | close |
+| 14.4 RE | sigma_u / sigma_e / rho | .3245673 / .3512553 / .4605717 | .3231888 / .3512553 / .4584576 | sigma_e yes; sigma_u/rho differ |
+| 14.4 FE | `union` | .0800019 / .0193103 | .0800019 / .0193103 | yes |
+| 14.4 FE | `expersq` | -.0051855 / .0007044 | -.0051855 / .0007044 | yes |
+| 14.4 FE | Within R² / F | 0.1806 / F(10,3805)=83.85 | same | yes |
+
+All fixed-effects and pooled-OLS coefficients, standard errors, and within-R²
+reproduce Stata's `xtreg, fe` / `reg` **exactly**. The random-effects GLS fit
+(14.4) reproduces Stata's `xtreg, re` **very closely but not bit-exactly**: the
+within variance `sigma_e` is identical, but the between-variance component
+`sigma_u` differs (Swamy–Arora vs `stata_xtreg_re`'s component estimator), which
+perturbs the GLS coefficients in the 3rd–5th significant figure and the Wald
+statistic by 0.04. `(*)` In Example 14.3 the residual degrees of freedom (91) and
+every slope match; `FixedEffectModels` drops exactly one singleton unit, lowering
+the *displayed* `N`/group count from 148/51 to 147/50 without altering the
+estimator (the `lsales`/`lemploy` slopes shift only in the 6th significant figure,
+≈3e-6, a pure floating-point path difference). No result was tuned to force
+agreement.

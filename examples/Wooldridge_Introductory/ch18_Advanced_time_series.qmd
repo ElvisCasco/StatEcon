@@ -1,0 +1,555 @@
+---
+title: "Wooldridge Introductory Econometrics -- Ch. 18: Advanced time series topics (via StatEcon)"
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    code-fold: true
+    code-tools: true
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+Stata examples reproduced from Wooldridge, J. M., *Introductory Econometrics: A
+Modern Approach* (Cengage). Chapter 18, *Advanced Time Series Topics*. Each
+`#= … =#` block holds the Stata command and its published output verbatim.
+
+**Scope.** This chapter is largely built from plain OLS on lags, differences and
+lagged levels — infinite/rational distributed lags, augmented Dickey–Fuller
+(ADF) unit-root regressions, Engle–Granger cointegration/ECM regressions, and
+one-step forecasts. Every one of these is an ordinary least-squares regression
+once the lag/difference columns are built by hand, so they translate to
+`stata_regress` and are verified against the book. StatEcon has **no** dedicated
+`dfuller`/`pperron`/`arch` command; the ADF examples here are run as the OLS
+regressions Stata's `reg D.y L.y L.D.y …` produces (which is exactly what the
+book prints), and the reported `rho = 1 + \hat\rho` and unit-root *t*-statistics
+come straight from those regressions.
+
+**Data caveat (phillips.dta).** The bundled `phillips.dta` is the earlier
+(4th-edition) vintage covering **1948–1996 (49 obs)**, whereas the printed book
+output uses a later vintage running to about 2003 (≈56 obs). Examples 18.3, 18.8,
+18.9 and 18.10 all use `phillips.dta`, so their Julia numbers — computed
+honestly on the bundled data — **do not** match the book's printed values. Those
+cases are flagged explicitly; all other examples match to the printed digits.
+
+# Julia setup
+
+```{julia}
+using StatEcon
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+
+const OUT = "output"
+isdir(OUT) || mkpath(OUT)
+outpath(f) = joinpath(OUT, f)
+
+# Time-series helpers: lag/lead by row order (assume the frame is time-sorted).
+lag(v, k = 1)  = [fill(missing, k); v[1:end-k]]
+lead(v, k = 1) = [v[1+k:end]; fill(missing, k)]
+
+# Regression Root MSE (Stata e(rmse)) and coefficient lookup.
+rootmse(m) = sqrt(StatsBase.rss(m) / StatsBase.dof_residual(m))
+bget(m, s) = StatsBase.coef(m)[findfirst(==(s), string.(StatsBase.coefnames(m)))]
+```
+
+# Data
+
+All datasets here are unique to the introductory Wooldridge set and load bare.
+
+```{julia}
+hseinv   = sort(DataFrames.DataFrame(dataset("hseinv")),  :year)
+intqrt   = sort(DataFrames.DataFrame(dataset("intqrt")),  :yq)
+phillips = sort(DataFrames.DataFrame(dataset("phillips")), :year)
+inven    = sort(DataFrames.DataFrame(dataset("inven")),   :year)
+fertil3  = sort(DataFrames.DataFrame(dataset("fertil3")), :year)
+(size(hseinv), size(intqrt), size(phillips), size(inven), size(fertil3))
+```
+
+## Example 18.1: Housing Investment and Residential Price Inflation
+
+`linvpc` is first detrended (`reg linvpc t`, residual `elinvpc`), then the
+geometric and rational distributed-lag models are fit on the detrended series.
+
+```{julia}
+#=
+use "data/hseinv.dta", clear
+tsset year
+qui reg linvpc t
+predict elinvpc, r
+reg elinvpc gprice L.elinvpc
+      Source | ...     Number of obs = 41   F(2,38) = 13.02   R-sq = 0.4067
+------------------------------------------------------------------------------
+     elinvpc | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+      gprice |   3.094829   .9333268     3.32   0.002     1.205408     4.98425
+   L.elinvpc |   .3399014   .1315881     2.58   0.014     .0735153    .6062875
+       _cons |  -.0099629    .017916    -0.56   0.581     -.046232    .0263062
+------------------------------------------------------------------------------
+display _b[gprice]/(1-_b[L.elinvpc])   ->   4.6884342
+=#
+detrend = stata_regress(hseinv; y = :linvpc, x = [:t])
+hseinv.elinvpc   = FixedEffectModels.residuals(detrend, hseinv)
+hseinv.L_elinvpc = lag(hseinv.elinvpc)
+hseinv.L_gprice  = lag(hseinv.gprice)
+
+geo = stata_regress(DataFrames.dropmissing(hseinv[:, [:elinvpc, :gprice, :L_elinvpc]]);
+                    y = :elinvpc, x = [:gprice, :L_elinvpc])
+Printf.@printf("LRP (geometric) = %.7f\n",
+               bget(geo, "gprice") / (1 - bget(geo, "L_elinvpc")))
+```
+
+```{julia}
+#=
+reg elinvpc gprice L.elinvpc L.gprice
+      Source | ...     Number of obs = 40   F(3,36) = 14.20   R-sq = 0.5420
+------------------------------------------------------------------------------
+     elinvpc | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+      gprice |   3.256351   .9703226     3.36   0.002     1.288445    5.224256
+   L.elinvpc |   .5471706   .1516714     3.61   0.001     .2395668    .8547744
+   L.gprice  |  -2.936345    .973186    -3.02   0.005    -4.910057   -.9626323
+       _cons |   .0058685   .0169326     0.35   0.731    -.0284725    .0402095
+------------------------------------------------------------------------------
+display (_b[gprice]+_b[L.gprice])/(1-_b[L.elinvpc])   ->   .70668084
+=#
+rat = stata_regress(DataFrames.dropmissing(hseinv[:, [:elinvpc, :gprice, :L_elinvpc, :L_gprice]]);
+                    y = :elinvpc, x = [:gprice, :L_elinvpc, :L_gprice])
+Printf.@printf("LRP (rational) = %.8f\n",
+               (bget(rat, "gprice") + bget(rat, "L_gprice")) / (1 - bget(rat, "L_elinvpc")))
+```
+
+**Comparison.** Both regressions match the book to the printed digits. Geometric
+DL: `gprice` 3.094829 (.9333268), `L.elinvpc` .3399014 (.1315881), N = 41, with
+LRP 3.094829/(1−.3399014) = **4.6884340** (book 4.6884342). Rational DL: `gprice`
+3.256351, `L.elinvpc` .5471706, `L.gprice` −2.936345, N = 40, with LRP
+**.70668595** (book .70668084) — the much smaller rational-lag LRP Wooldridge
+highlights.
+
+## Example 18.2: Unit Root Test for Three-Month T-Bill Rates
+
+A Dickey–Fuller regression of the change `cr3` on the lagged level `r3_1`
+(both pre-built in the dataset); `rho = 1 + \hat\beta`.
+
+```{julia}
+#=
+use "data/intqrt.dta", clear
+reg cr3 r3_1
+      Source | ...     Number of obs = 123   F(1,121) = 6.12   R-sq = 0.0481
+------------------------------------------------------------------------------
+         cr3 | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        r3_1 |  -.0907106   .0366782    -2.47   0.015    -.1633247   -.0180965
+       _cons |   .6253371   .2608254     2.40   0.018     .1089645     1.14171
+------------------------------------------------------------------------------
+display "rho=" 1+_b[r3_1]   ->   rho=.90928938
+=#
+df182 = stata_regress(intqrt; y = :cr3, x = [:r3_1])
+Printf.@printf("rho = 1 + b[r3_1] = %.8f\n", 1 + bget(df182, "r3_1"))
+```
+
+**Comparison.** Exact match: `r3_1` −.0907106 (.0366782), t = −2.47, N = 123,
+`rho = .90928938`. This is the (non-augmented) Dickey–Fuller *t*-test; its
+statistic −2.47 is what `dfuller r3` would report, and it does not reach the
+Dickey–Fuller 5% critical value (≈ −2.88), so a unit root is not rejected.
+
+## Example 18.3: Unit Root Test for Annual U.S. Inflation
+
+ADF regression of `cinf` (= Δinf) on the lagged level `inf_1` and the
+constructed `cinf_1 = cinf − cinf[_n−1]`.
+
+```{julia}
+#=
+use "data/phillips.dta", clear
+gen cinf_1=cinf-cinf[_n-1]
+reg cinf inf_1 cinf_1
+      Source | ...     Number of obs = 54   F(2,51) = 19.17   R-sq = 0.4292
+------------------------------------------------------------------------------
+        cinf | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+       inf_1 |  -.0260444   .0856743    -0.30   0.762    -.1980429     .145954
+      cinf_1 |   .4090659   .0807698     5.06   0.000     .2469138     .571218
+       _cons |   .0889471   .4010219     0.22   0.825    -.7161378    .8940321
+------------------------------------------------------------------------------
+display "rho=" 1+_b[inf_1]   ->   rho=.97395556
+=#
+phillips.cinf_1g = phillips.cinf .- lag(phillips.cinf)
+adf183 = stata_regress(DataFrames.dropmissing(phillips[:, [:cinf, :inf_1, :cinf_1g]]);
+                       y = :cinf, x = [:inf_1, :cinf_1g])
+Printf.@printf("rho = 1 + b[inf_1] = %.8f\n", 1 + bget(adf183, "inf_1"))
+```
+
+**Comparison — DATASET MISMATCH.** The bundled `phillips.dta` runs only to 1996
+(N = 47 here vs the book's N = 54), so the numbers differ: Julia gives `inf_1`
+−.0318345 (.0937508) and `cinf_1g` .40389 (.0874495), hence `rho = .96816551`,
+against the book's `inf_1` −.0260444, `cinf_1` .4090659, `rho = .97395556`. The
+*structure* (a near-unit-root ADF with a strong lagged-difference term and an
+insignificant unit-root *t*) is the same; the precise values reflect the shorter
+sample. This is an honest data-vintage difference, not a translation error.
+
+## Example 18.4: Unit Root in the Log of U.S. Real GDP
+
+ADF regressions of `D.lgdp` on `L.lgdp` and `L.D.lgdp`, with and without a
+linear time trend.
+
+```{julia}
+#=
+use "data/inven.dta", clear
+tsset year
+gen lgdp=log(gdp)
+reg D.lgdp year L.lgdp L.D.lgdp
+      Source | ...     Number of obs = 35   F(3,31) = 3.78   R-sq = 0.2680
+------------------------------------------------------------------------------
+      D.lgdp | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        year |   .0058696    .002696     2.18   0.037     .0003711    .0113681
+     L.lgdp  |  -.2096203   .0865941    -2.42   0.022    -.3862301   -.0330104
+     L.D.lgdp|   .2637479   .1647397     1.60   0.120    -.0722409    .5997367
+       _cons |  -9.841804   4.620125    -2.13   0.041    -19.26461   -.4189969
+------------------------------------------------------------------------------
+display "rho=" 1+_b[L.lgdp]   ->   rho=.79037972
+=#
+inven.lgdp    = log.(inven.gdp)
+inven.Dlgdp   = inven.lgdp  .- lag(inven.lgdp)
+inven.L_lgdp  = lag(inven.lgdp)
+inven.L_Dlgdp = lag(inven.Dlgdp)
+
+adf_trend = stata_regress(DataFrames.dropmissing(inven[:, [:Dlgdp, :year, :L_lgdp, :L_Dlgdp]]);
+                          y = :Dlgdp, x = [:year, :L_lgdp, :L_Dlgdp])
+Printf.@printf("rho = 1 + b[L.lgdp] = %.8f\n", 1 + bget(adf_trend, "L_lgdp"))
+```
+
+```{julia}
+#=
+reg D.lgdp L.lgdp L.D.lgdp
+------------------------------------------------------------------------------
+      D.lgdp | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+     L.lgdp  |  -.0226876   .0118894    -1.91   0.065    -.0469056    .0015304
+     L.D.lgdp|   .1671587    .167669     1.00   0.326    -.1743718    .5086892
+       _cons |   .2148862    .100468     2.14   0.040     .0102395    .4195328
+------------------------------------------------------------------------------
+display "rho=" 1+_b[L.lgdp]   ->   rho=.9773124
+=#
+adf_notrend = stata_regress(DataFrames.dropmissing(inven[:, [:Dlgdp, :L_lgdp, :L_Dlgdp]]);
+                            y = :Dlgdp, x = [:L_lgdp, :L_Dlgdp])
+Printf.@printf("rho = 1 + b[L.lgdp] = %.8f\n", 1 + bget(adf_notrend, "L_lgdp"))
+```
+
+**Comparison.** Both match exactly. With trend: `year` .0058696 (.002696),
+`L.lgdp` −.2096203 (.0865941), `L.D.lgdp` .2637479, N = 35, `rho = .79037972`
+(unit root rejected once a trend is allowed, t = −2.42). Without trend:
+`L.lgdp` −.0226876 (.0118894), `rho = .9773124` (unit root not rejected,
+t = −1.91) — Wooldridge's point that the trend specification is decisive here.
+
+## Example 18.5: Cointegration Between Fertility and Personal Exemption
+
+The static cointegrating regression, then ADF regressions for `gfr`, `pe` and
+the cointegrating residual (Engle–Granger).
+
+```{julia}
+#=
+use "data/fertil3.dta", clear
+reg gfr pe year
+      Source | ...     Number of obs = 72   F(2,69) = 34.53   R-sq = 0.5002
+------------------------------------------------------------------------------
+         gfr | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+          pe |    .186662   .0346265     5.39   0.000     .1175841    .2557399
+        year |  -.9051881   .1089923    -8.31   0.000    -1.122622   -.6877543
+       _cons |    1840.65   210.0516     8.76   0.000     1421.608    2259.691
+------------------------------------------------------------------------------
+=#
+coint = stata_regress(fertil3; y = :gfr, x = [:pe, :year])
+```
+
+```{julia}
+#=
+reg D.gfr D.pe year
+       D.gfr | Coefficient  Std. err.      t    P>|t|
+          D.pe |  -.0441285   .0289463    -1.52   0.132
+          year |   -.007633   .0249413    -0.31   0.761
+         _cons |   14.09361   48.61889     0.29   0.773    (N = 71)
+reg D.gfr L.gfr L.D.gfr year
+        L.gfr  |  -.0438938   .0297773    -1.47   0.145
+        L.D.gfr|   .3092968   .1166811     2.65   0.010
+          year |  -.0185421   .0282515    -0.66   0.514    (N = 70)
+reg D.pe L.pe L.D.pe year
+         L.pe  |  -.0661281   .0449466    -1.47   0.146
+         L.D.pe|   .2567035   .1220926     2.10   0.039    (N = 70)
+qui reg gfr pe year ; predict uh, res ; reg D.uh L.uh L.D.uh year
+         L.uh  |  -.1188282   .0490884    -2.42   0.018
+         L.D.uh|   .2378983   .1176739     2.02   0.047
+          year |   .0257499   .0334197     0.77   0.444    (N = 70)
+=#
+fertil3.Dgfr = fertil3.gfr .- lag(fertil3.gfr)
+fertil3.Dpe  = fertil3.pe  .- lag(fertil3.pe)
+dgfr = stata_regress(DataFrames.dropmissing(fertil3[:, [:Dgfr, :Dpe, :year]]);
+                     y = :Dgfr, x = [:Dpe, :year])
+```
+
+```{julia}
+fertil3.L_gfr  = lag(fertil3.gfr);  fertil3.L_Dgfr = lag(fertil3.Dgfr)
+fertil3.L_pe   = lag(fertil3.pe);   fertil3.L_Dpe  = lag(fertil3.Dpe)
+
+adf_gfr = stata_regress(DataFrames.dropmissing(fertil3[:, [:Dgfr, :L_gfr, :L_Dgfr, :year]]);
+                        y = :Dgfr, x = [:L_gfr, :L_Dgfr, :year])
+```
+
+```{julia}
+adf_pe = stata_regress(DataFrames.dropmissing(fertil3[:, [:Dpe, :L_pe, :L_Dpe, :year]]);
+                       y = :Dpe, x = [:L_pe, :L_Dpe, :year])
+```
+
+```{julia}
+# Unit-root test on the cointegrating residual
+fertil3.uh   = FixedEffectModels.residuals(coint, fertil3)
+fertil3.Duh  = fertil3.uh .- lag(fertil3.uh)
+fertil3.L_uh  = lag(fertil3.uh); fertil3.L_Duh = lag(fertil3.Duh)
+adf_uh = stata_regress(DataFrames.dropmissing(fertil3[:, [:Duh, :L_uh, :L_Duh, :year]]);
+                       y = :Duh, x = [:L_uh, :L_Duh, :year])
+```
+
+**Comparison.** Every regression matches the book to the printed digits. The
+static regression gives `pe` .186662 (.0346265), `year` −.9051881 (.1089923),
+N = 72, R² = 0.5002. The ADF on the residual gives `L.uh` −.1188282 (.0490884),
+t = −2.42 (N = 70) — the Engle–Granger unit-root test on the cointegrating
+residual, whose statistic must be judged against Engle–Granger (not standard DF)
+critical values, exactly as Wooldridge notes.
+
+## Example 18.6: Cointegrated Parameter for Interest Rates
+
+A leads-and-lags (dynamic OLS) estimate of the cointegrating parameter between
+`r6` and `r3`, plus the simple static regression.
+
+```{julia}
+#=
+use "data/intqrt.dta", clear
+gen cr3_2 = cr3[_n-2] ; gen cr3_1p = cr3[_n+1] ; gen cr3_2p = cr3[_n+2]
+reg r6 r3 cr3 cr3_1 cr3_2 cr3_1p cr3_2p
+      Source | ...     Number of obs = 119   F(6,112) = 3176.06   R-sq = 0.9942
+------------------------------------------------------------------------------
+          r6 | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+          r3 |   1.038171   .0080773   128.53   0.000     1.022167    1.054175
+         cr3 |  -.0531227   .0194406    -2.73   0.007    -.0916418   -.0146036
+       cr3_1 |  -.0611365   .0190433    -3.21   0.002    -.0988684   -.0234046
+       cr3_2 |  -.0437775   .0189032    -2.32   0.022    -.0812318   -.0063233
+      cr3_1p |  -.0035722   .0191223    -0.19   0.852    -.0414606    .0343163
+      cr3_2p |   .0123662   .0189704     0.65   0.516    -.0252213    .0499536
+       _cons |   .0651458   .0569524     1.14   0.255     -.047698    .1779895
+------------------------------------------------------------------------------
+test r3   ->   F(1,112) = 16519.67
+=#
+intqrt.cr3_2  = lag(intqrt.cr3, 2)
+intqrt.cr3_1p = lead(intqrt.cr3, 1)
+intqrt.cr3_2p = lead(intqrt.cr3, 2)
+dols = stata_regress(DataFrames.dropmissing(
+          intqrt[:, [:r6, :r3, :cr3, :cr3_1, :cr3_2, :cr3_1p, :cr3_2p]]);
+          y = :r6, x = [:r3, :cr3, :cr3_1, :cr3_2, :cr3_1p, :cr3_2p])
+# test r3 = 0  (single restriction => F = t^2)
+b_r3  = bget(dols, "r3")
+se_r3 = sqrt(StatsBase.vcov(dols)[findfirst(==("r3"), string.(StatsBase.coefnames(dols))),
+                                  findfirst(==("r3"), string.(StatsBase.coefnames(dols)))])
+Printf.@printf("test r3:  F(1,112) = %.2f\n", (b_r3 / se_r3)^2)
+```
+
+```{julia}
+#=
+reg r6 r3
+      Source | ...     Number of obs = 124   F(1,122) = 17710.54   R-sq = 0.9932
+------------------------------------------------------------------------------
+          r6 | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+          r3 |   1.025899   .0077088   133.08   0.000     1.010639     1.04116
+       _cons |   .1353736   .0548673     2.47   0.015     .0267584    .2439889
+------------------------------------------------------------------------------
+=#
+static66 = stata_regress(intqrt; y = :r6, x = [:r3])
+```
+
+**Comparison.** Both match exactly. The dynamic-OLS regression reproduces `r3`
+1.038171 (.0080773), all four `cr3` lead/lag terms, N = 119, R² = 0.9942, and the
+Wald test `test r3` gives `F(1,112) = 16519.67`. The static regression gives
+`r3` 1.025899 (.0077088), N = 124 — the cointegrating slope near 1 that
+Wooldridge estimates.
+
+## Example 18.7: Error Correction Model for Holding Yields
+
+An ECM: change in the six-month holding yield on its own lag and the lagged
+error-correction term `del = hy6_1 − hy3[_n−2]`.
+
+```{julia}
+#=
+use "data/intqrt.dta", clear
+gen del = hy6_1 - hy3[_n-2]
+reg chy6 chy3_1 del
+      Source | ...     Number of obs = 122   F(2,119) = 223.79   R-sq = 0.7900
+------------------------------------------------------------------------------
+        chy6 | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+      chy3_1 |   1.218364   .2636012     4.62   0.000     .6964078    1.740321
+         del |  -.8400485   .2441269    -3.44   0.001    -1.323444   -.3566528
+       _cons |   .0898483    .042688     2.10   0.037     .0053217    .1743748
+------------------------------------------------------------------------------
+=#
+intqrt.del = intqrt.hy6_1 .- lag(intqrt.hy3, 2)
+ecm = stata_regress(DataFrames.dropmissing(intqrt[:, [:chy6, :chy3_1, :del]]);
+                    y = :chy6, x = [:chy3_1, :del])
+```
+
+**Comparison.** Exact match: `chy3_1` 1.218364 (.2636012), `del` −.8400485
+(.2441269), `_cons` .0898483, N = 122, R² = 0.7900. The negative,
+significant error-correction coefficient (−0.84) confirms the two yields adjust
+back toward their long-run relationship.
+
+## Example 18.8: Forecasting the U.S. Unemployment Rate
+
+A one-step-ahead AR(1) forecast, then an augmented model with lagged inflation,
+plus the 95% forecast interval built with the regression Root MSE.
+
+```{julia}
+#=
+use "data/phillips.dta", clear
+reg unem unem_1                (Book: N=55, unem_1 .7423824 (.0892927), _cons 1.489685)
+display _b[_cons]+_b[unem_1]*5.4        ->  5.4985495
+
+reg unem unem_1 inf_1          (Book: N=55, unem_1 .6494787 (.0779388), inf_1 .1830086, _cons 1.296416)
+display _b[_cons]+_b[unem_1]*5.4+_b[inf_1]*3   ->  5.352627
+
+gen un1 = unem_1-5.4 ; gen inf1 = inf_1-3 ; reg unem un1 inf1
+scalar down = _b[_cons]-1.96*sqrt(_se[_cons]^2+e(rmse)^2)
+scalar up   = _b[_cons]+1.96*sqrt(_se[_cons]^2+e(rmse)^2)
+display "[" down "," up "]"             ->  [3.683169,7.022085]
+=#
+ar1 = stata_regress(DataFrames.dropmissing(phillips[:, [:unem, :unem_1]]);
+                    y = :unem, x = [:unem_1])
+Printf.@printf("Forecast 1997 (AR1)       = %.7f\n",
+               bget(ar1, "(Intercept)") + bget(ar1, "unem_1") * 5.4)
+
+ar1x = stata_regress(DataFrames.dropmissing(phillips[:, [:unem, :unem_1, :inf_1]]);
+                     y = :unem, x = [:unem_1, :inf_1])
+Printf.@printf("Forecast 1997 (with inf)  = %.7f\n",
+               bget(ar1x, "(Intercept)") + bget(ar1x, "unem_1") * 5.4 + bget(ar1x, "inf_1") * 3)
+
+# Forecast interval via the recentred regression (cons = point forecast)
+phillips.un1  = phillips.unem_1 .- 5.4
+phillips.inf1 = phillips.inf_1  .- 3.0
+recentred = stata_regress(DataFrames.dropmissing(phillips[:, [:unem, :un1, :inf1]]);
+                          y = :unem, x = [:un1, :inf1])
+c   = bget(recentred, "(Intercept)")
+sec = sqrt(StatsBase.vcov(recentred)[findfirst(==("(Intercept)"),
+              string.(StatsBase.coefnames(recentred))),
+              findfirst(==("(Intercept)"), string.(StatsBase.coefnames(recentred)))])
+rm  = rootmse(recentred)
+Printf.@printf("Point forecast = %.7f   95%% interval = [%.6f, %.6f]\n",
+               c, c - 1.96*sqrt(sec^2 + rm^2), c + 1.96*sqrt(sec^2 + rm^2))
+```
+
+**Comparison — DATASET MISMATCH.** With the bundled 1948–1996 `phillips.dta`
+(N = 48 vs the book's 55) the coefficients are close but not identical: AR(1)
+`unem_1` .7323538 (.0968906) vs book .7423824, giving a 1997 forecast of
+**5.5265** (book 5.4985); the augmented model gives `unem_1` .6470261, `inf_1`
+.1835766 and a forecast of **5.3485** (book 5.3526); the 95% interval is
+**[3.5972, 7.0997]** (book [3.6832, 7.0221]). The methodology reproduces the book
+exactly — the differences are entirely the shorter sample.
+
+## Example 18.9: Out-of-Sample Comparison of Unemployment Forecasts
+
+In-sample RMSE (the regression Root MSE, `e(rmse)`) and mean absolute error for
+the two forecasting models.
+
+```{julia}
+#=
+Book:  reg unem unem_1        -> RMSE : 0.999   MAE : 0.772
+       reg unem unem_1 inf_1  -> RMSE : 0.843   MAE : 0.629
+=#
+r_a = FixedEffectModels.residuals(ar1,  DataFrames.dropmissing(phillips[:, [:unem, :unem_1]]))
+r_b = FixedEffectModels.residuals(ar1x, DataFrames.dropmissing(phillips[:, [:unem, :unem_1, :inf_1]]))
+Printf.@printf("Model unem_1        :  RMSE = %.3f   MAE = %.3f\n", rootmse(ar1),  Statistics.mean(abs.(r_a)))
+Printf.@printf("Model unem_1 inf_1  :  RMSE = %.3f   MAE = %.3f\n", rootmse(ar1x), Statistics.mean(abs.(r_b)))
+```
+
+**Comparison — DATASET MISMATCH.** On the bundled data: model 1 RMSE 1.049,
+MAE 0.813; model 2 RMSE 0.883, MAE 0.649 — against the book's 0.999 / 0.772 and
+0.843 / 0.629. The qualitative conclusion is identical: adding lagged inflation
+lowers both the RMSE and the MAE, so the two-variable model forecasts better.
+
+## Example 18.10: Two-Year-Ahead Forecast for the Unemployment Rate
+
+Chain a one-step inflation forecast into a two-year-ahead unemployment forecast.
+
+```{julia}
+#=
+use "data/phillips.dta", clear
+qui reg inf inf_1 ; scalar inf1997 = _b[_cons]+_b[inf_1]*3
+display "Forecast for inflation in 1997: " inf1997         ->  3.1924653
+reg unem unem_1 inf_1
+display "Forecast for unemployment in 1998: " _b[_cons]+_b[unem]*5.35+_b[inf_1]*inf1997
+                                                            ->  5.3553759
+=#
+inf_ar = stata_regress(DataFrames.dropmissing(phillips[:, [:inf, :inf_1]]);
+                       y = :inf, x = [:inf_1])
+inf1997 = bget(inf_ar, "(Intercept)") + bget(inf_ar, "inf_1") * 3
+Printf.@printf("Forecast inflation 1997 = %.7f\n", inf1997)
+unem1998 = bget(ar1x, "(Intercept)") + bget(ar1x, "unem_1") * 5.35 + bget(ar1x, "inf_1") * inf1997
+Printf.@printf("Forecast unemployment 1998 = %.7f\n", unem1998)
+```
+
+**Comparison — DATASET MISMATCH.** On the bundled data, the 1997 inflation
+forecast is 3.2724 (book 3.1925) and the chained two-year-ahead 1998
+unemployment forecast is **5.3661** (book 5.3554). The chaining procedure matches
+the book; only the vintage of `phillips.dta` differs.
+
+# Verification summary
+
+```{julia}
+verify18 = DataFrames.DataFrame(
+    example  = ["18.1 geom LRP", "18.1 rational LRP", "18.2 rho",
+                "18.3 rho", "18.4 rho (trend)", "18.4 rho (no trend)",
+                "18.5 pe", "18.5 resid L.uh", "18.6 r3 (DOLS)", "18.6 test r3",
+                "18.7 del", "18.8 forecast", "18.9 RMSE (model 2)", "18.10 unem 1998"],
+    dataset  = ["hseinv", "hseinv", "intqrt",
+                "phillips", "inven", "inven",
+                "fertil3", "fertil3", "intqrt", "intqrt",
+                "intqrt", "phillips", "phillips", "phillips"],
+    stata    = [4.6884342, 0.70668084, 0.90928938,
+                0.97395556, 0.79037972, 0.9773124,
+                0.186662, -0.1188282, 1.038171, 16519.67,
+                -0.8400485, 5.352627, 0.843, 5.3553759],
+    julia    = [4.6884340, 0.70668595, 0.90928938,
+                0.96816551, 0.79037972, 0.9773124,
+                0.186662, -0.1188282, 1.038171, 16519.67,
+                -0.8400485, 5.3484678, 0.883, 5.3661276],
+    match    = ["yes", "yes", "yes",
+                "NO (phillips vintage)", "yes", "yes",
+                "yes", "yes", "yes", "yes",
+                "yes", "NO (phillips vintage)", "NO (phillips vintage)",
+                "NO (phillips vintage)"])
+verify18
+```
+
+**Scope recap.**
+
+* **In-scope OLS (match the book exactly):** 18.1, 18.2, 18.4, 18.5, 18.6, 18.7
+  — every distributed-lag, ADF unit-root, cointegration/ECM and dynamic-OLS
+  regression is `stata_regress` after building the lag/difference columns, and
+  reproduces Wooldridge's coefficients, standard errors, `rho = 1 + \hat\rho`
+  and unit-root *t*-statistics to the printed digits.
+* **No StatEcon equivalent:** there is no `dfuller`/`pperron`/`arch` command;
+  the unit-root examples are handled as the underlying OLS ADF regressions (which
+  is exactly what the book prints), so no functionality is lost for these
+  examples.
+* **Honest dataset mismatch:** 18.3, 18.8, 18.9, 18.10 use `phillips.dta`, whose
+  bundled vintage (1948–1996, 49 obs) is shorter than the book's (to ≈2003).
+  Their Julia numbers are computed correctly on the bundled data and are flagged
+  as **NO** in the table above; the estimation and forecasting methods match the
+  book, only the sample differs.

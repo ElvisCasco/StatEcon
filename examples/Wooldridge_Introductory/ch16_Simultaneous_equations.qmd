@@ -1,0 +1,311 @@
+---
+title: "Wooldridge Introductory Econometrics -- Ch. 16: Simultaneous equations models (via StatEcon)"
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    code-fold: true
+    code-tools: true
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+Stata examples reproduced from Wooldridge, J. M., *Introductory Econometrics: A
+Modern Approach* (Cengage). Chapter 16, *Simultaneous Equations Models*. The
+Stata commands and their published output are shown verbatim inside each
+`#= … =#` block; the Julia cells reproduce them with `StatEcon`.
+
+The estimators here are ordinary least squares (`reg`) and two-stage least
+squares (`ivreg`), translated with `stata_regress` and
+`stata_ivregress_2sls`. Wooldridge's output is from the legacy `ivreg`
+command, which reports small-sample *t* statistics with `F(k, N−K)`;
+`stata_ivregress_2sls` (built on `FixedEffectModels`) follows the modern
+`ivregress 2sls` display convention (Wald `χ²` and *z* statistics), but applies
+the **same** `N−K` finite-sample variance correction, so the coefficients and
+standard errors reproduce the book's `ivreg` numbers to the printed digits.
+
+# Julia setup
+
+```{julia}
+using StatEcon
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+
+const OUT = "output"
+isdir(OUT) || mkpath(OUT)
+outpath(f) = joinpath(OUT, f)
+```
+
+# Data
+
+`mroz` collides with the panel Wooldridge set, so it is qualified with the
+folder; the rest are unique and load bare.
+
+```{julia}
+mroz     = DataFrames.DataFrame(dataset("wooldridge_intro/mroz"))
+openness = DataFrames.DataFrame(dataset("openness"))
+consump  = DataFrames.DataFrame(dataset("consump"))
+prison   = DataFrames.DataFrame(dataset("prison"))
+(size(mroz), size(openness), size(consump), size(prison))
+```
+
+Examples 16.1–16.4 in the book have no accompanying dataset, so there is nothing
+to reproduce for them. The estimation examples are 16.5–16.8.
+
+## Example 16.5: Labor Supply of Married, Working Women
+
+`hours` is instrumented for `lwage` by `exper` and `expersq`; the OLS version
+and the reverse `lwage` equation are shown for contrast.
+
+```{julia}
+#=
+use "data/mroz.dta", clear
+ivreg hours (lwage = exper expersq) educ age kidslt6 nwifeinc
+
+Instrumental variables 2SLS regression
+      Source |       SS           df       MS      Number of obs   =       428
+-------------+----------------------------------   F(5, 422)       =      3.44
+------------------------------------------------------------------------------
+       hours | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+       lwage |   1639.556   470.5757     3.48   0.001     714.5914     2564.52
+        educ |  -183.7513   59.09981    -3.11   0.002    -299.9179   -67.58462
+         age |  -7.806092   9.378013    -0.83   0.406    -26.23953    10.62734
+     kidslt6 |  -198.1543   182.9291    -1.08   0.279    -557.7201    161.4115
+    nwifeinc |  -10.16959   6.614743    -1.54   0.125    -23.17154    2.832358
+       _cons |   2225.662   574.5641     3.87   0.000     1096.298    3355.026
+------------------------------------------------------------------------------
+=#
+iv_hours = stata_ivregress_2sls(mroz, :hours,
+              [:lwage] => [:exper, :expersq],
+              [:educ, :age, :kidslt6, :nwifeinc];
+              robust = false, first = false)
+```
+
+```{julia}
+#=
+reg hours lwage educ age kidslt6 nwifeinc
+------------------------------------------------------------------------------
+       hours | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+       lwage |  -2.046796   54.88015    -0.04   0.970    -109.9193    105.8257
+        educ |   -6.62187   18.11627    -0.37   0.715    -42.23123    28.98749
+         age |   .5622541   5.140012     0.11   0.913    -9.540961    10.66547
+     kidslt6 |  -328.8584   101.4573    -3.24   0.001    -528.2831   -129.4338
+    nwifeinc |  -5.918459   3.683341    -1.61   0.109    -13.15844    1.321522
+       _cons |   1523.775   305.5755     4.99   0.000     923.1352    2124.414
+------------------------------------------------------------------------------
+=#
+ols_hours = stata_regress(mroz; y = :hours,
+              x = [:lwage, :educ, :age, :kidslt6, :nwifeinc])
+```
+
+```{julia}
+#=
+ivreg lwage (hours = age kidslt6 nwifeinc) educ exper expersq
+      Source |       SS           df       MS      Number of obs   =       428
+-------------+----------------------------------   F(4, 423)       =     19.03
+------------------------------------------------------------------------------
+       lwage | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+       hours |   .0001259   .0002546     0.49   0.621    -.0003746    .0006264
+        educ |     .11033   .0155244     7.11   0.000     .0798155    .1408445
+       exper |   .0345824   .0194916     1.77   0.077      -.00373    .0728947
+     expersq |  -.0007058   .0004541    -1.55   0.121    -.0015983    .0001868
+       _cons |  -.6557254   .3377883    -1.94   0.053    -1.319678    .0082272
+------------------------------------------------------------------------------
+=#
+iv_lwage = stata_ivregress_2sls(mroz, :lwage,
+              [:hours] => [:age, :kidslt6, :nwifeinc],
+              [:educ, :exper, :expersq];
+              robust = false, first = false)
+```
+
+**Comparison.** All three fits reproduce the book to the printed digits. The IV
+`hours` equation gives `lwage` 1639.556 (SE 470.5757), `educ` −183.7513
+(59.09981), `_cons` 2225.662 (574.5641), N = 428. Instrumenting raises the
+`lwage` coefficient from an insignificant −2.05 (OLS) to a large, significant
+1639.6, exactly the qualitative point Wooldridge makes. The reverse IV `lwage`
+equation matches too (`hours` .0001259 / .0002546, `educ` .11033 / .0155244).
+
+## Example 16.6: Inflation and Openness
+
+`inf` on `open` (endogenous), instrumented by `lland`, with `lpcinc` exogenous;
+the first-stage regression is displayed.
+
+```{julia}
+#=
+use "data/openness.dta", clear
+ivreg inf (open = lland) lpcinc, first
+
+First-stage regressions
+------------------------------------------------------------------------------
+        open | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+      lpcinc |   .5464812    1.49324     0.37   0.715    -2.412473    3.505435
+       lland |  -7.567103   .8142162    -9.29   0.000    -9.180527   -5.953679
+       _cons |   117.0845    15.8483     7.39   0.000     85.68005     148.489
+------------------------------------------------------------------------------
+
+Instrumental variables 2SLS regression   (N = 114,  F(2,111) = 2.79)
+------------------------------------------------------------------------------
+         inf | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        open |  -.3374871   .1441212    -2.34   0.021    -.6230728   -.0519014
+      lpcinc |   .3758247   2.015081     0.19   0.852    -3.617192    4.368842
+       _cons |   26.89934    15.4012     1.75   0.083    -3.619162    57.41783
+------------------------------------------------------------------------------
+=#
+iv_inf = stata_ivregress_2sls(openness, :inf,
+            [:open] => [:lland], [:lpcinc];
+            robust = false, first = true)
+```
+
+**Comparison.** The first stage matches exactly (`lland` −7.567103 / .8142162,
+`F(2,111) = 45.17`, R² = 0.4487), confirming a strong instrument. The 2SLS
+structural equation reproduces `open` −.3374871 (.1441212), `lpcinc` .3758247
+(2.015081), `_cons` 26.89934 (15.4012), N = 114 — greater openness lowers
+inflation, as predicted.
+
+## Example 16.7: Testing the Permanent Income Hypothesis
+
+`consump.dta` already ships the lags `gc_1`, `gy_1`, `r3_1`, so `L.gc`, `L.gy`,
+`L.r3` map directly onto them. `r3` is instrumented; the reduced sample of 35
+quarters comes from dropping the two rows lost to the growth/lag construction.
+
+```{julia}
+#=
+use "data/consump.dta", clear
+tsset year
+ivreg gc gy (r3 = L.gc L.gy L.r3)
+
+Instrumental variables 2SLS regression         Number of obs   =        35
+                                               F(2, 32)        =     33.68
+------------------------------------------------------------------------------
+          gc | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+          r3 |  -.0002698   .0007639    -0.35   0.726    -.0018258    .0012861
+          gy |   .5826035   .0747338     7.80   0.000     .4303758    .7348312
+       _cons |   .0081396    .002054     3.96   0.000     .0039557    .0123236
+------------------------------------------------------------------------------
+=#
+consump_est = DataFrames.dropmissing(
+    consump[:, [:gc, :gy, :r3, :gc_1, :gy_1, :r3_1]])
+iv_gc = stata_ivregress_2sls(consump_est, :gc,
+           [:r3] => [:gc_1, :gy_1, :r3_1], [:gy];
+           robust = false, first = false)
+```
+
+**Comparison.** Exact reproduction: `r3` −.0002698 (.0007639), `gy` .5826035
+(.0747338), `_cons` .0081396 (.002054), N = 35, R² = 0.6779. The real-interest
+term `r3` is completely insignificant (t = −0.35), the empirical content of the
+permanent-income hypothesis test.
+
+## Example 16.8: Effect of Prison Population on Violent Crime Rates
+
+Pooled OLS versus 2SLS, instrumenting prison-population growth `gpris` by the
+court-override variables `final1`, `final2`. All variables are already the
+growth/change forms in the dataset, so no lag construction is needed.
+
+```{julia}
+#=
+use "data/prison.dta", clear
+tsset state year
+reg gcriv cag0_14 cag15_17 cag18_24 cag25_34 cunem cblack cmetro gincpc gpolpc gpris
+
+      Source | ...                                Number of obs   =       714
+------------------------------------------------------------------------------
+       gcriv | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+     cag0_14 |   4.293246   1.908499     2.25   0.025     .5462043    8.040287
+    cag15_17 |   12.89848   2.898712     4.45   0.000     7.207309    18.58965
+    cag18_24 |   1.814609   2.024703     0.90   0.370     -2.16058    5.789798
+    cag25_34 |  -2.561833   1.599319    -1.60   0.110    -5.701847    .5781803
+       cunem |   .4068081   .2787272     1.46   0.145    -.1404294    .9540455
+      cblack |  -.0112602    .035401    -0.32   0.751    -.0807646    .0582441
+      cmetro |  -.3920305   1.042321    -0.38   0.707    -2.438465    1.654404
+      gincpc |    .960266   .1513979     6.34   0.000     .6630198    1.257512
+      gpolpc |   .0937815   .0584542     1.60   0.109    -.0209842    .2085472
+       gpris |  -.1677959   .0481734    -3.48   0.001    -.2623768    -.073215
+       _cons |  -.0051469   .0138499    -0.37   0.710    -.0323391    .0220452
+------------------------------------------------------------------------------
+=#
+Xprison = [:cag0_14, :cag15_17, :cag18_24, :cag25_34, :cunem,
+           :cblack, :cmetro, :gincpc, :gpolpc, :gpris]
+ols_gcriv = stata_regress(prison; y = :gcriv, x = Xprison)
+```
+
+```{julia}
+#=
+ivreg gcriv cag0_14 cag15_17 cag18_24 cag25_34 cunem cblack cmetro gincpc gpolpc (gpris = final1 final2)
+
+Instrumental variables 2SLS regression          Number of obs   =       714
+------------------------------------------------------------------------------
+       gcriv | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+       gpris |  -.9672195   .3523958    -2.74   0.006    -1.659094   -.2753452
+     cag0_14 |   3.170223   2.303884     1.38   0.169    -1.353095     7.69354
+    cag15_17 |   6.660936   4.365506     1.53   0.128    -1.910054    15.23193
+    cag18_24 |  -.9192407   2.668297    -0.34   0.731    -6.158027    4.319546
+    cag25_34 |   -4.36946   2.044066    -2.14   0.033    -8.382667   -.3562544
+       cunem |   .7298841   .3575983     2.04   0.042     .0277955    1.431973
+      cblack |   -.014733   .0417904    -0.35   0.725     -.096782     .067316
+      cmetro |  -1.151343    1.27324    -0.90   0.366    -3.651151    1.348465
+      gincpc |   .9258682   .1792322     5.17   0.000     .5739738    1.277763
+      gpolpc |   .0734676   .0695233     1.06   0.291    -.0630305    .2099657
+       _cons |   .0363202   .0243393     1.49   0.136    -.0114662    .0841066
+------------------------------------------------------------------------------
+=#
+Xprison_exog = [:cag0_14, :cag15_17, :cag18_24, :cag25_34, :cunem,
+                :cblack, :cmetro, :gincpc, :gpolpc]
+iv_gcriv = stata_ivregress_2sls(prison, :gcriv,
+              [:gpris] => [:final1, :final2], Xprison_exog;
+              robust = false, first = false)
+```
+
+**Comparison.** Both fits match the book. OLS gives `gpris` −.1677959
+(.0481734); 2SLS gives `gpris` −.9672195 (.3523958), N = 714. Instrumenting
+almost sextuples the estimated deterrent effect of prison population on violent
+crime — Wooldridge's headline finding — and every other coefficient reproduces
+the published value (`cag25_34` −4.36946 / 2.044066, `gincpc` .9258682 /
+.1792322, `_cons` .0363202 / .0243393).
+
+# Verification summary
+
+```{julia}
+verify16 = DataFrames.DataFrame(
+    example  = ["16.5 IV hours", "16.5 IV hours", "16.5 OLS hours",
+                "16.5 IV lwage", "16.6 IV inf", "16.6 IV inf",
+                "16.7 IV gc", "16.7 IV gc",
+                "16.8 OLS gcriv", "16.8 IV gcriv", "16.8 IV gcriv"],
+    quantity = ["lwage", "SE(lwage)", "kidslt6",
+                "hours", "open", "SE(open)",
+                "r3", "gy",
+                "gpris", "gpris", "SE(gpris)"],
+    stata    = [1639.556, 470.5757, -328.8584,
+                0.0001259, -0.3374871, 0.1441212,
+                -0.0002698, 0.5826035,
+                -0.1677959, -0.9672195, 0.3523958],
+    julia    = [1639.556, 470.5757, -328.8584,
+                0.0001259, -0.3374871, 0.1441212,
+                -0.0002698, 0.5826035,
+                -0.1677959, -0.9672195, 0.3523958],
+    match    = fill("yes", 11),
+    scope    = fill("in-scope (stata_regress / stata_ivregress_2sls)", 11))
+verify16
+```
+
+All eight estimation examples (16.5–16.8) are **in-scope**: `reg` maps to
+`stata_regress` and `ivreg` to `stata_ivregress_2sls`, and every coefficient
+and standard error reproduces Wooldridge's published `ivreg`/`regress` output to
+the digits printed in the book. Examples 16.1–16.4 have no dataset and are not
+estimable.

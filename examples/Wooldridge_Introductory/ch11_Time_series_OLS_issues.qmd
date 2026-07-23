@@ -1,0 +1,282 @@
+---
+title: "Wooldridge Introductory Econometrics -- Ch. 11: Further issues in using OLS with time series (via StatEcon)"
+Authors:
+- Jeffrey M. Wooldridge
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+Stata examples reproduced from Wooldridge, J. M., *Introductory Econometrics: A
+Modern Approach* (Cengage), Chapter 11, *Further Issues in Using OLS with Time
+Series Data*.
+
+Like Chapter 10, every estimable example here is **ordinary least squares** — on
+lags (`return_1`, `pe_1`), on first differences (`cinf`, `cgfr`, `cpe`,
+`ghrwage`, `goutphr`) and on trends. All of the differenced and lagged
+variables are already stored in the datasets, so `stata_regress` reproduces the
+`reg` output directly. Examples 11.1–11.3 have no data in the source and are
+listed for completeness.
+
+# Julia setup
+
+```{julia}
+using StatEcon
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+
+# Artifacts this notebook produces go to `output/`.
+const OUT = "output"
+isdir(OUT) || mkpath(OUT)
+outpath(f) = joinpath(OUT, f)
+
+bcoef(m, nm) = FixedEffectModels.coef(m)[findfirst(==(nm), FixedEffectModels.coefnames(m))]
+```
+
+## Examples 11.1–11.3
+
+The source notes that the datasets for the Static Model (11.1), the Finite
+Distributed Lag Model (11.2) and the AR(1) Model (11.3) are **not available**, so
+there is nothing to reproduce for these three examples.
+
+## Example 11.4: Efficient Markets Hypothesis
+
+```{julia}
+#=
+use "data/nyse.dta", clear
+summ return
+
+    Variable |        Obs        Mean    Std. dev.       Min        Max
+      return |        690    .1957843    2.114532  -15.32173   8.448762
+=#
+nyse = dataset("nyse")
+stata_summarize(nyse, [:return])
+```
+
+```{julia}
+#=
+reg return return_1
+
+------------------------------------------------------------------------------
+      return | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+    return_1 |   .0588984   .0380231     1.55   0.122    -.0157569    .1335538
+       _cons |    .179634   .0807419     2.22   0.026     .0211034    .3381646
+------------------------------------------------------------------------------
+Number of obs = 689,  F(1,687) = 2.40,  R-squared = 0.0035,  Root MSE = 2.1104
+=#
+m114 = stata_regress(nyse; y = :return, x = [:return_1])
+```
+
+**Exact match** (N = 689). The lagged return is insignificant — consistent with
+the efficient-markets hypothesis.
+
+## Example 11.5: Expectations-Augmented Phillips Curve
+
+```{julia}
+#=
+use "data/phillips.dta", clear
+reg cinf unem
+
+------------------------------------------------------------------------------
+        cinf | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        unem |  -.5176487    .209045    -2.48   0.017    -.9369398   -.0983576
+       _cons |   2.828202   1.224871     2.31   0.025     .3714212    5.284982
+------------------------------------------------------------------------------
+Number of obs = 55,  F(1,53) = 6.13,  R-squared = 0.1037,  Root MSE = 2.3069
+=#
+phillips = dataset("phillips")
+m115 = stata_regress(phillips; y = :cinf, x = [:unem])
+```
+
+**Data-vintage note.** As in Example 10.1, the bundled `phillips.dta` is the
+earlier edition (49 obs, 1948–1996); `cinf = D.inf` therefore has 48 usable
+observations here versus 55 in the published output. The `reg cinf unem` code is
+correct, but the sample differs (Julia: unem ≈ −.712, N = 48; Stata: −.5176487,
+N = 55). Not a code discrepancy.
+
+Natural rate of unemployment implied by the fit (`−_cons/_b[unem]`):
+
+```{julia}
+#=
+display _b[_cons]/-_b[unem]
+5.4635544   (published edition)
+=#
+@printf("implied natural rate = %.7f  (this data vintage)\n",
+        bcoef(m115, "(Intercept)") / -bcoef(m115, "unem"))
+```
+
+## Example 11.6: Fertility Equation — Levels, Lags and Differences
+
+```{julia}
+#=
+use "data/fertil3.dta", clear
+reg gfr gfr_1
+
+------------------------------------------------------------------------------
+         gfr | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+       gfr_1 |   .9777202   .0260053    37.60   0.000      .925841    1.029599
+       _cons |   1.304937   2.548821     0.51   0.610    -3.779822    6.389695
+------------------------------------------------------------------------------
+Number of obs = 71,  F(1,69) = 1413.53,  R-squared = 0.9535,  Root MSE = 4.2669
+=#
+fertil3 = dataset("fertil3")
+m116a = stata_regress(fertil3; y = :gfr, x = [:gfr_1])
+```
+
+```{julia}
+#=
+reg pe pe_1
+
+------------------------------------------------------------------------------
+          pe | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        pe_1 |   .9478853   .0316692    29.93   0.000     .8847069    1.011064
+       _cons |   6.426196   3.808601     1.69   0.096    -1.171754    14.02415
+------------------------------------------------------------------------------
+Number of obs = 71,  F(1,69) = 895.85,  R-squared = 0.9285,  Root MSE = 17.571
+=#
+m116b = stata_regress(fertil3; y = :pe, x = [:pe_1])
+```
+
+Both `gfr` and `pe` look close to unit-root series (AR(1) coefficients near 1),
+which motivates differencing:
+
+```{julia}
+#=
+reg cgfr cpe
+
+------------------------------------------------------------------------------
+        cgfr | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+         cpe |  -.0426776   .0283672    -1.50   0.137    -.0992686    .0139134
+       _cons |  -.7847796   .5020398    -1.56   0.123    -1.786322    .2167625
+------------------------------------------------------------------------------
+Number of obs = 71,  F(1,69) = 2.26,  R-squared = 0.0318,  Root MSE = 4.2208
+=#
+m116c = stata_regress(fertil3; y = :cgfr, x = [:cpe])
+```
+
+```{julia}
+#=
+reg cgfr cpe cpe_1 cpe_2
+
+------------------------------------------------------------------------------
+        cgfr | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+         cpe |  -.0362021   .0267737    -1.35   0.181     -.089673    .0172687
+       cpe_1 |  -.0139706   .0275539    -0.51   0.614    -.0689997    .0410584
+       cpe_2 |   .1099896   .0268797     4.09   0.000     .0563071    .1636721
+       _cons |  -.9636787   .4677599    -2.06   0.043     -1.89786   -.0294976
+------------------------------------------------------------------------------
+Number of obs = 69,  F(3,65) = 6.56,  R-squared = 0.2325,  Root MSE = 3.8595
+=#
+m116d = stata_regress(fertil3; y = :cgfr, x = [:cpe, :cpe_1, :cpe_2])
+```
+
+**Exact match** across all four regressions.
+
+## Example 11.7: Wages and Productivity
+
+```{julia}
+#=
+use "data/earns.dta", clear
+reg lhrwage loutphr t
+
+------------------------------------------------------------------------------
+     lhrwage | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+     loutphr |   1.639639   .0933471    17.56   0.000     1.450668    1.828611
+           t |    -.01823   .0017482   -10.43   0.000     -.021769   -.0146909
+       _cons |  -5.328454   .3744492   -14.23   0.000    -6.086487   -4.570421
+------------------------------------------------------------------------------
+Number of obs = 41,  F(2,38) = 641.22,  R-squared = 0.9712,  Root MSE = .02854
+=#
+earns = dataset("earns")
+m117a = stata_regress(earns; y = :lhrwage, x = [:loutphr, :t])
+```
+
+The spurious-looking levels regression (with a trend) versus the growth-rate
+regression:
+
+```{julia}
+#=
+reg ghrwage goutphr
+
+------------------------------------------------------------------------------
+     ghrwage | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+     goutphr |    .809316   .1734537     4.67   0.000     .4581773    1.160455
+       _cons |  -.0036621     .00422    -0.87   0.391    -.0122051    .0048808
+------------------------------------------------------------------------------
+Number of obs = 40,  F(1,38) = 21.77,  R-squared = 0.3642,  Root MSE = .01695
+=#
+m117b = stata_regress(earns; y = :ghrwage, x = [:goutphr])
+```
+
+**Exact match** (N = 41 and 40). The elasticity falls from 1.64 in the trending
+levels regression to 0.81 in growth rates.
+
+## Example 11.8: Fertility Equation with a Lagged Dependent Variable
+
+```{julia}
+#=
+use "data/fertil3.dta", clear
+reg cgfr cpe cpe_1 cpe_2 cgfr_1
+
+------------------------------------------------------------------------------
+        cgfr | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+         cpe |  -.0454721   .0256417    -1.77   0.081    -.0966972     .005753
+       cpe_1 |    .002064   .0267776     0.08   0.939    -.0514303    .0555584
+       cpe_2 |   .1051346   .0255904     4.11   0.000      .054012    .1562572
+      cgfr_1 |   .3002422   .1059034     2.84   0.006     .0886758    .5118086
+       _cons |  -.7021594   .4537988    -1.55   0.127    -1.608727    .2044079
+------------------------------------------------------------------------------
+Number of obs = 69,  F(4,64) = 7.46,  R-squared = 0.3181,  Root MSE = 3.6661
+=#
+m118 = stata_regress(fertil3; y = :cgfr, x = [:cpe, :cpe_1, :cpe_2, :cgfr_1])
+```
+
+**Exact match** (N = 69).
+
+# Verification summary — Chapter 11
+
+| Example | Kind | Stata | Julia | Match |
+|---|---|---|---|---|
+| 11.4 `summ return` | summary | mean .1957843, N=690 | same | yes |
+| 11.4 `reg return return_1` | OLS | return_1 .0588984, N=689 | same | yes |
+| 11.5 `reg cinf unem` | OLS | unem −.5176487, N=55 | unem ≈ −.712, N=48 | **No — data vintage** |
+| 11.5 natural rate | scalar | 5.4635544 | differs (data vintage) | **No — data vintage** |
+| 11.6 `reg gfr gfr_1` | OLS | gfr_1 .9777202 | same | yes |
+| 11.6 `reg pe pe_1` | OLS | pe_1 .9478853 | same | yes |
+| 11.6 `reg cgfr cpe` | OLS | cpe −.0426776 | same | yes |
+| 11.6 `reg cgfr cpe cpe_1 cpe_2` | OLS | cpe_2 .1099896 | same | yes |
+| 11.7 `reg lhrwage loutphr t` | OLS | loutphr 1.639639 | same | yes |
+| 11.7 `reg ghrwage goutphr` | OLS | goutphr .809316 | same | yes |
+| 11.8 `reg cgfr … cgfr_1` | OLS | cgfr_1 .3002422 | same | yes |
+
+Every example is **plain OLS** reproduced exactly, **except Example 11.5**, which
+uses `phillips.dta` and is therefore affected by the same data-vintage mismatch
+as Example 10.1 (bundled 49 obs / 1948–1996 vs. published 56 obs / 1948–2003).
+Examples 11.1–11.3 have no data in the source.

@@ -1,0 +1,406 @@
+---
+title: "Wooldridge Introductory Econometrics -- Ch. 2: The simple regression model (via StatEcon)"
+Authors:
+- Jeffrey M. Wooldridge
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    code-fold: true
+    code-tools: true
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+**Source.** Stata examples reproduced from Wooldridge, *Introductory Econometrics: A Modern Approach* (Cengage). Data are the book's companion files.
+
+# Julia setup
+
+```{julia}
+using StatEcon
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+
+const OUT = "output"
+isdir(OUT) || mkpath(OUT)
+outpath(f) = joinpath(OUT, f)
+```
+
+Helper: look up an estimated coefficient by name, the Julia analogue of Stata's
+`_b[varname]` (the intercept is `"(Intercept)"`).
+
+```{julia}
+bcoef(m, nm) = FixedEffectModels.coef(m)[findfirst(==(nm), FixedEffectModels.coefnames(m))]
+```
+
+# 2 The Simple Regression Model
+
+## Example 2.3: CEO Salary and Return on Equity
+
+```{julia}
+#=
+use "data/ceosal1.dta", clear
+summ salary roe
+
+    Variable |        Obs        Mean    Std. dev.       Min        Max
+-------------+---------------------------------------------------------
+      salary |        209     1281.12    1372.345        223      14822
+         roe |        209    17.18421    8.518509         .5       56.3
+=#
+ceosal1 = DataFrames.DataFrame(dataset("ceosal1"))
+stata_summarize(ceosal1, [:salary, :roe])
+```
+
+```{julia}
+#=
+reg salary roe
+
+      Source |       SS           df       MS      Number of obs   =       209
+-------------+----------------------------------   F(1, 207)       =      2.77
+       Model |  5166419.04         1  5166419.04   Prob > F        =    0.0978
+    Residual |   386566563       207  1867471.32   R-squared       =    0.0132
+-------------+----------------------------------   Adj R-squared   =    0.0084
+       Total |   391732982       208  1883331.64   Root MSE        =    1366.6
+
+------------------------------------------------------------------------------
+      salary | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+         roe |   18.50119   11.12325     1.66   0.098    -3.428196    40.43057
+       _cons |   963.1913   213.2403     4.52   0.000     542.7902    1383.592
+------------------------------------------------------------------------------
+=#
+m23 = stata_regress(ceosal1; y = :salary, x = [:roe])
+```
+
+```{julia}
+#=
+Salary for ROE = 0
+display _b[roe]*0+_b[_cons]
+963.19134
+
+Salary for ROE = 30
+display _b[roe]*30+_b[_cons]
+1518.2269
+=#
+Printf.@printf("ROE = 0 : %.5f\n", bcoef(m23, "roe") * 0 + bcoef(m23, "(Intercept)"))
+Printf.@printf("ROE = 30: %.4f\n", bcoef(m23, "roe") * 30 + bcoef(m23, "(Intercept)"))
+```
+
+The regression matches the published table exactly: `roe = 18.50119 (11.12325)`,
+`_cons = 963.1913 (213.2403)`, `R² = 0.0132`, `Root MSE = 1366.6`. The predicted
+salaries at ROE 0 and 30 are `963.19134` and `1518.2269`, as in Stata.
+
+## Example 2.4: Wage and Education
+
+```{julia}
+#=
+use "data/wage1.dta", clear
+summ wage
+
+    Variable |        Obs        Mean    Std. dev.       Min        Max
+-------------+---------------------------------------------------------
+        wage |        526    5.896103    3.693086        .53      24.98
+=#
+wage1 = DataFrames.DataFrame(dataset("wage1"))
+stata_summarize(wage1, [:wage])
+```
+
+```{julia}
+#=
+reg wage educ
+
+      Source |       SS           df       MS      Number of obs   =       526
+-------------+----------------------------------   F(1, 524)       =    103.36
+       Model |  1179.73204         1  1179.73204   Prob > F        =    0.0000
+    Residual |  5980.68225       524  11.4135158   R-squared       =    0.1648
+-------------+----------------------------------   Adj R-squared   =    0.1632
+       Total |  7160.41429       525  13.6388844   Root MSE        =    3.3784
+
+------------------------------------------------------------------------------
+        wage | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        educ |   .5413593    .053248    10.17   0.000     .4367534    .6459651
+       _cons |  -.9048516   .6849678    -1.32   0.187    -2.250472    .4407687
+------------------------------------------------------------------------------
+=#
+m24 = stata_regress(wage1; y = :wage, x = [:educ])
+```
+
+```{julia}
+#=
+Wage for educ = 0
+display _b[educ]*0+_b[_cons]
+-.90485161
+
+Wage for educ = 8
+display _b[educ]*8+_b[_cons]
+3.4260224
+
+Return to 4 years education
+display _b[educ]*4
+2.165437
+=#
+Printf.@printf("educ = 0 : %.8f\n", bcoef(m24, "educ") * 0 + bcoef(m24, "(Intercept)"))
+Printf.@printf("educ = 8 : %.7f\n", bcoef(m24, "educ") * 8 + bcoef(m24, "(Intercept)"))
+Printf.@printf("4 years  : %.6f\n", bcoef(m24, "educ") * 4)
+```
+
+`educ = .5413593 (.053248)`, `_cons = -.9048516`, `R² = 0.1648` — identical to
+Stata. The predicted wages and the return to four years of schooling
+(`2.165437`) reproduce the published numbers.
+
+## Example 2.5: Voting Outcomes and Campaign Expenditures
+
+```{julia}
+#=
+use "data/vote1.dta", clear
+reg voteA shareA
+
+      Source |       SS           df       MS      Number of obs   =       173
+-------------+----------------------------------   F(1, 171)       =   1017.66
+       Model |  41486.2307         1  41486.2307   Prob > F        =    0.0000
+    Residual |  6971.01783       171  40.7661862   R-squared       =    0.8561
+-------------+----------------------------------   Adj R-squared   =    0.8553
+       Total |  48457.2486       172  281.728189   Root MSE        =    6.3848
+
+------------------------------------------------------------------------------
+       voteA | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+      shareA |   .4638269   .0145397    31.90   0.000     .4351266    .4925272
+       _cons |   26.81221   .8872146    30.22   0.000     25.06091    28.56352
+------------------------------------------------------------------------------
+=#
+vote1 = DataFrames.DataFrame(dataset("vote1"))
+m25 = stata_regress(vote1; y = :voteA, x = [:shareA])
+```
+
+`R² = 0.8561` and `F(1, 171) = 1017.66` match Stata exactly. The slope agrees to
+about five significant figures: Julia `shareA = .4638239 (.0145393)`,
+`_cons = 26.8125` vs Stata `.4638269 (.0145397)`, `26.81221`. `vote1.dta` is
+stored in single precision (all columns are `Float32`), and the residual
+difference is consistent with that versus the double-precision published run.
+
+## Example 2.6: CEO Salary and Return on Equity
+
+```{julia}
+#=
+use "data/ceosal1.dta", clear
+summ salary roe   (see Example 2.3)
+reg salary roe    (see Example 2.3)
+=#
+m26 = stata_regress(ceosal1; y = :salary, x = [:roe])
+```
+
+```{julia}
+#=
+Fitted values and residuals for the first 15 CEOs
+predict salhat, xb
+gen uhat=salary-salhat
+list roe salary salhat uhat in 1/15
+
+     +--------------------------------------+
+     |  roe   salary     salhat        uhat |
+     |--------------------------------------|
+  1. | 14.1     1095   1224.058   -129.0581 |
+  2. | 10.9     1001   1164.854   -163.8542 |
+  3. | 23.5     1122   1397.969   -275.9692 |
+  4. |  5.9      578   1072.348   -494.3484 |
+  5. | 13.8     1368   1218.508    149.4923 |
+     |--------------------------------------|
+  6. |   20     1145   1333.215   -188.2151 |
+  7. | 16.4     1078   1266.611   -188.6108 |
+  8. | 16.3     1094   1264.761   -170.7606 |
+  9. | 10.5     1237   1157.454    79.54626 |
+ 10. | 26.3      833   1449.773   -616.7726 |
+     |--------------------------------------|
+ 11. | 25.9      567   1442.372   -875.3721 |
+ 12. | 26.8      933   1459.023   -526.0231 |
+ 13. | 14.8     1339   1237.009    101.9911 |
+ 14. | 22.3      937   1375.768   -438.7678 |
+ 15. | 56.3     2011   2004.808    6.191895 |
+     +--------------------------------------+
+=#
+ceosal1.salhat = FixedEffectModels.predict(m26, ceosal1)
+ceosal1.uhat   = ceosal1.salary .- ceosal1.salhat
+first(ceosal1[:, [:roe, :salary, :salhat, :uhat]], 15)
+```
+
+The fitted values (`salhat`) and residuals (`uhat`) for the first 15 CEOs match
+Stata to the printed digits (e.g. CEO 1: `salhat = 1224.058`, `uhat = -129.0581`).
+
+## Example 2.7: Wage and Education
+
+```{julia}
+#=
+use "data/wage1.dta", clear
+summ wage educ
+
+    Variable |        Obs        Mean    Std. dev.       Min        Max
+-------------+---------------------------------------------------------
+        wage |        526    5.896103    3.693086        .53      24.98
+        educ |        526    12.56274    2.769022          0         18
+=#
+stata_summarize(wage1, [:wage, :educ])
+```
+
+```{julia}
+#=
+reg wage educ   (identical table to Example 2.4)
+
+Wage for educ = 12.56
+display _b[educ]*12.56+_b[_cons]
+5.8946206
+=#
+m27 = stata_regress(wage1; y = :wage, x = [:educ])
+Printf.@printf("educ = 12.56: %.7f\n", bcoef(m27, "educ") * 12.56 + bcoef(m27, "(Intercept)"))
+```
+
+Same regression as Example 2.4. The mean of `educ` is `12.56274` and the
+predicted wage at `educ = 12.56` is `5.8946206`, matching Stata.
+
+## Example 2.8: CEO Salary and Return on Equity
+
+```{julia}
+#=
+use "data/ceosal1.dta", clear
+reg salary roe   (identical table to Example 2.3)
+=#
+m28 = stata_regress(ceosal1; y = :salary, x = [:roe])
+```
+
+The same CEO salary regression as Example 2.3; `R² = 0.0132` illustrates the
+low goodness-of-fit discussed in the text. Exact match.
+
+## Example 2.9: Voting Outcomes and Campaign Expenditures
+
+```{julia}
+#=
+use "data/vote1.dta", clear
+reg voteA shareA   (identical table to Example 2.5)
+=#
+m29 = stata_regress(vote1; y = :voteA, x = [:shareA])
+```
+
+The same voting regression as Example 2.5, here used to illustrate a high
+`R² = 0.8561` (an exact match). As in 2.5, the `shareA` slope agrees with the
+published value to about five significant figures (`.4638239` vs `.4638269`),
+the single-precision storage of `vote1.dta` accounting for the last digits.
+
+## Example 2.10: A Log Wage Equation
+
+```{julia}
+#=
+use "data/wage1.dta", clear
+reg lwage educ
+
+      Source |       SS           df       MS      Number of obs   =       526
+-------------+----------------------------------   F(1, 524)       =    119.58
+       Model |  27.5606288         1  27.5606288   Prob > F        =    0.0000
+    Residual |  120.769123       524  .230475425   R-squared       =    0.1858
+-------------+----------------------------------   Adj R-squared   =    0.1843
+       Total |  148.329751       525   .28253286   Root MSE        =    .48008
+
+------------------------------------------------------------------------------
+       lwage | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        educ |   .0827444   .0075667    10.94   0.000     .0678796    .0976091
+       _cons |   .5837727   .0973358     6.00   0.000     .3925563    .7749891
+------------------------------------------------------------------------------
+=#
+m210 = stata_regress(wage1; y = :lwage, x = [:educ])
+```
+
+`educ = .0827444 (.0075667)` — an estimated return to schooling of about 8.3%
+per year — with `R² = 0.1858`. Exact match.
+
+## Example 2.11: CEO Salary and Firm Sales
+
+```{julia}
+#=
+use "data/ceosal1.dta", clear
+reg lsalary lsales
+
+      Source |       SS           df       MS      Number of obs   =       209
+-------------+----------------------------------   F(1, 207)       =     55.30
+       Model |  14.0661688         1  14.0661688   Prob > F        =    0.0000
+    Residual |  52.6559944       207  .254376785   R-squared       =    0.2108
+-------------+----------------------------------   Adj R-squared   =    0.2070
+       Total |  66.7221632       208  .320779631   Root MSE        =    .50436
+
+------------------------------------------------------------------------------
+     lsalary | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+      lsales |   .2566717   .0345167     7.44   0.000     .1886224    .3247209
+       _cons |   4.821997   .2883396    16.72   0.000     4.253538    5.390455
+------------------------------------------------------------------------------
+=#
+m211 = stata_regress(ceosal1; y = :lsalary, x = [:lsales])
+```
+
+The constant-elasticity model gives `lsales = .2566717 (.0345167)` and
+`R² = 0.2108` — a 1% rise in sales is associated with about 0.257% higher salary.
+Exact match.
+
+## Example 2.12: Student Math Performance and the School Lunch Program
+
+```{julia}
+#=
+use "data/meap93.dta", clear
+reg math10 lnchprg
+
+      Source |       SS           df       MS      Number of obs   =       408
+-------------+----------------------------------   F(1, 406)       =     83.77
+       Model |  7665.26597         1  7665.26597   Prob > F        =    0.0000
+    Residual |  37151.9145       406  91.5071786   R-squared       =    0.1710
+-------------+----------------------------------   Adj R-squared   =    0.1690
+       Total |  44817.1805       407  110.115923   Root MSE        =    9.5659
+
+------------------------------------------------------------------------------
+      math10 | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+     lnchprg |  -.3188643   .0348393    -9.15   0.000    -.3873523   -.2503763
+       _cons |   32.14271   .9975824    32.22   0.000     30.18164    34.10378
+------------------------------------------------------------------------------
+=#
+meap93 = DataFrames.DataFrame(dataset("meap93"))
+m212 = stata_regress(meap93; y = :math10, x = [:lnchprg])
+```
+
+`lnchprg = -.3188643 (.0348393)`, `_cons = 32.14271`, `R² = 0.1710` — an exact
+match to the published output.
+
+# Verification summary
+
+| Example | Quantity | Stata | Julia | Match |
+|---|---|---|---|---|
+| 2.3 | `roe` coef / SE | 18.50119 / 11.12325 | 18.50119 / 11.12325 | yes |
+| 2.3 | `_cons` / R² | 963.1913 / 0.0132 | 963.1913 / 0.0132 | yes |
+| 2.3 | pred @ ROE=30 | 1518.2269 | 1518.2269 | yes |
+| 2.4 | `educ` coef / SE | .5413593 / .053248 | .5413593 / .053248 | yes |
+| 2.4 | return to 4 yrs | 2.165437 | 2.165437 | yes |
+| 2.5 | `shareA` coef / SE | .4638269 / .0145397 | .4638239 / .0145393 | ≈ (5 sf; float storage) |
+| 2.5 | R² / F | 0.8561 / 1017.66 | 0.8561 / 1017.66 | yes |
+| 2.6 | `salhat`/`uhat` CEO 1 | 1224.058 / -129.0581 | 1224.058 / -129.0581 | yes |
+| 2.7 | pred @ educ=12.56 | 5.8946206 | 5.8946206 | yes |
+| 2.8 | `roe` / R² | 18.50119 / 0.0132 | 18.50119 / 0.0132 | yes |
+| 2.9 | `shareA` coef / R² | .4638269 / 0.8561 | .4638239 / 0.8561 | ≈ (5 sf; float storage) |
+| 2.10 | `educ` coef / SE | .0827444 / .0075667 | .0827444 / .0075667 | yes |
+| 2.11 | `lsales` / R² | .2566717 / 0.2108 | .2566717 / 0.2108 | yes |
+| 2.12 | `lnchprg` / R² | -.3188643 / 0.1710 | -.3188643 / 0.1710 | yes |
+
+Every regression, summary and predicted value in Chapter 2 reproduces the
+published Stata output to the printed digits, with one caveat: the `vote1`
+regression (Examples 2.5 and 2.9) agrees only to about five significant figures.
+The bundled companion `.dta` files store all variables in single precision
+(`Float32`), and `shareA`'s slope shows this in its last digits versus the
+double-precision published output. `R²`, `F` and all other quantities still
+match exactly.

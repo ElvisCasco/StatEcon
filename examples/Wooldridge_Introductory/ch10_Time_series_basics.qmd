@@ -1,0 +1,554 @@
+---
+title: "Wooldridge Introductory Econometrics -- Ch. 10: Time series basics (via StatEcon)"
+Authors:
+- Jeffrey M. Wooldridge
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+Stata examples reproduced from Wooldridge, J. M., *Introductory Econometrics: A
+Modern Approach* (Cengage), Chapter 10, *Basic Regression Analysis with Time
+Series Data*.
+
+Every example in this chapter is **ordinary least squares** applied to a time
+series. StatEcon has no dedicated time-series verbs, but none is needed here:
+lags, trends, seasonal dummies and quadratic terms are just columns of the
+`DataFrame`, and `stata_regress` reproduces `reg y x` exactly. Where an example
+uses a Stata scalar display or a residual regression, the same quantity is
+computed directly from the fitted coefficients.
+
+# Julia setup
+
+```{julia}
+using StatEcon
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+
+# Artifacts this notebook produces go to `output/`.
+const OUT = "output"
+isdir(OUT) || mkpath(OUT)
+outpath(f) = joinpath(OUT, f)
+
+# Pull a single coefficient out of a fitted FixedEffectModels model by name.
+bcoef(m, nm) = FixedEffectModels.coef(m)[findfirst(==(nm), FixedEffectModels.coefnames(m))]
+```
+
+## Example 10.1: Static Phillips Curve
+
+```{julia}
+#=
+use "data/phillips.dta", clear
+reg inf unem
+
+------------------------------------------------------------------------------
+         inf | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        unem |   .5023782   .2655624     1.89   0.064    -.0300424    1.034799
+       _cons |   1.053566   1.547957     0.68   0.499    -2.049901    4.157033
+------------------------------------------------------------------------------
+Number of obs = 56,  F(1,54) = 3.58,  R-squared = 0.0622,  Root MSE = 2.9715
+=#
+phillips = dataset("phillips")
+println("phillips: ", nrow(phillips), " obs, years ",
+        minimum(phillips.year), "-", maximum(phillips.year))
+m101 = stata_regress(phillips; y = :inf, x = [:unem])
+```
+
+**Data-vintage note.** The bundled `phillips.dta` is the *earlier* edition of the
+file (49 annual observations, 1948–1996); the published Stata output above is
+from a *later* edition (56 observations, 1948–2003). The OLS code is exactly
+`reg inf unem` and is correct, but it runs on different data, so the numbers do
+**not** match the published output (Julia: `unem` = .4676257, N = 49; Stata:
+.5023782, N = 56). This affects every Phillips-curve example (10.1, and 11.5 /
+12.1 / 12.5 in later chapters). No numbers were altered to force agreement.
+
+## Example 10.2: Effects of Inflation and Deficits on Interest Rates
+
+```{julia}
+#=
+use "data/intdef.dta", clear
+reg i3 inf def
+
+------------------------------------------------------------------------------
+          i3 | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+         inf |   .6058659   .0821348     7.38   0.000     .4411243    .7706074
+         def |   .5130579   .1183841     4.33   0.000     .2756095    .7505062
+       _cons |   1.733266    .431967     4.01   0.000     .8668497    2.599682
+------------------------------------------------------------------------------
+Number of obs = 56,  F(2,53) = 40.09,  R-squared = 0.6021,  Root MSE = 1.8432
+=#
+intdef = dataset("intdef")
+m102 = stata_regress(intdef; y = :i3, x = [:inf, :def])
+```
+
+**Exact match** with Stata (N = 56, all coefficients and SEs to the printed
+digits).
+
+## Example 10.3: Puerto Rican Employment and the Minimum Wage
+
+```{julia}
+#=
+use "data/prminwge.dta", clear
+reg lprepop lmincov lusgnp
+
+------------------------------------------------------------------------------
+     lprepop | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+     lmincov |  -.1544442   .0649015    -2.38   0.023    -.2862011   -.0226872
+      lusgnp |  -.0121888   .0885134    -0.14   0.891    -.1918806     .167503
+       _cons |  -1.054423   .7654065    -1.38   0.177     -2.60828    .4994351
+------------------------------------------------------------------------------
+Number of obs = 38,  F(2,35) = 34.04,  R-squared = 0.6605,  Root MSE = .0557
+=#
+prminwge = dataset("prminwge")
+m103 = stata_regress(prminwge; y = :lprepop, x = [:lmincov, :lusgnp])
+```
+
+**Exact match** with Stata (N = 38).
+
+## Example 10.4: Effects of Personal Exemption on Fertility Rates
+
+```{julia}
+#=
+use "data/fertil3.dta", clear
+summ pe
+
+    Variable |        Obs        Mean    Std. dev.       Min        Max
+          pe |         72    100.4015    65.87563          0     243.83
+=#
+fertil3 = dataset("fertil3")
+stata_summarize(fertil3, [:pe])
+```
+
+```{julia}
+#=
+reg gfr pe ww2 pill
+
+------------------------------------------------------------------------------
+         gfr | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+          pe |     .08254   .0296462     2.78   0.007     .0233819    .1416981
+         ww2 |   -24.2384   7.458253    -3.25   0.002    -39.12111   -9.355684
+        pill |  -31.59403   4.081068    -7.74   0.000    -39.73768   -23.45039
+       _cons |   98.68176   3.208129    30.76   0.000     92.28003    105.0835
+------------------------------------------------------------------------------
+Number of obs = 72,  F(3,68) = 20.38,  R-squared = 0.4734,  Root MSE = 14.685
+=#
+m104a = stata_regress(fertil3; y = :gfr, x = [:pe, :ww2, :pill])
+```
+
+```{julia}
+#=
+reg gfr pe ww2 pill pe_1 pe_2
+
+------------------------------------------------------------------------------
+         gfr | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+          pe |   .0726718   .1255331     0.58   0.565    -.1781094     .323453
+         ww2 |   -22.1265   10.73197    -2.06   0.043    -43.56608   -.6869196
+        pill |  -31.30499   3.981559    -7.86   0.000    -39.25907   -23.35091
+        pe_1 |  -.0057796   .1556629    -0.04   0.970     -.316752    .3051929
+        pe_2 |   .0338268   .1262574     0.27   0.790    -.2184013     .286055
+       _cons |    95.8705   3.281957    29.21   0.000     89.31403     102.427
+------------------------------------------------------------------------------
+Number of obs = 70,  F(5,64) = 12.73,  R-squared = 0.4986,  Root MSE = 14.27
+=#
+m104b = stata_regress(fertil3; y = :gfr, x = [:pe, :ww2, :pill, :pe_1, :pe_2])
+```
+
+`pe_1` and `pe_2` (the two lags of `pe`) are already stored in the dataset, so
+Stata drops the first two years and estimates on N = 70.
+
+```{julia}
+#=
+test pe_1 pe_2
+       F(  2,    64) =    0.05
+            Prob > F =    0.9480
+=#
+stata_test(m104b, ["pe_1", "pe_2"])
+```
+
+Estimated long-run propensity (LRP):
+
+```{julia}
+#=
+display _b[pe]+_b[pe_1]+_b[pe_2]
+.10071909
+=#
+lrp = bcoef(m104b, "pe") + bcoef(m104b, "pe_1") + bcoef(m104b, "pe_2")
+@printf("LRP = %.8f\n", lrp)
+```
+
+Reparameterised regression that puts the LRP and its standard error directly on
+the `pe` coefficient (`dif1 = pe_1 - pe`, `dif2 = pe_2 - pe`):
+
+```{julia}
+#=
+gen dif1=pe_1-pe
+gen dif2=pe_2-pe
+reg gfr pe dif1 dif2 ww2 pill
+
+------------------------------------------------------------------------------
+         gfr | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+          pe |   .1007191   .0298027     3.38   0.001     .0411814    .1602568
+        dif1 |  -.0057796   .1556629    -0.04   0.970     -.316752    .3051929
+        dif2 |   .0338268   .1262574     0.27   0.790    -.2184013     .286055
+         ww2 |   -22.1265   10.73197    -2.06   0.043    -43.56608   -.6869196
+        pill |  -31.30499   3.981559    -7.86   0.000    -39.25907   -23.35091
+       _cons |    95.8705   3.281957    29.21   0.000     89.31403     102.427
+------------------------------------------------------------------------------
+Number of obs = 70,  F(5,64) = 12.73,  R-squared = 0.4986,  Root MSE = 14.27
+=#
+df104 = copy(fertil3)
+df104.dif1 = df104.pe_1 .- df104.pe
+df104.dif2 = df104.pe_2 .- df104.pe
+m104c = stata_regress(df104; y = :gfr, x = [:pe, :dif1, :dif2, :ww2, :pill])
+```
+
+**Exact match** across all four fits. The `pe` coefficient in the last
+regression (.1007191, SE .0298027) is the LRP with its standard error.
+
+## Example 10.5: Antidumping Filings and Chemical Imports
+
+```{julia}
+#=
+use "data/barium.dta", clear
+reg lchnimp lchempi lgas lrtwex befile6 affile6 afdec6
+
+------------------------------------------------------------------------------
+     lchnimp | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+     lchempi |   3.117193   .4792021     6.50   0.000     2.168718    4.065668
+        lgas |   .1963504   .9066172     0.22   0.829    -1.598099      1.9908
+      lrtwex |   .9830183   .4001537     2.46   0.015     .1910022    1.775034
+     befile6 |   .0595739   .2609699     0.23   0.820    -.4569585    .5761064
+     affile6 |  -.0324064   .2642973    -0.12   0.903    -.5555249     .490712
+      afdec6 |   -.565245   .2858352    -1.98   0.050    -1.130993    .0005028
+       _cons |    -17.803   21.04537    -0.85   0.399    -59.45769    23.85169
+------------------------------------------------------------------------------
+Number of obs = 131,  F(6,124) = 9.06,  R-squared = 0.3049,  Root MSE = .59735
+=#
+barium = dataset("barium")
+m105 = stata_regress(barium; y = :lchnimp,
+                     x = [:lchempi, :lgas, :lrtwex, :befile6, :affile6, :afdec6])
+```
+
+Change in Chinese barium exports implied by `afdec6`:
+
+```{julia}
+#=
+display 100*(exp(_b[afdec6])-1)
+-43.177908
+=#
+@printf("100*(exp(b_afdec6)-1) = %.6f\n", 100 * (exp(bcoef(m105, "afdec6")) - 1))
+```
+
+**Exact match** (N = 131).
+
+## Example 10.6: Election Outcomes and Economic Performance
+
+```{julia}
+#=
+use "data/fair.dta", clear
+reg demvote partyWH incum pWHgnews pWHinf if year<1996
+
+------------------------------------------------------------------------------
+     demvote | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+     partyWH |  -.0434752    .040459    -1.07   0.300    -.1297114    .0427611
+       incum |   .0543902   .0234166     2.32   0.035      .004479    .1043015
+    pWHgnews |   .0108466   .0041267     2.63   0.019     .0020508    .0196424
+      pWHinf |  -.0077017   .0032567    -2.36   0.032    -.0146432   -.0007602
+       _cons |    .481062   .0122631    39.23   0.000     .4549238    .5072002
+------------------------------------------------------------------------------
+Number of obs = 20,  F(4,15) = 7.37,  R-squared = 0.6629,  Root MSE = .04957
+=#
+fair = dataset("fair")
+fair96 = filter(:year => <(1996), fair)
+m106 = stata_regress(fair96; y = :demvote, x = [:partyWH, :incum, :pWHgnews, :pWHinf])
+```
+
+Predicted Democratic vote share at `partyWH = incum = 1`, `pWHgnews = 3`,
+`pWHinf = 3.019`:
+
+```{julia}
+#=
+display _b[_cons]+_b[partyWH]+_b[incum]+_b[pWHgnews]*3+_b[pWHinf]*3.019
+.5012655
+=#
+pred = bcoef(m106, "(Intercept)") + bcoef(m106, "partyWH") + bcoef(m106, "incum") +
+       bcoef(m106, "pWHgnews") * 3 + bcoef(m106, "pWHinf") * 3.019
+@printf("predicted demvote = %.7f\n", pred)
+```
+
+**Exact match** (N = 20; the `if year<1996` filter is reproduced by `filter`).
+
+## Example 10.7: Housing Investment and Prices
+
+```{julia}
+#=
+use "data/hseinv.dta", clear
+reg linvpc lprice
+
+------------------------------------------------------------------------------
+      linvpc | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+      lprice |   1.240943   .3824192     3.24   0.002     .4680452    2.013841
+       _cons |  -.5502345   .0430266   -12.79   0.000    -.6371945   -.4632746
+------------------------------------------------------------------------------
+Number of obs = 42,  F(1,40) = 10.53,  R-squared = 0.2084,  Root MSE = .15542
+=#
+hseinv = dataset("hseinv")
+m107a = stata_regress(hseinv; y = :linvpc, x = [:lprice])
+```
+
+Adding a linear time trend `t` (already in the dataset):
+
+```{julia}
+#=
+reg linvpc lprice t
+
+------------------------------------------------------------------------------
+      linvpc | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+      lprice |  -.3809612   .6788352    -0.56   0.578    -1.754035    .9921125
+           t |   .0098287   .0035122     2.80   0.008     .0027246    .0169328
+       _cons |  -.9130595   .1356133    -6.73   0.000    -1.187363   -.6387557
+------------------------------------------------------------------------------
+Number of obs = 42,  F(2,39) = 10.08,  R-squared = 0.3408,  Root MSE = .14364
+=#
+m107b = stata_regress(hseinv; y = :linvpc, x = [:lprice, :t])
+```
+
+**Exact match.** Controlling for the trend, the price effect vanishes.
+
+## Example 10.8: Fertility Equation with a Trend
+
+```{julia}
+#=
+use "data/fertil3.dta", clear
+reg gfr pe ww2 pill t
+
+------------------------------------------------------------------------------
+         gfr | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+          pe |   .2788778   .0400199     6.97   0.000     .1989978    .3587578
+         ww2 |  -35.59228   6.297377    -5.65   0.000     -48.1619   -23.02266
+        pill |   .9974479    6.26163     0.16   0.874    -11.50082    13.49571
+           t |  -1.149872   .1879038    -6.12   0.000    -1.524929   -.7748145
+       _cons |   111.7694   3.357765    33.29   0.000     105.0673    118.4716
+------------------------------------------------------------------------------
+Number of obs = 72,  F(4,67) = 32.84,  R-squared = 0.6622,  Root MSE = 11.849
+=#
+m108a = stata_regress(fertil3; y = :gfr, x = [:pe, :ww2, :pill, :t])
+```
+
+```{julia}
+#=
+reg gfr pe ww2 pill t tsq
+
+------------------------------------------------------------------------------
+         gfr | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+          pe |   .3478126   .0402599     8.64   0.000     .2674311     .428194
+         ww2 |  -35.88028   5.707921    -6.29   0.000    -47.27651   -24.48404
+        pill |  -10.11972   6.336094    -1.60   0.115    -22.77014    2.530696
+           t |  -2.531426   .3893863    -6.50   0.000    -3.308861   -1.753991
+         tsq |   .0196126    .004971     3.95   0.000     .0096876    .0295377
+       _cons |   124.0919   4.360738    28.46   0.000     115.3854    132.7984
+------------------------------------------------------------------------------
+Number of obs = 72,  F(5,66) = 35.09,  R-squared = 0.7267,  Root MSE = 10.739
+=#
+m108b = stata_regress(fertil3; y = :gfr, x = [:pe, :ww2, :pill, :t, :tsq])
+```
+
+**Exact match** (N = 72; `tsq` is the squared trend, already stored).
+
+## Example 10.9: Puerto Rican Employment with a Trend
+
+```{julia}
+#=
+use "data/prminwge.dta", clear
+reg lprepop lmincov lusgnp t
+
+------------------------------------------------------------------------------
+     lprepop | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+     lmincov |  -.1686949   .0442463    -3.81   0.001    -.2586142   -.0787757
+      lusgnp |   1.057351   .1766369     5.99   0.000     .6983813     1.41632
+           t |  -.0323542   .0050227    -6.44   0.000    -.0425616   -.0221468
+       _cons |  -8.696298   1.295764    -6.71   0.000    -11.32961   -6.062988
+------------------------------------------------------------------------------
+Number of obs = 38,  F(3,34) = 62.78,  R-squared = 0.8471,  Root MSE = .03793
+=#
+m109a = stata_regress(prminwge; y = :lprepop, x = [:lmincov, :lusgnp, :t])
+```
+
+The no-trend regression from Example 10.3, for comparison:
+
+```{julia}
+#=
+reg lprepop lmincov lusgnp   (identical to Example 10.3: N = 38, R-squared = 0.6605)
+=#
+m109b = stata_regress(prminwge; y = :lprepop, x = [:lmincov, :lusgnp])
+```
+
+**Exact match.** Adding the trend flips the `lusgnp` coefficient from small and
+insignificant to large and significant.
+
+## Example 10.10: Housing Investment — Detrending
+
+```{julia}
+#=
+use "data/hseinv.dta", clear
+reg linvpc t
+
+------------------------------------------------------------------------------
+      linvpc | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+           t |   .0081459   .0018129     4.49   0.000     .0044819    .0118098
+       _cons |  -.8412918    .044744   -18.80   0.000    -.9317228   -.7508608
+------------------------------------------------------------------------------
+Number of obs = 42,  F(1,40) = 20.19,  R-squared = 0.3354,  Root MSE = .14241
+=#
+m1010a = stata_regress(hseinv; y = :linvpc, x = [:t])
+```
+
+Detrend `linvpc` (take the residuals `linvpch` from the regression on `t`),
+then regress the detrended series on `lprice` and `t`. This reproduces the
+partialling-out logic: the `lprice` slope and its SE match the full regression,
+while the trend coefficient shrinks to the part of `t` orthogonal to the
+detrended response.
+
+```{julia}
+#=
+predict linvpch, res
+reg linvpch lprice t
+
+------------------------------------------------------------------------------
+     linvpch | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+      lprice |  -.3809612   .6788352    -0.56   0.578    -1.754035    .9921126
+           t |   .0016828   .0035122     0.48   0.635    -.0054213    .0087869
+       _cons |  -.0717677   .1356133    -0.53   0.600    -.3460716    .2025361
+------------------------------------------------------------------------------
+Number of obs = 42,  F(2,39) = 0.16,  R-squared = 0.0080,  Root MSE = .14364
+=#
+df1010 = copy(hseinv)
+df1010.linvpch = StatsBase.residuals(m1010a, df1010)   # residuals from reg linvpc t
+m1010b = stata_regress(df1010; y = :linvpch, x = [:lprice, :t])
+```
+
+```{julia}
+#=
+reg linvpc lprice t   (Example 10.7 again: lprice = -.3809612, SE .6788352)
+=#
+m1010c = stata_regress(hseinv; y = :linvpc, x = [:lprice, :t])
+```
+
+**Exact match.** The `lprice` coefficient (−.3809612) and SE (.6788352) are
+identical in the detrended regression and the full regression, illustrating the
+Frisch–Waugh–Lovell result.
+
+## Example 10.11: Antidumping Filings with Seasonal Dummies
+
+```{julia}
+#=
+use "data/barium.dta", clear
+reg lchnimp lchempi lgas lrtwex befile6 affile6 afdec6 feb mar apr may jun jul aug sep oct nov dec
+
+------------------------------------------------------------------------------
+     lchnimp | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+     lchempi |    3.26506   .4929302     6.62   0.000     2.288476    4.241644
+        lgas |  -1.278121   1.389008    -0.92   0.359    -4.029997    1.473755
+      lrtwex |   .6630496   .4713038     1.41   0.162    -.2706882    1.596787
+     befile6 |   .1397024   .2668075     0.52   0.602    -.3888914    .6682962
+     affile6 |   .0126317   .2786866     0.05   0.964    -.5394967    .5647601
+      afdec6 |  -.5213006     .30195    -1.73   0.087    -1.119518    .0769168
+         feb |  -.4177089   .3044445    -1.37   0.173    -1.020868    .1854505
+         mar |   .0590528   .2647308     0.22   0.824    -.4654266    .5835322
+         apr |  -.4514825   .2683865    -1.68   0.095    -.9832046    .0802396
+         may |   .0333085   .2692425     0.12   0.902    -.5001093    .5667264
+         jun |  -.2063321   .2692515    -0.77   0.445    -.7397679    .3271038
+         jul |   .0038354   .2787665     0.01   0.989    -.5484513    .5561222
+         aug |  -.1570652   .2779928    -0.56   0.573    -.7078191    .3936887
+         sep |  -.1341606   .2676556    -0.50   0.617    -.6644348    .3961135
+         oct |   .0516921   .2668512     0.19   0.847    -.4769883    .5803725
+         nov |    -.24626   .2628272    -0.94   0.351     -.766968     .274448
+         dec |   .1328368   .2714234     0.49   0.626    -.4049019    .6705755
+       _cons |   16.77877   32.42865     0.52   0.606    -47.46824    81.02577
+------------------------------------------------------------------------------
+Number of obs = 131,  F(17,113) = 3.71,  R-squared = 0.3583,  Root MSE = .60121
+=#
+m1011 = stata_regress(barium; y = :lchnimp,
+    x = [:lchempi, :lgas, :lrtwex, :befile6, :affile6, :afdec6,
+         :feb, :mar, :apr, :may, :jun, :jul, :aug, :sep, :oct, :nov, :dec])
+```
+
+```{julia}
+#=
+test feb mar apr may jun jul aug sep oct nov dec
+       F( 11,   113) =    0.86
+            Prob > F =    0.5852
+=#
+stata_test(m1011, ["feb", "mar", "apr", "may", "jun", "jul", "aug", "sep",
+                   "oct", "nov", "dec"])
+```
+
+**Exact match.** The joint test of the eleven monthly dummies (F = 0.86,
+p = 0.5852) shows no evidence of seasonality once the other regressors are
+included.
+
+# Verification summary — Chapter 10
+
+| Example | Kind | Stata | Julia | Match |
+|---|---|---|---|---|
+| 10.1 `reg inf unem` | OLS | unem .5023782, N=56 | unem .4676257, N=49 | **No — data vintage** |
+| 10.2 `reg i3 inf def` | OLS | inf .6058659, N=56 | same | yes |
+| 10.3 `reg lprepop lmincov lusgnp` | OLS | lmincov −.1544442 | same | yes |
+| 10.4 `reg gfr pe ww2 pill` | OLS | pe .08254 | same | yes |
+| 10.4 `reg gfr … pe_1 pe_2` | OLS | R²=0.4986, N=70 | same | yes |
+| 10.4 `test pe_1 pe_2` | F-test | F=0.05, p=0.9480 | same | yes |
+| 10.4 LRP | scalar | .10071909 | .10071909 | yes |
+| 10.4 reparam `pe` (=LRP) | OLS | .1007191 (.0298027) | same | yes |
+| 10.5 `reg lchnimp …` | OLS | afdec6 −.565245 | same | yes |
+| 10.5 %Δ barium | scalar | −43.177908 | −43.177908 | yes |
+| 10.6 `reg demvote … if year<1996` | OLS | incum .0543902, N=20 | same | yes |
+| 10.6 predicted demvote | scalar | .5012655 | .5012655 | yes |
+| 10.7 `reg linvpc lprice` | OLS | lprice 1.240943 | same | yes |
+| 10.7 `reg linvpc lprice t` | OLS | t .0098287 | same | yes |
+| 10.8 `reg gfr pe ww2 pill t` | OLS | pe .2788778 | same | yes |
+| 10.8 `+ tsq` | OLS | tsq .0196126 | same | yes |
+| 10.9 `reg lprepop … t` | OLS | lusgnp 1.057351 | same | yes |
+| 10.10 `reg linvpc t` | OLS | t .0081459 | same | yes |
+| 10.10 detrended `reg linvpch lprice t` | OLS | lprice −.3809612 | same | yes |
+| 10.11 `reg lchnimp … + months` | OLS | lchempi 3.26506, N=131 | same | yes |
+| 10.11 `test` months | F-test | F=0.86, p=0.5852 | same | yes |
+
+All examples are **plain OLS** (`stata_regress`) plus a few scalar displays and one
+residual/detrending step, all reproduced exactly — **except Example 10.1**, where
+the bundled `phillips.dta` is an earlier vintage (49 obs, 1948–1996) than the one
+behind the published output (56 obs, 1948–2003). The discrepancy is a data
+difference, not an estimation difference.

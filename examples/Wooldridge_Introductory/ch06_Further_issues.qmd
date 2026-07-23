@@ -1,0 +1,480 @@
+---
+title: "Wooldridge Introductory Econometrics -- Ch. 6: Multiple regression: further issues (via StatEcon)"
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    code-fold: true
+    code-tools: true
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+**Source.** Stata examples reproduced from Wooldridge, *Introductory Econometrics: A Modern Approach* (Cengage). Data are the book's companion files.
+
+# Julia setup
+
+```{julia}
+using StatEcon
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+
+const OUT = "output"
+isdir(OUT) || mkpath(OUT)
+outpath(f) = joinpath(OUT, f)
+```
+
+A few small helpers reproduce Stata's post-estimation tools from the model that
+`stata_regress` returns. `bget` pulls a coefficient by name; `stdbeta` reports
+Stata's standardized (`, beta`) coefficients; `predict_ci` reproduces
+`predict, stdp`/`stdf` for a hypothetical observation `x0` (in coefficient
+order, intercept first).
+
+```{julia}
+cn(m)      = string.(StatsBase.coefnames(m))
+bvec(m)    = StatsBase.coef(m)
+Vmat(m)    = StatsBase.vcov(m)
+bget(m, s) = bvec(m)[findfirst(==(s), cn(m))]
+
+# Stata's `, beta`: b_j * sd(x_j)/sd(y) over the estimation sample.
+function stdbeta(df, y, xs)
+    sy = Statistics.std(df[!, y])
+    m  = stata_regress(df; y = y, x = xs)
+    for x in xs
+        b = bget(m, string(x))
+        Printf.@printf("  %-10s beta = % .7g\n", x, b * Statistics.std(df[!, x]) / sy)
+    end
+    return m
+end
+
+# Point prediction and its SE for a new x0 (coefficient order, intercept first).
+# forecast=true adds sigma^2 (Stata's stdf); otherwise mean-prediction SE (stdp).
+function predict_ci(m, x0; forecast = false, sigma2 = nothing)
+    b = bvec(m); V = Vmat(m)
+    xb   = LinearAlgebra.dot(b, x0)
+    varp = LinearAlgebra.dot(x0, V * x0)
+    forecast && (varp += sigma2)
+    sd = sqrt(varp)
+    Printf.@printf("  xb = %.7g   se = %.7g\n  95%% CI = [%.7g, %.7g]\n",
+                   xb, sd, xb - 1.96sd, xb + 1.96sd)
+    return (xb = xb, se = sd)
+end
+
+# Residual variance sigma^2 = RSS / dof_residual (Stata's Residual MS).
+function sigma2_of(m, df, y)
+    r = df[!, y] .- FixedEffectModels.predict(m, df)
+    rr = collect(skipmissing(r))
+    sum(abs2, rr) / StatsBase.dof_residual(m)
+end
+```
+
+## Example 6.1: Effect of Pollution on Housing Prices
+
+```{julia}
+#=
+use "data/hprice2.dta", clear
+reg price nox crime rooms dist stratio, beta
+
+      Source |       SS           df       MS      Number of obs   =       506
+-------------+----------------------------------   F(5, 500)       =    174.47
+       Model |  2.7223e+10         5  5.4445e+09   Prob > F        =    0.0000
+    Residual |  1.5603e+10       500  31205611.6   R-squared       =    0.6357
+-------------+----------------------------------   Adj R-squared   =    0.6320
+       Total |  4.2826e+10       505    84803032   Root MSE        =    5586.2
+
+------------------------------------------------------------------------------
+       price | Coefficient  Std. err.      t    P>|t|                     Beta
+-------------+----------------------------------------------------------------
+         nox |  -2706.433   354.0869    -7.64   0.000                 -.340446
+       crime |   -153.601   32.92883    -4.66   0.000                -.1432828
+       rooms |   6735.498   393.6037    17.11   0.000                 .5138878
+        dist |  -1026.806   188.1079    -5.46   0.000                -.2348385
+     stratio |  -1149.204   127.4287    -9.02   0.000                -.2702799
+       _cons |   20871.13   5054.599     4.13   0.000                        .
+------------------------------------------------------------------------------
+=#
+hprice2 = DataFrames.DataFrame(dataset("hprice2"))
+m61 = stata_regress(hprice2; y = :price, x = [:nox, :crime, :rooms, :dist, :stratio])
+```
+
+```{julia}
+# Standardized (beta) coefficients, Stata's `, beta` column.
+stdbeta(hprice2, :price, [:nox, :crime, :rooms, :dist, :stratio]);
+```
+
+The unstandardized fit matches Stata exactly (`nox = -2706.433`, `R² = 0.6357`,
+`F(5,500) = 174.47`). The standardized coefficients also reproduce the published
+`Beta` column (`nox = -.340446`, `rooms = .5138878`, `stratio = -.2702799`).
+
+## Example 6.2: Effect of Pollution on Housing Prices
+
+```{julia}
+#=
+gen rooms2=rooms*rooms
+gen ldist=log(dist)
+reg lprice lnox ldist rooms rooms2 stratio
+
+      Source |       SS           df       MS      Number of obs   =       506
+-------------+----------------------------------   F(5, 500)       =    151.77
+       Model |  50.9872375         5  10.1974475   Prob > F        =    0.0000
+    Residual |  33.5949875       500  .067189975   R-squared       =    0.6028
+-------------+----------------------------------   Adj R-squared   =    0.5988
+       Total |   84.582225       505  .167489554   Root MSE        =    .25921
+
+------------------------------------------------------------------------------
+      lprice | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        lnox |   -.901682   .1146869    -7.86   0.000     -1.12701   -.6763544
+       ldist |  -.0867814   .0432807    -2.01   0.045    -.1718159    -.001747
+       rooms |  -.5451128   .1654542    -3.29   0.001    -.8701839   -.2200417
+      rooms2 |   .0622612    .012805     4.86   0.000      .037103    .0874194
+     stratio |  -.0475902   .0058542    -8.13   0.000     -.059092   -.0360884
+       _cons |   13.38548   .5664732    23.63   0.000     12.27252    14.49844
+------------------------------------------------------------------------------
+=#
+hprice2.rooms2 = hprice2.rooms .* hprice2.rooms
+hprice2.ldist  = log.(hprice2.dist)
+m62 = stata_regress(hprice2; y = :lprice,
+                     x = [:lnox, :ldist, :rooms, :rooms2, :stratio])
+```
+
+```{julia}
+#=
+Turnaround value of rooms
+display -1*_b[rooms]/(2*_b[rooms2])
+4.3776293
+Change in price if rooms increases from 5 to 6
+display 100*(_b[rooms]+2*_b[rooms2]*5)
+7.7499072
+Change in price if rooms increases from 6 to 7
+display 100*(_b[rooms]+2*_b[rooms2]*6)
+20.202144
+=#
+br = bget(m62, "rooms"); br2 = bget(m62, "rooms2")
+Printf.@printf("turnaround rooms      = %.7g\n", -br / (2br2))
+Printf.@printf("pct change 5 -> 6     = %.7g\n", 100 * (br + 2br2 * 5))
+Printf.@printf("pct change 6 -> 7     = %.7g\n", 100 * (br + 2br2 * 6))
+```
+
+The quadratic-in-`rooms` fit matches Stata to the printed digits
+(`rooms = -.5451128`, `rooms2 = .0622612`, `R² = 0.6028`). The turnaround value
+`4.3776293`, and the marginal effects `7.7499072` (5→6) and `20.202144` (6→7),
+all reproduce the published numbers.
+
+## Example 6.3: Effect of Attendance on Final Exam Performance
+
+```{julia}
+#=
+use "data/attend.dta", clear
+summ priGPA
+
+    Variable |        Obs        Mean    Std. dev.       Min        Max
+-------------+---------------------------------------------------------
+      priGPA |        680    2.586775    .5447141       .857       3.93
+=#
+attend = DataFrames.DataFrame(dataset("attend"))
+Printf.@printf("Obs=%d  Mean=%.7g  Std=%.7g  Min=%.7g  Max=%.7g\n",
+    length(attend.priGPA), Statistics.mean(attend.priGPA),
+    Statistics.std(attend.priGPA), minimum(attend.priGPA), maximum(attend.priGPA))
+```
+
+```{julia}
+#=
+gen priGPA2=priGPA*priGPA
+gen ACT2=ACT*ACT
+gen priatn=priGPA*atndrte
+reg stndfnl atndrte priGPA ACT priGPA2 ACT2 priatn
+
+      Source |       SS           df       MS      Number of obs   =       680
+-------------+----------------------------------   F(6, 673)       =     33.25
+       Model |  152.001032         6  25.3335053   Prob > F        =    0.0000
+    Residual |  512.762536       673  .761905701   R-squared       =    0.2287
+-------------+----------------------------------   Adj R-squared   =    0.2218
+       Total |  664.763568       679  .979033237   Root MSE        =    .87287
+
+------------------------------------------------------------------------------
+     stndfnl | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+     atndrte |  -.0067129   .0102321    -0.66   0.512    -.0268035    .0133777
+      priGPA |   -1.62854   .4810025    -3.39   0.001    -2.572986   -.6840939
+         ACT |  -.1280394    .098492    -1.30   0.194     -.321428    .0653492
+     priGPA2 |   .2959046   .1010495     2.93   0.004     .0974945    .4943148
+        ACT2 |   .0045334   .0021764     2.08   0.038       .00026    .0088068
+      priatn |   .0055859   .0043174     1.29   0.196    -.0028913    .0140631
+       _cons |   2.050293   1.360319     1.51   0.132    -.6206863    4.721272
+------------------------------------------------------------------------------
+=#
+attend.priGPA2 = attend.priGPA .* attend.priGPA
+attend.ACT2    = attend.ACT    .* attend.ACT
+attend.priatn  = attend.priGPA .* attend.atndrte
+m63 = stata_regress(attend; y = :stndfnl,
+                     x = [:atndrte, :priGPA, :ACT, :priGPA2, :ACT2, :priatn])
+```
+
+```{julia}
+#=
+Partial effect of atndrte on stndfnl
+display _b[atndrte]+_b[priatn]*2.59
+.00775457
+=#
+Printf.@printf("partial effect at priGPA=2.59: %.7g\n",
+               bget(m63, "atndrte") + bget(m63, "priatn") * 2.59)
+```
+
+The summary of `priGPA` (mean `2.586775`, sd `.5447141`) and the full
+interaction/quadratic regression match Stata to the printed digits
+(`priGPA = -1.62854`, `priGPA2 = .2959046`, `R² = 0.2287`). The partial effect
+of `atndrte` evaluated at the mean `priGPA` is `.00775457`, reproducing Stata.
+
+## Example 6.4: CEO Compensation and Firm Performance
+
+```{julia}
+#=
+use "data/ceosal1.dta", clear
+reg salary sales roe
+
+      Source |       SS           df       MS      Number of obs   =       209
+-------------+----------------------------------   F(2, 206)       =      3.09
+       Model |  11427511.8         2  5713755.89   Prob > F        =    0.0474
+    Residual |   380305470       206  1846143.06   R-squared       =    0.0292
+-------------+----------------------------------   Adj R-squared   =    0.0197
+       Total |   391732982       208  1883331.64   Root MSE        =    1358.7
+
+------------------------------------------------------------------------------
+      salary | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+       sales |   .0163416   .0088736     1.84   0.067    -.0011532    .0338363
+         roe |   19.63097   11.07655     1.77   0.078     -2.20697    41.46891
+       _cons |   830.6313   223.9049     3.71   0.000     389.1924     1272.07
+------------------------------------------------------------------------------
+=#
+ceosal1 = DataFrames.DataFrame(dataset("ceosal1"))
+m64a = stata_regress(ceosal1; y = :salary, x = [:sales, :roe])
+```
+
+```{julia}
+#=
+reg lsalary lsales roe
+
+      Source |       SS           df       MS      Number of obs   =       209
+-------------+----------------------------------   F(2, 206)       =     40.45
+       Model |  18.8148991         2  9.40744953   Prob > F        =    0.0000
+    Residual |  47.9072642       206  .232559535   R-squared       =    0.2820
+-------------+----------------------------------   Adj R-squared   =    0.2750
+       Total |  66.7221632       208  .320779631   Root MSE        =    .48224
+
+------------------------------------------------------------------------------
+     lsalary | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+      lsales |   .2750874    .033254     8.27   0.000     .2095257    .3406491
+         roe |   .0178723   .0039551     4.52   0.000     .0100746    .0256699
+       _cons |   4.362167   .2938776    14.84   0.000     3.782774    4.941561
+------------------------------------------------------------------------------
+=#
+m64b = stata_regress(ceosal1; y = :lsalary, x = [:lsales, :roe])
+```
+
+Both the level (`sales = .0163416`, `R² = 0.0292`) and log-log
+(`lsales = .2750874`, `roe = .0178723`, `R² = 0.2820`) specifications reproduce
+the published Stata tables exactly.
+
+## Example 6.5: Confidence Interval for Predicted College GPA
+
+```{julia}
+#=
+use "data/gpa2.dta", clear
+gen hsize2=hsize*hsize
+reg colgpa sat hsperc hsize hsize2
+
+      Source |       SS           df       MS      Number of obs   =     4,137
+-------------+----------------------------------   F(4, 4132)      =    398.02
+       Model |  499.030504         4  124.757626   Prob > F        =    0.0000
+    Residual |  1295.16517     4,132  .313447524   R-squared       =    0.2781
+-------------+----------------------------------   Adj R-squared   =    0.2774
+       Total |  1794.19567     4,136  .433799728   Root MSE        =    .55986
+
+------------------------------------------------------------------------------
+      colgpa | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+         sat |   .0014925   .0000652    22.89   0.000     .0013646    .0016204
+      hsperc |  -.0138558    .000561   -24.70   0.000    -.0149557   -.0127559
+       hsize |  -.0608815   .0165012    -3.69   0.000    -.0932328   -.0285302
+      hsize2 |   .0054603   .0022698     2.41   0.016     .0010102    .0099104
+       _cons |   1.492652   .0753414    19.81   0.000     1.344942    1.640362
+------------------------------------------------------------------------------
+=#
+gpa2 = DataFrames.DataFrame(dataset("gpa2"))
+gpa2.hsize2 = gpa2.hsize .* gpa2.hsize
+m65 = stata_regress(gpa2; y = :colgpa, x = [:sat, :hsperc, :hsize, :hsize2])
+```
+
+```{julia}
+#=
+Predicted college GPA at sat=1200, hsperc=30, hsize=5, hsize2=25
+display _b[_cons]+_b[sat]*1200+_b[hsperc]*30+_b[hsize]*5+_b[hsize2]*25
+2.7000755
+=#
+# coefficient order: (Intercept), sat, hsperc, hsize, hsize2
+x0 = [1.0, 1200.0, 30.0, 5.0, 25.0]
+Printf.@printf("predicted colgpa = %.7g\n", LinearAlgebra.dot(bvec(m65), x0))
+```
+
+Book approach: recenter the regressors at the point of interest so the
+intercept *is* the prediction and its SE comes straight from the table. Stata's
+recentered `_cons = 2.700075 (.0198778)`.
+
+```{julia}
+#=
+gen sat0=sat-1200
+gen hsperc0=hsperc-30
+gen hsize0=hsize-5
+gen hsize20=hsize2-25
+reg colgpa sat0 hsperc0 hsize0 hsize20
+       _cons |   2.700075   .0198778   135.83   0.000     2.661104    2.739047
+=#
+gpa2.sat0    = gpa2.sat    .- 1200
+gpa2.hsperc0 = gpa2.hsperc .- 30
+gpa2.hsize0  = gpa2.hsize  .- 5
+gpa2.hsize20 = gpa2.hsize2 .- 25
+m65c = stata_regress(gpa2; y = :colgpa, x = [:sat0, :hsperc0, :hsize0, :hsize20])
+```
+
+Another approach: predict directly, with `stdp` (SE of the mean prediction).
+Stata lists `stdp = .0198778`, `xb = 2.700075`, CI `[2.661115, 2.739036]`.
+
+```{julia}
+#=
+predict colgpahat in 4138/4138, stdp   -> .0198778
+predict colgpahatt in 4138/4138, xb    -> 2.700075
+list -> .0198778   2.661115   2.700075   2.739036
+=#
+predict_ci(m65, x0);   # stdp: mean-prediction SE
+```
+
+The main fit matches Stata exactly (`sat = .0014925`, `hsize2 = .0054603`,
+`R² = 0.2781`). The point prediction is `2.7000755`; the recentered intercept
+gives the same value with SE `.0198778`, and `predict_ci` returns identical
+`xb`, `stdp` and 95% CI (`[2.66111, 2.73904]`).
+
+## Example 6.6: Confidence Interval for Future College GPA
+
+Same estimated equation, but the interval now uses `stdf` — the SE of a
+*forecast* for an individual, which adds the error variance σ². Stata lists
+`stdf = .5602166`, CI `[1.602051, 3.7981]`.
+
+```{julia}
+#=
+predict cc in 4138/4138, stdf          -> .5602166
+predict colgpahatt in 4138/4138, xb    -> 2.700075
+list -> .5602166   1.602051   2.700075   3.7981
+=#
+s2 = sigma2_of(m65, gpa2, :colgpa)
+Printf.@printf("sigma^2 (Residual MS) = %.7g\n", s2)
+predict_ci(m65, x0; forecast = true, sigma2 = s2);   # stdf: forecast SE
+```
+
+`sigma^2` recovers Stata's Residual MS (`.313447524`), and the forecast SE
+`stdf = .5602166` with 95% CI `[1.60205, 3.79810]` reproduces the published
+Example 6.6 numbers to the printed digits.
+
+## Example 6.7: Predicting CEO Salaries
+
+```{julia}
+#=
+use "data/ceosal2.dta", clear
+reg lsalary lsales lmktval ceoten
+
+      Source |       SS           df       MS      Number of obs   =       177
+-------------+----------------------------------   F(3, 173)       =     26.91
+       Model |  20.5672434         3  6.85574779   Prob > F        =    0.0000
+    Residual |  44.0789697       173  .254791732   R-squared       =    0.3182
+-------------+----------------------------------   Adj R-squared   =    0.3063
+       Total |  64.6462131       176  .367308029   Root MSE        =    .50477
+
+------------------------------------------------------------------------------
+     lsalary | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+      lsales |   .1628545   .0392421     4.15   0.000     .0853995    .2403094
+     lmktval |    .109243   .0495947     2.20   0.029     .0113545    .2071315
+      ceoten |   .0117054   .0053261     2.20   0.029      .001193    .0222178
+       _cons |   4.503795   .2572344    17.51   0.000     3.996073    5.011517
+------------------------------------------------------------------------------
+=#
+ceosal2 = DataFrames.DataFrame(dataset("ceosal2"))
+m67 = stata_regress(ceosal2; y = :lsalary, x = [:lsales, :lmktval, :ceoten])
+```
+
+```{julia}
+#=
+Predicted salary
+display _b[_cons]+_b[lsales]*log(5000)+_b[lmktval]*log(10000)+_b[ceoten]*10
+7.0140771
+=#
+lhat = bget(m67, "(Intercept)") + bget(m67, "lsales") * log(5000) +
+       bget(m67, "lmktval") * log(10000) + bget(m67, "ceoten") * 10
+Printf.@printf("predicted lsalary = %.7g\n", lhat)
+```
+
+```{julia}
+#=
+predict lsal, xb
+gen mhat=exp(lsal)
+reg salary mhat, noconstant
+        mhat |   1.116857   .0470953    23.71   0.000     1.023912    1.209801
+=#
+ceosal2.lsal = FixedEffectModels.predict(m67, ceosal2)
+ceosal2.mhat = exp.(ceosal2.lsal)
+m67b = stata_regress(ceosal2; y = :salary, x = [:mhat], nocons = true)
+```
+
+```{julia}
+#=
+Predicted salary (retransformed)
+display _b[mhat]*exp(7.013)
+1240.8082
+=#
+Printf.@printf("predicted salary = %.7g\n", bget(m67b, "mhat") * exp(7.013))
+```
+
+The log-salary equation reproduces Stata (`lsales = .1628545`, `R² = 0.3182`),
+the log prediction is `7.0140771`, the Duan-style scaling regression through the
+origin gives `mhat = 1.116857 (.0470953)`, and the retransformed salary
+prediction `1240.8082` all match the published numbers.
+
+## Example 6.8: Predicting CEO Salaries
+
+```{julia}
+#=
+use "data/ceosal2.dta", clear
+reg salary sales mktval ceoten
+
+      Source |       SS           df       MS      Number of obs   =       177
+-------------+----------------------------------   F(3, 173)       =     14.53
+       Model |  12230632.6         3  4076877.52   Prob > F        =    0.0000
+    Residual |  48535332.2       173  280551.053   R-squared       =    0.2013
+-------------+----------------------------------   Adj R-squared   =    0.1874
+       Total |  60765964.7       176  345261.163   Root MSE        =    529.67
+
+------------------------------------------------------------------------------
+      salary | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+       sales |   .0190191   .0100561     1.89   0.060    -.0008294    .0388676
+      mktval |   .0234003   .0094826     2.47   0.015     .0046839    .0421167
+      ceoten |   12.70337   5.618052     2.26   0.025     1.614616    23.79211
+       _cons |   613.4361   65.23685     9.40   0.000     484.6735    742.1987
+------------------------------------------------------------------------------
+=#
+m68 = stata_regress(ceosal2; y = :salary, x = [:sales, :mktval, :ceoten])
+```
+
+The levels specification reproduces Stata exactly (`sales = .0190191`,
+`mktval = .0234003`, `ceoten = 12.70337`, `R² = 0.2013`, `F(3,173) = 14.53`).

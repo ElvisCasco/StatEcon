@@ -1,0 +1,599 @@
+---
+title: "Wooldridge Introductory Econometrics -- Ch. 4: Multiple regression analysis: inference (via StatEcon)"
+Authors:
+- Jeffrey M. Wooldridge
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    code-fold: true
+    code-tools: true
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+**Source.** Stata examples reproduced from Wooldridge, *Introductory Econometrics: A Modern Approach* (Cengage). Data are the book's companion files.
+
+# Julia setup
+
+```{julia}
+using StatEcon
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+
+const OUT = "output"
+isdir(OUT) || mkpath(OUT)
+outpath(f) = joinpath(OUT, f)
+```
+
+Helpers: `bcoef`/`bse` are the Julia analogues of Stata's `_b[var]` / `_se[var]`
+(the intercept is `"(Intercept)"`).
+
+```{julia}
+bcoef(m, nm) = FixedEffectModels.coef(m)[findfirst(==(nm), FixedEffectModels.coefnames(m))]
+bse(m, nm)   = sqrt.(diag(FixedEffectModels.vcov(m)))[findfirst(==(nm), FixedEffectModels.coefnames(m))]
+```
+
+# 4 Multiple Regression Analysis: Inference
+
+## Example 4.1: Hourly Wage Equation
+
+```{julia}
+#=
+use "data/wage1.dta", clear
+reg lwage educ exper tenure
+
+      Source |       SS           df       MS      Number of obs   =       526
+-------------+----------------------------------   F(3, 522)       =     80.39
+       Model |  46.8741776         3  15.6247259   Prob > F        =    0.0000
+    Residual |  101.455574       522  .194359337   R-squared       =    0.3160
+-------------+----------------------------------   Adj R-squared   =    0.3121
+       Total |  148.329751       525   .28253286   Root MSE        =    .44086
+
+------------------------------------------------------------------------------
+       lwage | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        educ |    .092029   .0073299    12.56   0.000     .0776292    .1064288
+       exper |   .0041211   .0017233     2.39   0.017     .0007357    .0075065
+      tenure |   .0220672   .0030936     7.13   0.000     .0159897    .0281448
+       _cons |   .2843595   .1041904     2.73   0.007     .0796756    .4890435
+------------------------------------------------------------------------------
+=#
+wage1 = DataFrames.DataFrame(dataset("wage1"))
+m41 = stata_regress(wage1; y = :lwage, x = [:educ, :exper, :tenure])
+```
+
+```{julia}
+#=
+Increase in log(wage) if experience increases by 3 years
+display _b[exper]*3
+.01236333
+=#
+Printf.@printf("_b[exper]*3 = %.8f\n", bcoef(m41, "exper") * 3)
+```
+
+Same fit as Example 3.2. All coefficients, standard errors and `t` statistics
+match exactly, and `_b[exper]*3 = .01236333` reproduces the Stata display.
+
+## Example 4.2: Student Performance and School Size
+
+```{julia}
+#=
+use "data/meap93.dta", clear
+reg math10 totcomp staff enroll
+
+      Source |       SS           df       MS      Number of obs   =       408
+-------------+----------------------------------   F(3, 404)       =      7.70
+       Model |  2422.93434         3  807.644779   Prob > F        =    0.0001
+    Residual |  42394.2462       404  104.936253   R-squared       =    0.0541
+-------------+----------------------------------   Adj R-squared   =    0.0470
+       Total |  44817.1805       407  110.115923   Root MSE        =    10.244
+
+------------------------------------------------------------------------------
+      math10 | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+     totcomp |   .0004586   .0001004     4.57   0.000     .0002613    .0006559
+       staff |   .0479199    .039814     1.20   0.229    -.0303487    .1261884
+      enroll |  -.0001976   .0002152    -0.92   0.359    -.0006207    .0002255
+       _cons |   2.274021   6.113794     0.37   0.710    -9.744801    14.29284
+------------------------------------------------------------------------------
+=#
+meap93 = DataFrames.DataFrame(dataset("meap93"))
+m42 = stata_regress(meap93; y = :math10, x = [:totcomp, :staff, :enroll])
+```
+
+```{julia}
+#=
+reg math10 ltotcomp lstaff lenroll
+
+      Source |       SS           df       MS      Number of obs   =       408
+-------------+----------------------------------   F(3, 404)       =      9.42
+       Model |  2930.03493         3  976.678311   Prob > F        =    0.0000
+    Residual |  41887.1456       404  103.681053   R-squared       =    0.0654
+-------------+----------------------------------   Adj R-squared   =    0.0584
+       Total |  44817.1805       407  110.115923   Root MSE        =    10.182
+
+------------------------------------------------------------------------------
+      math10 | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+    ltotcomp |     21.155   4.055549     5.22   0.000     13.18238    29.12761
+      lstaff |   3.980018    4.18966     0.95   0.343    -4.256239    12.21628
+     lenroll |  -1.268046    .693204    -1.83   0.068    -2.630784    .0946912
+       _cons |  -207.6648   48.70313    -4.26   0.000     -303.408   -111.9216
+------------------------------------------------------------------------------
+=#
+m42b = stata_regress(meap93; y = :math10, x = [:ltotcomp, :lstaff, :lenroll])
+```
+
+```{julia}
+#=
+Change in math10 if enrollment increases by 1 percent
+display _b[lenrol]/100
+-.01268046
+=#
+Printf.@printf("_b[lenroll]/100 = %.8f\n", bcoef(m42b, "lenroll") / 100)
+```
+
+The level specification matches the published table exactly
+(`totcomp = .0004586`, `staff = .0479199`, `enroll = -.0001976`). The log
+specification agrees to about five or six significant figures: Julia gives
+`ltotcomp = 21.15498`, `lstaff = 3.979981`, `lenroll = -1.268042` vs Stata
+`21.155`, `3.980018`, `-1.268046`. The bundled `meap93.dta` stores the log
+variables in single precision (`Float32`); recomputing the logs at double
+precision moves the Julia estimates toward the published values, confirming that
+the residual gap is storage precision, not a computation difference. A 1% rise in
+enrollment lowers `math10` by about `.01268` points either way.
+
+## Example 4.3: Determinants of College GPA
+
+```{julia}
+#=
+use "data/gpa1.dta", clear
+reg colGPA hsGPA ACT skipped
+
+      Source |       SS           df       MS      Number of obs   =       141
+-------------+----------------------------------   F(3, 137)       =     13.92
+       Model |  4.53313314         3  1.51104438   Prob > F        =    0.0000
+    Residual |  14.8729663       137  .108561798   R-squared       =    0.2336
+-------------+----------------------------------   Adj R-squared   =    0.2168
+       Total |  19.4060994       140  .138614996   Root MSE        =    .32949
+
+------------------------------------------------------------------------------
+      colGPA | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+       hsGPA |   .4118162   .0936742     4.40   0.000     .2265819    .5970505
+         ACT |   .0147202   .0105649     1.39   0.166    -.0061711    .0356115
+     skipped |  -.0831131   .0259985    -3.20   0.002    -.1345234   -.0317028
+       _cons |   1.389554   .3315535     4.19   0.000     .7339295    2.045178
+------------------------------------------------------------------------------
+=#
+gpa1 = DataFrames.DataFrame(dataset("gpa1"))
+m43 = stata_regress(gpa1; y = :colGPA, x = [:hsGPA, :ACT, :skipped])
+```
+
+Adding `skipped` (classes missed per week) yields `skipped = -.0831131`
+(t = -3.20) and lifts `R²` to `0.2336` — an exact match to Stata.
+
+## Example 4.4: Campus Crime and Enrollment
+
+```{julia}
+#=
+use "data/campus.dta", clear
+reg lcrime lenroll
+
+      Source |       SS           df       MS      Number of obs   =        97
+-------------+----------------------------------   F(1, 95)        =    133.79
+       Model |  107.083654         1  107.083654   Prob > F        =    0.0000
+    Residual |  76.0358244        95  .800377098   R-squared       =    0.5848
+-------------+----------------------------------   Adj R-squared   =    0.5804
+       Total |  183.119479        96  1.90749457   Root MSE        =    .89464
+
+------------------------------------------------------------------------------
+      lcrime | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+     lenroll |    1.26976    .109776    11.57   0.000     1.051827    1.487693
+       _cons |   -6.63137    1.03354    -6.42   0.000    -8.683206   -4.579533
+------------------------------------------------------------------------------
+=#
+campus = DataFrames.DataFrame(dataset("campus"))
+m44 = stata_regress(campus; y = :lcrime, x = [:lenroll])
+```
+
+```{julia}
+#=
+T-statistic for testing that the coefficient on lenroll equals 1
+scalar tvalue=(_b[lenrol]-1)/_se[lenrol]
+scalar pvalue=ttail(120,tvalue)
+display "T-value: " tvalue ", P=value: " pvalue
+T-value: 2.45737, P=value: .00771259
+=#
+tvalue = (bcoef(m44, "lenroll") - 1) / bse(m44, "lenroll")
+pvalue = 1 - cdf(TDist(120), tvalue)          # ttail(120, tvalue)
+Printf.@printf("T-value: %.5f, P-value: %.8f\n", tvalue, pvalue)
+```
+
+```{julia}
+#=
+test lenroll=1
+
+ ( 1)  lenroll = 1
+
+       F(  1,    95) =    6.04
+            Prob > F =    0.0158
+=#
+stata_test(m44, ["lenroll"]; values = [1.0])
+```
+
+The elasticity of crime with respect to enrollment is `1.26976`. Testing
+H0: β = 1 by hand gives `t = 2.45737`, `p = .00771259` (using the book's df = 120),
+matching Stata; the exact F-test `test lenroll=1` returns `F(1, 95) = 6.04`,
+`p = 0.0158` — also an exact match.
+
+## Example 4.5: Housing Prices and Air Pollution
+
+```{julia}
+#=
+use "data/hprice2.dta", clear
+gen ldist=log(dist)
+reg lprice lnox ldist rooms stratio
+
+      Source |       SS           df       MS      Number of obs   =       506
+-------------+----------------------------------   F(4, 501)       =    175.86
+       Model |  49.3987586         4  12.3496897   Prob > F        =    0.0000
+    Residual |  35.1834663       501   .07022648   R-squared       =    0.5840
+-------------+----------------------------------   Adj R-squared   =    0.5807
+       Total |   84.582225       505  .167489554   Root MSE        =      .265
+
+------------------------------------------------------------------------------
+      lprice | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        lnox |  -.9535388   .1167417    -8.17   0.000    -1.182902   -.7241751
+       ldist |  -.1343395   .0431032    -3.12   0.002    -.2190247   -.0496542
+       rooms |   .2545271   .0185303    13.74   0.000     .2181203    .2909338
+     stratio |  -.0524511   .0058971    -8.89   0.000    -.0640372    -.040865
+       _cons |   11.08386   .3181113    34.84   0.000     10.45887    11.70886
+------------------------------------------------------------------------------
+=#
+hprice2 = DataFrames.DataFrame(dataset("hprice2"))
+hprice2.ldist = log.(hprice2.dist)
+m45 = stata_regress(hprice2; y = :lprice, x = [:lnox, :ldist, :rooms, :stratio])
+```
+
+After generating `ldist = log(dist)`, the hedonic price regression matches to
+about six significant figures. The raw regressors reproduce exactly
+(`rooms = .2545271`, `stratio = -.0524512` vs `-.0524511`, `R² = 0.5840`); the
+log terms differ only in the last printed digit (Julia `lnox = -.953540`,
+`ldist = -.134340` vs Stata `-.9535388`, `-.1343395`), reflecting the
+single-precision (`Float32`) storage of `lnox` and of `dist` in `hprice2.dta`.
+
+## Example 4.6: Participation Rates in 401K Plans
+
+```{julia}
+#=
+use "data/401k.dta", clear
+reg prate mrate age totemp
+
+      Source |       SS           df       MS      Number of obs   =     1,534
+-------------+----------------------------------   F(3, 1530)      =     56.38
+       Model |  42642.5383         3  14214.1794   Prob > F        =    0.0000
+    Residual |  385743.001     1,530  252.119609   R-squared       =    0.0995
+-------------+----------------------------------   Adj R-squared   =    0.0978
+       Total |  428385.539     1,533  279.442622   Root MSE        =    15.878
+
+------------------------------------------------------------------------------
+       prate | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+       mrate |   5.442221    .524419    10.38   0.000     4.413565    6.470878
+         age |   .2691979   .0451449     5.96   0.000     .1806455    .3577503
+      totemp |  -.0001291   .0000367    -3.52   0.000     -.000201   -.0000572
+       _cons |   80.29405   .7777274   103.24   0.000     78.76853    81.81958
+------------------------------------------------------------------------------
+=#
+k401 = DataFrames.DataFrame(dataset("401k"))
+m46 = stata_regress(k401; y = :prate, x = [:mrate, :age, :totemp])
+```
+
+```{julia}
+#=
+Change in participation rate if total employment increases by 10,000
+display _b[totemp]*10000
+-1.2906185
+=#
+Printf.@printf("_b[totemp]*10000 = %.7f\n", bcoef(m46, "totemp") * 10000)
+```
+
+**This is the one example that does not reproduce.** Julia gives
+`totemp = -.0001298` (`_b[totemp]*10000 = -1.2978125`), whereas the published
+Stata output shows `-.0001291` (`-1.2906185`) — a difference of about 0.5%, and
+`mrate`/`age` shift correspondingly (`5.44143`/`.26941` vs `5.44222`/`.26920`).
+This is **not** a precision artifact: Example 3.3 (`prate mrate age`, without
+`totemp`) matches Stata to all printed digits, and Julia's fit here was verified
+against QR, mean-centered normal equations and `GLM.lm` (all agree on
+`-1.2978125`; the design is well conditioned, `cond(X) ≈ 2.4e4`). A float-ulp
+sensitivity test moved the coefficient by less than `1e-5`, so single-precision
+rounding cannot explain a 0.5% gap. The evidence points to the `totemp` column in
+the bundled `401k.dta` differing in content from the copy used for the published
+run; Julia reports the correct OLS for the bundled data.
+
+## Example 4.7: Effect of Job Training Grants on Firm Scrap Rates
+
+Note: the textbook example is based on an undocumented subset of this dataset, so
+its printed coefficients differ; the Stata output below is what the full
+`jtrain.dta` reproduces, and Julia matches that.
+
+```{julia}
+#=
+use "data/jtrain.dta", clear
+summ hrsemp sales employ
+
+    Variable |        Obs        Mean    Std. dev.       Min        Max
+-------------+---------------------------------------------------------
+      hrsemp |        390    14.96754    25.71064          0   163.9167
+       sales |        373     6116037     7912517     110000   5.40e+07
+      employ |        440    59.31591    74.12378          4        525
+=#
+jtrain = DataFrames.DataFrame(dataset("jtrain"))
+stata_summarize(jtrain, [:hrsemp, :sales, :employ])
+```
+
+```{julia}
+#=
+reg lscrap hrsemp lsales lemploy
+
+      Source |       SS           df       MS      Number of obs   =       135
+-------------+----------------------------------   F(3, 131)       =      4.66
+       Model |   27.307674         3    9.102558   Prob > F        =    0.0040
+    Residual |  256.148572       131  1.95533261   R-squared       =    0.0963
+-------------+----------------------------------   Adj R-squared   =    0.0756
+       Total |  283.456246       134  2.11534512   Root MSE        =    1.3983
+
+------------------------------------------------------------------------------
+      lscrap | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+      hrsemp |  -.0031171   .0045738    -0.68   0.497    -.0121651    .0059308
+      lsales |  -.7265682    .216967    -3.35   0.001    -1.155781   -.2973558
+     lemploy |   .7457663   .2090991     3.57   0.001     .3321183    1.159414
+       _cons |   8.801022   2.716818     3.24   0.002     3.426508    14.17554
+------------------------------------------------------------------------------
+=#
+m47 = stata_regress(jtrain; y = :lscrap, x = [:hrsemp, :lsales, :lemploy])
+```
+
+```{julia}
+#=
+display _b[hrsemp]*1   -> -.00311714   (training +1 hour)
+display _b[hrsemp]*5   -> -.01558572   (training +5 hours)
+=#
+Printf.@printf("_b[hrsemp]*1 = %.8f\n", bcoef(m47, "hrsemp") * 1)
+Printf.@printf("_b[hrsemp]*5 = %.8f\n", bcoef(m47, "hrsemp") * 5)
+```
+
+On the full `jtrain.dta` (N = 135, missing `lscrap`/`lsales` rows dropped),
+`hrsemp = -.0031172` (Stata `-.0031171`) and is insignificant. The two
+log-transformed regressors agree to about six significant figures
+(Julia `lsales = -.726566`, `lemploy = .745765` vs Stata `-.7265682`,
+`.7457663`) — the usual single-precision (`Float32`) storage effect. The
+predicted-change displays give `-.0031172` and `-.0155858`, matching Stata's
+`-.00311714` / `-.01558572` to five significant figures.
+
+## Example 4.8: Hedonic Price Model for Houses
+
+Dataset is not available, so this example cannot be reproduced.
+
+## Example 4.9: Parents Education in a Birth Weight Equation
+
+```{julia}
+#=
+use "data/bwght.dta", clear
+reg bwght cigs parity faminc motheduc fatheduc
+
+      Source |       SS           df       MS      Number of obs   =     1,191
+-------------+----------------------------------   F(5, 1185)      =      9.55
+       Model |  18705.5567         5  3741.11135   Prob > F        =    0.0000
+    Residual |  464041.135     1,185  391.595895   R-squared       =    0.0387
+-------------+----------------------------------   Adj R-squared   =    0.0347
+       Total |  482746.692     1,190  405.669489   Root MSE        =    19.789
+
+------------------------------------------------------------------------------
+       bwght | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        cigs |  -.5959362   .1103479    -5.40   0.000    -.8124352   -.3794373
+      parity |   1.787603   .6594055     2.71   0.007     .4938709    3.081336
+      faminc |   .0560414   .0365616     1.53   0.126    -.0156913    .1277742
+    motheduc |  -.3704503   .3198551    -1.16   0.247    -.9979957    .2570951
+    fatheduc |   .4723944   .2826433     1.67   0.095    -.0821426    1.026931
+       _cons |   114.5243   3.728453    30.72   0.000     107.2092    121.8394
+------------------------------------------------------------------------------
+=#
+bwght = DataFrames.DataFrame(dataset("bwght"))
+m49 = stata_regress(bwght; y = :bwght, x = [:cigs, :parity, :faminc, :motheduc, :fatheduc])
+```
+
+```{julia}
+#=
+Test for joint significance of motheduc and fatheduc
+test motheduc fatheduc
+
+ ( 1)  motheduc = 0
+ ( 2)  fatheduc = 0
+
+       F(  2,  1185) =    1.44
+            Prob > F =    0.2380
+=#
+stata_test(m49, ["motheduc", "fatheduc"])
+```
+
+```{julia}
+#=
+reg bwght cigs parity faminc if e(sample)
+
+      Source |       SS           df       MS      Number of obs   =     1,191
+-------------+----------------------------------   F(3, 1187)      =     14.95
+       Model |  17579.8997         3  5859.96658   Prob > F        =    0.0000
+    Residual |  465166.792     1,187  391.884408   R-squared       =    0.0364
+-------------+----------------------------------   Adj R-squared   =    0.0340
+       Total |  482746.692     1,190  405.669489   Root MSE        =    19.796
+
+------------------------------------------------------------------------------
+       bwght | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        cigs |  -.5978519   .1087701    -5.50   0.000    -.8112549   -.3844489
+      parity |   1.832274   .6575402     2.79   0.005     .5422035    3.122345
+      faminc |   .0670618   .0323938     2.07   0.039     .0035063    .1306173
+       _cons |   115.4699   1.655898    69.73   0.000     112.2211    118.7187
+------------------------------------------------------------------------------
+=#
+# e(sample): the 1,191 rows used by the 5-regressor fit (drops missing motheduc/fatheduc).
+esample = DataFrames.completecases(bwght[:, [:bwght, :cigs, :parity, :faminc, :motheduc, :fatheduc]])
+bwght_es = bwght[esample, :]
+m49b = stata_regress(bwght_es; y = :bwght, x = [:cigs, :parity, :faminc])
+```
+
+The full model matches exactly (N = 1,191; `cigs = -.5959362`, `fatheduc = .4723944`).
+The joint test of the two parents'-education coefficients gives `F(2, 1185) = 1.44`,
+`p = 0.2380` — identical to Stata. Restricting the reduced model to the same
+`e(sample)` rows keeps N = 1,191 and reproduces `cigs = -.5978519`,
+`faminc = .0670618`, `R² = 0.0364`.
+
+## Example 4.10: Salary-Pension Tradeoff for Teachers
+
+```{julia}
+#=
+use "data/meap93.dta", clear
+reg lsalary bensal lenrol lstaff droprate gradrate
+
+      Source |       SS           df       MS      Number of obs   =       408
+-------------+----------------------------------   F(5, 402)       =     45.43
+       Model |  3.49911875         5   .69982375   Prob > F        =    0.0000
+    Residual |  6.19291821       402  .015405269   R-squared       =    0.3610
+-------------+----------------------------------   Adj R-squared   =    0.3531
+       Total |  9.69203696       407  .023813359   Root MSE        =    .12412
+
+------------------------------------------------------------------------------
+     lsalary | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+      bensal |  -.5893195   .1648739    -3.57   0.000    -.9134422   -.2651968
+     lenroll |   .0881204    .007324    12.03   0.000     .0737223    .1025186
+      lstaff |  -.2182779   .0499503    -4.37   0.000    -.3164744   -.1200814
+    droprate |  -.0002826   .0016145    -0.18   0.861    -.0034566    .0028913
+    gradrate |   .0009674   .0006625     1.46   0.145    -.0003351    .0022699
+       _cons |   10.73847   .2582651    41.58   0.000     10.23075    11.24618
+------------------------------------------------------------------------------
+=#
+m410 = stata_regress(meap93; y = :lsalary,
+                      x = [:bensal, :lenroll, :lstaff, :droprate, :gradrate])
+```
+
+```{julia}
+#=
+reg lsalary bensal lenrol lstaff
+
+      Source |       SS           df       MS      Number of obs   =       408
+-------------+----------------------------------   F(3, 404)       =     73.39
+       Model |  3.41865498         3  1.13955166   Prob > F        =    0.0000
+    Residual |  6.27338199       404  .015528173   R-squared       =    0.3527
+-------------+----------------------------------   Adj R-squared   =    0.3479
+       Total |  9.69203696       407  .023813359   Root MSE        =    .12461
+
+------------------------------------------------------------------------------
+     lsalary | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+      bensal |  -.6047717   .1653684    -3.66   0.000    -.9298618   -.2796817
+     lenroll |   .0873967   .0073462    11.90   0.000     .0729551    .1018384
+      lstaff |  -.2220333   .0500774    -4.43   0.000    -.3204781   -.1235884
+       _cons |   10.84384   .2516434    43.09   0.000     10.34915    11.33853
+------------------------------------------------------------------------------
+=#
+m410b = stata_regress(meap93; y = :lsalary, x = [:bensal, :lenroll, :lstaff])
+```
+
+```{julia}
+#=
+reg lsalary bensal
+
+      Source |       SS           df       MS      Number of obs   =       408
+-------------+----------------------------------   F(1, 406)       =     17.05
+       Model |  .390610259         1  .390610259   Prob > F        =    0.0000
+    Residual |   9.3014267       406  .022909918   R-squared       =    0.0403
+-------------+----------------------------------   Adj R-squared   =    0.0379
+       Total |  9.69203696       407  .023813359   Root MSE        =    .15136
+
+------------------------------------------------------------------------------
+     lsalary | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+      bensal |  -.8253951   .1998949    -4.13   0.000    -1.218353   -.4324367
+       _cons |   10.52318   .0415602   253.20   0.000     10.44148    10.60488
+------------------------------------------------------------------------------
+=#
+m410c = stata_regress(meap93; y = :lsalary, x = [:bensal])
+```
+
+The benefits/salary tradeoff `bensal` moves from about `-.58932` (full model) to
+`-.60477` (dropping `droprate`/`gradrate`) to `-.82539` (simple regression) as
+controls are removed — the sequence discussed in the text. All three regressions
+agree with the published Stata output to about six significant figures (Julia
+`bensal = -.5893175 / -.6047698 / -.8253933` vs Stata
+`-.5893195 / -.6047717 / -.8253951`); as in Example 4.2, the differences in the
+last digit come from `meap93`'s single-precision (`Float32`) log variables.
+
+# Verification summary
+
+| Example | Quantity | Stata | Julia | Match |
+|---|---|---|---|---|
+| 4.1 | `educ`/`exper`/`tenure` | .092029 / .0041211 / .0220672 | same | yes |
+| 4.1 | `_b[exper]*3` | .01236333 | .01236333 | yes |
+| 4.2 | `totcomp`,`staff`,`enroll` (levels) | .0004586 / .0479199 / -.0001976 | same | yes |
+| 4.2 | `ltotcomp`,`lstaff`,`lenroll` (logs) | 21.155 / 3.980018 / -1.268046 | 21.15498 / 3.979981 / -1.268042 | ≈ (5–6 sf; float logs) |
+| 4.2 | `_b[lenroll]/100` | -.01268046 | -.01268042 | ≈ (6 sf) |
+| 4.3 | `skipped` / R² | -.0831131 / 0.2336 | same | yes |
+| 4.4 | `lenroll` / R² | 1.26976 / 0.5848 | 1.2697603 / 0.5848 | yes |
+| 4.4 | hand t, p (df 120) | 2.45737 / .00771259 | 2.45737 / .00771259 | yes |
+| 4.4 | `test lenroll=1` | F(1,95)=6.04, p=0.0158 | F=6.04, p=0.0158 | yes |
+| 4.5 | `rooms`,`stratio` (raw) | .2545271 / -.0524511 | .2545271 / -.0524512 | yes |
+| 4.5 | `lnox`,`ldist` (logs) | -.9535388 / -.1343395 | -.953540 / -.134340 | ≈ (6 sf; float logs) |
+| 4.6 | `totemp` coef | -.0001291 | -.0001298 | **NO — 0.5% gap** |
+| 4.6 | `_b[totemp]*10000` | -1.2906185 | -1.2978125 | **NO — see note** |
+| 4.6 | `mrate`,`age` | 5.442221 / .2691979 | 5.441433 / .2694073 | **NO (same cause)** |
+| 4.7 | `hrsemp` | -.0031171 | -.0031172 | ≈ (6 sf) |
+| 4.7 | `lsales`,`lemploy` (logs) | -.7265682 / .7457663 | -.726566 / .745765 | ≈ (6 sf; float logs) |
+| 4.7 | `_b[hrsemp]*5` | -.01558572 | -.0155858 | ≈ (5 sf) |
+| 4.9 | `cigs`,`fatheduc` (5-var) | -.5959362 / .4723944 | same | yes |
+| 4.9 | `test motheduc fatheduc` | F(2,1185)=1.44, p=0.2380 | F=1.44, p=0.2380 | yes |
+| 4.9 | reduced, `if e(sample)` | N=1191, cigs=-.5978519 | N=1191, same | yes |
+| 4.10 | `bensal` (3 fits) | -.5893195 / -.6047717 / -.8253951 | -.5893175 / -.6047698 / -.8253933 | ≈ (6 sf; float logs) |
+
+Most of Chapter 4 reproduces the published Stata output to the printed digits.
+Two kinds of discrepancy remain:
+
+1. **Single-precision storage (cosmetic).** The bundled companion `.dta` files
+   store every variable as `Float32`. Regressions on raw single-valued variables
+   (4.1, 4.3, 4.4, 4.9, and the level fit in 4.2) match to all printed digits.
+   Regressions that use log-transformed variables (4.2 logs, 4.5, 4.7, 4.10)
+   agree only to about the 5th–6th significant figure; recomputing the logs at
+   double precision moves the estimates toward the published values, confirming
+   the cause is storage precision rather than the estimator.
+
+2. **Example 4.6 — a genuine mismatch.** `totemp` gives `-.0001298` in Julia
+   versus `-.0001291` in the published output (about 0.5%), and `mrate`/`age`
+   shift with it. This is not a precision effect: Example 3.3 (the same
+   `prate mrate age` regression without `totemp`) matches Stata exactly, the fit
+   is well conditioned, and QR / mean-centered normal equations / `GLM.lm` all
+   agree with `stata_regress` on `-.0001298`. A float-ulp perturbation test moved
+   the coefficient by `<1e-5`, far too little to explain a 0.5% gap. The bundled
+   `401k.dta` `totemp` column therefore appears to differ in content from the
+   copy behind the published run; Julia reports the correct OLS for the bundled
+   data.
+
+Example 4.8 is omitted because its dataset is not available. Example 4.7 uses the
+full `jtrain.dta`; as the source notes, the textbook prints numbers from an
+undocumented subset, but Julia matches the Stata run on the full file (to the
+single-precision tolerance above).

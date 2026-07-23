@@ -1,0 +1,487 @@
+---
+title: "Wooldridge Introductory Econometrics -- Ch. 7: Multiple regression with qualitative information (via StatEcon)"
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    code-fold: true
+    code-tools: true
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+**Source.** Stata examples reproduced from Wooldridge, *Introductory Econometrics: A Modern Approach* (Cengage). Data are the book's companion files.
+
+# Julia setup
+
+```{julia}
+using StatEcon
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+
+const OUT = "output"
+isdir(OUT) || mkpath(OUT)
+outpath(f) = joinpath(OUT, f)
+```
+
+Helpers: `bget` pulls a coefficient by name; `lincom` reproduces Stata's
+`lincom` — a linear combination of coefficients (`"(Intercept)"` is `_cons`),
+reporting the point estimate, its SE, *t*, *p* and 95% CI from the model's vcov.
+
+```{julia}
+cn(m)      = string.(StatsBase.coefnames(m))
+bvec(m)    = StatsBase.coef(m)
+Vmat(m)    = StatsBase.vcov(m)
+bget(m, s) = bvec(m)[findfirst(==(s), cn(m))]
+
+# lincom(m, ["v1"=>w1, "v2"=>w2, ...]; c = constant)
+function lincom(m, terms; c = 0.0)
+    names = cn(m); b = bvec(m); V = Vmat(m)
+    w = zeros(length(b))
+    for (nm, wt) in terms
+        i = findfirst(==(nm), names)
+        i === nothing && error("no coefficient named $nm")
+        w[i] += wt
+    end
+    est = LinearAlgebra.dot(w, b) + c
+    se  = sqrt(LinearAlgebra.dot(w, V * w))
+    df  = StatsBase.dof_residual(m)
+    t   = est / se
+    p   = 2 * (1 - Distributions.cdf(Distributions.TDist(df), abs(t)))
+    tc  = Distributions.quantile(Distributions.TDist(df), 0.975)
+    Printf.@printf("  estimate = %.7g   se = %.7g\n  t = %.2f   p = %.3f   95%% CI = [%.7g, %.7g]\n",
+                   est, se, t, p, est - tc * se, est + tc * se)
+    return (est = est, se = se, t = t, p = p)
+end
+```
+
+## Example 7.1: Hourly Wage Equation
+
+```{julia}
+#=
+use "data/wage1.dta", clear
+reg wage female educ exper tenure
+
+      Source |       SS           df       MS      Number of obs   =       526
+-------------+----------------------------------   F(4, 521)       =     74.40
+       Model |  2603.10658         4  650.776644   Prob > F        =    0.0000
+    Residual |  4557.30771       521   8.7472317   R-squared       =    0.3635
+-------------+----------------------------------   Adj R-squared   =    0.3587
+       Total |  7160.41429       525  13.6388844   Root MSE        =    2.9576
+
+------------------------------------------------------------------------------
+        wage | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+      female |  -1.810852   .2648252    -6.84   0.000    -2.331109   -1.290596
+        educ |   .5715048   .0493373    11.58   0.000     .4745802    .6684293
+       exper |   .0253959   .0115694     2.20   0.029     .0026674    .0481243
+      tenure |   .1410051   .0211617     6.66   0.000     .0994323    .1825778
+       _cons |  -1.567939   .7245511    -2.16   0.031    -2.991339    -.144538
+------------------------------------------------------------------------------
+=#
+wage1 = DataFrames.DataFrame(dataset("wage1"))
+m71a = stata_regress(wage1; y = :wage, x = [:female, :educ, :exper, :tenure])
+```
+
+```{julia}
+#=
+reg wage female
+      female |   -2.51183   .3034092    -8.28   0.000    -3.107878   -1.915782
+       _cons |   7.099489   .2100082    33.81   0.000     6.686928     7.51205
+=#
+m71b = stata_regress(wage1; y = :wage, x = [:female])
+```
+
+```{julia}
+#=
+Average wage for women
+lincom female+_cons
+         (1) |   4.587659   .2189834    20.95   0.000     4.157466    5.017852
+=#
+lincom(m71b, ["female" => 1.0, "(Intercept)" => 1.0]);
+```
+
+Both regressions match Stata exactly (`female = -1.810852`, `educ = .5715048`,
+`R² = 0.3635`; and the simple `female = -2.51183`, `_cons = 7.099489`). The
+`lincom female+_cons` gives the average female wage `4.587659 (.2189834)`,
+reproducing the published value.
+
+## Example 7.2: Effects of Computer Ownership on College GPA
+
+```{julia}
+#=
+use "data/gpa1.dta", clear
+reg colGPA PC hsGPA ACT
+          PC |   .1573092   .0572875     2.75   0.007     .0440271    .2705913
+       hsGPA |   .4472417   .0936475     4.78   0.000     .2620603     .632423
+         ACT |    .008659   .0105342     0.82   0.413    -.0121717    .0294897
+       _cons |    1.26352   .3331255     3.79   0.000     .6047871    1.922253
+   R-squared = 0.2194   F(3, 137) = 12.83
+=#
+gpa1 = DataFrames.DataFrame(dataset("gpa1"))
+m72a = stata_regress(gpa1; y = :colGPA, x = [:PC, :hsGPA, :ACT])
+```
+
+```{julia}
+#=
+reg colGPA PC
+          PC |   .1695168   .0626805     2.70   0.008     .0455864    .2934472
+       _cons |   2.989412   .0395018    75.68   0.000      2.91131    3.067514
+   R-squared = 0.0500
+=#
+m72b = stata_regress(gpa1; y = :colGPA, x = [:PC])
+```
+
+Both reproduce Stata exactly (`PC = .1573092` controlling for `hsGPA`/`ACT`,
+`R² = 0.2194`; simple `PC = .1695168`, `R² = 0.0500`).
+
+## Example 7.3: Effects of Training Grants on Hours of Training in 1988
+
+```{julia}
+#=
+use "data/jtrain.dta", clear
+reg hrsemp grant lsales lemploy if year==1988
+       grant |    26.2545   5.591765     4.70   0.000     15.16194    37.34705
+      lsales |  -.9845809   3.539903    -0.28   0.781    -8.006797    6.037635
+     lemploy |  -6.069871   3.882893    -1.56   0.121    -13.77249    1.632744
+       _cons |   46.66508    43.4121     1.07   0.285    -39.45284     132.783
+   N = 105   R-squared = 0.2368   F(3, 101) = 10.44
+=#
+jtrain = DataFrames.DataFrame(dataset("jtrain"))
+jtrain88 = jtrain[coalesce.(jtrain.year .== 1988, false), :]
+m73 = stata_regress(jtrain88; y = :hrsemp, x = [:grant, :lsales, :lemploy])
+```
+
+Restricting to 1988 (105 observations), the fit reproduces Stata to the printed
+digits (`grant = 26.2545`, `lemploy = -6.069871`, `R² = 0.2368`,
+`F(3,101) = 10.44`).
+
+## Example 7.4: Housing Price Regression
+
+```{julia}
+#=
+use "data/hprice1.dta", clear
+reg lprice llotsize lsqrft bdrms colonial
+    llotsize |   .1678189   .0381807     4.40   0.000     .0918791    .2437587
+      lsqrft |   .7071931    .092802     7.62   0.000     .5226138    .8917725
+       bdrms |   .0268305   .0287236     0.93   0.353    -.0302995    .0839605
+    colonial |   .0537962   .0447732     1.20   0.233     -.035256    .1428483
+       _cons |  -1.349589    .651041    -2.07   0.041    -2.644483   -.0546947
+   N = 88   R-squared = 0.6491   F(4, 83) = 38.38
+=#
+hprice1 = DataFrames.DataFrame(dataset("hprice1"))
+m74 = stata_regress(hprice1; y = :lprice,
+                     x = [:llotsize, :lsqrft, :bdrms, :colonial])
+```
+
+The log-price hedonic equation reproduces Stata exactly (`llotsize = .1678189`,
+`lsqrft = .7071931`, `colonial = .0537962`, `R² = 0.6491`).
+
+## Example 7.5: Log Hourly Wage Equation
+
+```{julia}
+#=
+use "data/wage1.dta", clear
+reg lwage female educ exper expersq tenure tenursq
+      female |   -.296511   .0358055    -8.28   0.000    -.3668524   -.2261696
+        educ |   .0801967   .0067573    11.87   0.000     .0669217    .0934716
+       exper |   .0294324   .0049752     5.92   0.000     .0196585    .0392063
+     expersq |  -.0005827   .0001073    -5.43   0.000    -.0007935   -.0003719
+      tenure |   .0317139   .0068452     4.63   0.000     .0182663    .0451616
+     tenursq |  -.0005852   .0002347    -2.49   0.013    -.0010463   -.0001241
+       _cons |    .416691   .0989279     4.21   0.000     .2223425    .6110394
+   R-squared = 0.4408
+=#
+m75 = stata_regress(wage1; y = :lwage,
+                     x = [:female, :educ, :exper, :expersq, :tenure, :tenursq])
+```
+
+```{julia}
+#=
+Difference between a woman's and a man's wage
+di exp(_b[female]*1)-1
+-.25659255
+=#
+Printf.@printf("exp(b_female)-1 = %.8g\n", exp(bget(m75, "female")) - 1)
+```
+
+The log-wage equation matches Stata (`female = -.296511`, `R² = 0.4408`), and
+the exact proportional gender gap `exp(-.296511)-1 = -.25659255` reproduces the
+published number.
+
+## Example 7.6: Log Hourly Wage Equation (marital-status interactions)
+
+```{julia}
+#=
+gen marrmale = (married & ~female)
+gen marrfem  = (married & female)
+gen singfem  = (female & ~married)
+gen singmale = (~female & ~married)
+reg lwage marrmale marrfem singfem educ exper expersq tenure tenursq
+    marrmale |   .2126757   .0553572     3.84   0.000      .103923    .3214284
+     marrfem |  -.1982676   .0578355    -3.43   0.001     -.311889   -.0846462
+     singfem |  -.1103502   .0557421    -1.98   0.048     -.219859   -.0008414
+        educ |   .0789103   .0066945    11.79   0.000     .0657585     .092062
+       exper |   .0268006   .0052428     5.11   0.000     .0165007    .0371005
+     expersq |  -.0005352   .0001104    -4.85   0.000    -.0007522   -.0003183
+      tenure |   .0290875    .006762     4.30   0.000     .0158031    .0423719
+     tenursq |  -.0005331   .0002312    -2.31   0.022    -.0009874   -.0000789
+       _cons |   .3213781    .100009     3.21   0.001     .1249041    .5178521
+   R-squared = 0.4609
+=#
+wage1.marrmale = Float64.((wage1.married .== 1) .& (wage1.female .== 0))
+wage1.marrfem  = Float64.((wage1.married .== 1) .& (wage1.female .== 1))
+wage1.singfem  = Float64.((wage1.female  .== 1) .& (wage1.married .== 0))
+wage1.singmale = Float64.((wage1.female  .== 0) .& (wage1.married .== 0))
+m76a = stata_regress(wage1; y = :lwage,
+        x = [:marrmale, :marrfem, :singfem, :educ, :exper, :expersq, :tenure, :tenursq])
+```
+
+```{julia}
+#=
+Difference in lwage between married and single women
+lincom singfem-marrfem
+         (1) |   .0879174   .0523481     1.68   0.094    -.0149238    .1907586
+=#
+lincom(m76a, ["singfem" => 1.0, "marrfem" => -1.0]);
+```
+
+```{julia}
+#=
+reg lwage marrmale singmale singfem educ exper expersq tenure tenursq
+    marrmale |   .4109433   .0457709     8.98   0.000     .3210234    .5008631
+    singmale |   .1982676   .0578355     3.43   0.001     .0846462     .311889
+     singfem |   .0879174   .0523481     1.68   0.094    -.0149238    .1907586
+=#
+m76b = stata_regress(wage1; y = :lwage,
+        x = [:marrmale, :singmale, :singfem, :educ, :exper, :expersq, :tenure, :tenursq])
+```
+
+The four-group specification matches Stata exactly (`marrmale = .2126757`,
+`marrfem = -.1982676`, `R² = 0.4609`). The `lincom singfem-marrfem` gives
+`.0879174 (.0523481)`, which is precisely the `singfem` coefficient when
+`marrfem` is the omitted base group (second regression) — both reproduce Stata.
+
+## Example 7.7: Effects of Physical Attractiveness on Wage
+
+The `beauty` dataset is not distributed with the book's Stata companion files,
+so this example cannot be reproduced. (Stata source: *"Dataset is not
+available."*)
+
+## Example 7.8: Effects of Law School Rankings on Starting Salaries
+
+```{julia}
+#=
+use "data/lawsch85.dta", clear
+gen r61_100 = (rank>60 & rank<101)
+reg lsalary top10 r11_25 r26_40 r41_60 r61_100 LSAT GPA llibvol lcost
+       top10 |   .6995659    .053492    13.08   0.000     .5937069    .8054249
+      r11_25 |   .5935433     .03944    15.05   0.000     .5154926     .671594
+      r26_40 |   .3750763   .0340812    11.01   0.000     .3076305     .442522
+      r41_60 |    .262819   .0279621     9.40   0.000     .2074829    .3181551
+     r61_100 |   .1315949   .0210419     6.25   0.000     .0899537    .1732361
+        LSAT |   .0056909    .003063     1.86   0.066    -.0003707    .0117525
+         GPA |   .0137257   .0741919     0.19   0.854    -.1330979    .1605494
+     llibvol |   .0363619   .0260165     1.40   0.165     -.015124    .0878478
+       lcost |   .0008411    .025136     0.03   0.973    -.0489024    .0505846
+       _cons |   9.165294   .4114243    22.28   0.000     8.351098    9.979491
+   N = 136   R-squared = 0.9109   F(9, 126) = 143.20
+=#
+lawsch85 = DataFrames.DataFrame(dataset("lawsch85"))
+lawsch85.r61_100 = Float64.(coalesce.((lawsch85.rank .> 60) .& (lawsch85.rank .< 101), false))
+m78a = stata_regress(lawsch85; y = :lsalary,
+        x = [:top10, :r11_25, :r26_40, :r41_60, :r61_100, :LSAT, :GPA, :llibvol, :lcost])
+```
+
+```{julia}
+#=
+Difference in starting wage between a top 10 and a below 100 school
+di exp(_b[top10]*1)-1
+1.0128787
+=#
+Printf.@printf("exp(b_top10)-1 = %.8g\n", exp(bget(m78a, "top10")) - 1)
+```
+
+```{julia}
+#=
+reg lsalary rank LSAT GPA llibvol lcost
+        rank |  -.0033246   .0003485    -9.54   0.000     -.004014   -.0026352
+        LSAT |   .0046965   .0040105     1.17   0.244    -.0032378    .0126308
+         GPA |   .2475239    .090037     2.75   0.007     .0693964    .4256514
+     llibvol |   .0949932   .0332543     2.86   0.005     .0292035     .160783
+       lcost |   .0375538   .0321061     1.17   0.244    -.0259642    .1010718
+       _cons |   8.343226   .5325192    15.67   0.000       7.2897    9.396752
+   R-squared = 0.8417
+=#
+m78b = stata_regress(lawsch85; y = :lsalary,
+                     x = [:rank, :LSAT, :GPA, :llibvol, :lcost])
+```
+
+The rank-category regression matches Stata exactly (`top10 = .6995659`,
+`r61_100 = .1315949`, `R² = 0.9109`), the top-10 premium
+`exp(.6995659)-1 = 1.0128787`, and the continuous-rank alternative
+(`rank = -.0033246`, `R² = 0.8417`) all reproduce the published tables.
+
+## Example 7.9: Effects of Computer Usage on Wages
+
+The relevant dataset is not distributed with the book's Stata companion files,
+so this example cannot be reproduced. (Stata source: *"Dataset is not
+available."*)
+
+## Example 7.10: Log Hourly Wage Equation (female-education interaction)
+
+```{julia}
+#=
+gen femed = female*educ
+reg lwage female educ femed exper expersq tenure tenursq
+      female |  -.2267886   .1675394    -1.35   0.176    -.5559289    .1023517
+        educ |   .0823692   .0084699     9.72   0.000     .0657296    .0990088
+       femed |  -.0055645   .0130618    -0.43   0.670    -.0312252    .0200962
+       exper |   .0293366   .0049842     5.89   0.000      .019545    .0391283
+     expersq |  -.0005804   .0001075    -5.40   0.000    -.0007916   -.0003691
+      tenure |   .0318967    .006864     4.65   0.000      .018412    .0453814
+     tenursq |    -.00059   .0002352    -2.51   0.012     -.001052    -.000128
+       _cons |    .388806   .1186871     3.28   0.001     .1556388    .6219732
+   R-squared = 0.4410
+=#
+wage1.femed = wage1.female .* wage1.educ
+m710a = stata_regress(wage1; y = :lwage,
+        x = [:female, :educ, :femed, :exper, :expersq, :tenure, :tenursq])
+```
+
+```{julia}
+#=
+reg lwage female educ exper expersq tenure tenursq
+      female |   -.296511   .0358055    -8.28   0.000    -.3668524   -.2261696
+   R-squared = 0.4408
+=#
+m710b = stata_regress(wage1; y = :lwage,
+        x = [:female, :educ, :exper, :expersq, :tenure, :tenursq])
+```
+
+The interaction model matches Stata exactly (`female = -.2267886`,
+`femed = -.0055645`, `R² = 0.4410`); the interaction is insignificant, so the
+restricted model (identical to Example 7.5) is preferred. Both reproduce the
+published numbers.
+
+## Example 7.11: Effects of Race on Baseball Player Salaries
+
+```{julia}
+#=
+use "data/mlb1.dta", clear
+reg lsalary years gamesyr bavg hrunsyr rbisyr runsyr fldperc allstar black hispan blckpb hispph
+       years |   .0673458   .0128915     5.22   0.000     .0419822    .0927094
+     gamesyr |   .0088778   .0033837     2.62   0.009     .0022205    .0155352
+        bavg |   .0009451   .0015133     0.62   0.533    -.0020322    .0039225
+     hrunsyr |   .0146206   .0164522     0.89   0.375    -.0177488      .04699
+      rbisyr |   .0044938    .007575     0.59   0.553    -.0104098    .0193974
+      runsyr |   .0072029   .0045671     1.58   0.116    -.0017827    .0161885
+     fldperc |   .0010865   .0021195     0.51   0.609    -.0030835    .0052566
+     allstar |   .0075307   .0028735     2.62   0.009     .0018771    .0131842
+       black |   -.198008   .1254968    -1.58   0.116    -.4449199    .0489038
+      hispan |  -.1900089   .1530902    -1.24   0.215    -.4912101    .1111923
+      blckpb |   .0124513   .0049628     2.51   0.013     .0026872    .0222154
+      hispph |   .0200863   .0097933     2.05   0.041     .0008182    .0393543
+       _cons |   10.34368   2.182538     4.74   0.000     6.049594    14.63777
+   N = 330   R-squared = 0.6376   F(12, 317) = 46.48
+=#
+mlb1 = DataFrames.DataFrame(dataset("mlb1"))
+m711 = stata_regress(mlb1; y = :lsalary,
+        x = [:years, :gamesyr, :bavg, :hrunsyr, :rbisyr, :runsyr, :fldperc,
+             :allstar, :black, :hispan, :blckpb, :hispph])
+```
+
+```{julia}
+#=
+Diff black vs white in cities with 10% blacks
+lincom _b[black]+_b[blckpb]*10  ->  -.0734953   .0997916  -0.74  0.462
+Diff black vs white in cities with 20% blacks
+lincom _b[black]+_b[blckpb]*20  ->   .0510174   .0953577   0.54  0.593
+=#
+println("10% black cities:"); lincom(m711, ["black" => 1.0, "blckpb" => 10.0])
+println("20% black cities:"); lincom(m711, ["black" => 1.0, "blckpb" => 20.0]);
+```
+
+```{julia}
+#=
+City % hispanic at which hispanic and white wages are equal
+di _b[hispan]*-1/_b[hispph]
+9.4596496
+=#
+Printf.@printf("break-even hispanic pct = %.8g\n",
+               -bget(m711, "hispan") / bget(m711, "hispph"))
+```
+
+The full salary equation reproduces Stata exactly (`years = .0673458`,
+`black = -.198008`, `blckpb = .0124513`, `R² = 0.6376`). The two `lincom`
+combinations (`-.0734953` at 10%, `.0510174` at 20%) and the break-even
+Hispanic percentage `9.4596496` all reproduce the published values.
+
+## Example 7.12: A Linear Probability Model of Arrests
+
+```{julia}
+#=
+use "data/crime1.dta", clear
+gen arr86=(~narr86)
+reg arr86 pcnv avgsen tottime ptime86 qemp86
+        pcnv |   .1624448   .0212368     7.65   0.000      .120803    .2040866
+      avgsen |  -.0061127    .006452    -0.95   0.344     -.018764    .0065385
+     tottime |   .0022616   .0049781     0.45   0.650    -.0074997    .0120229
+     ptime86 |   .0219664   .0046349     4.74   0.000     .0128781    .0310547
+      qemp86 |   .0428294   .0054046     7.92   0.000     .0322319    .0534268
+       _cons |   .5593846   .0172329    32.46   0.000     .5255937    .5931754
+   N = 2725   R-squared = 0.0474   F(5, 2719) = 27.03
+=#
+crime1 = DataFrames.DataFrame(dataset("crime1"))
+crime1.arr86 = Float64.(crime1.narr86 .== 0)   # arrested at least once in 1986
+m712a = stata_regress(crime1; y = :arr86,
+        x = [:pcnv, :avgsen, :tottime, :ptime86, :qemp86])
+```
+
+```{julia}
+#=
+Change in P(arrest) if pcnv increases by .5
+lincom _b[pcnv]*.5     ->  .0812224   .0106184   7.65
+Change in P(arrest) if ptime86 increases by 6
+lincom _b[ptime86]*6   ->  .1317984   .0278095   4.74
+Change in P(arrest) if ptime86 decreases by 12
+lincom _b[_cons]- _b[ptime86]*12  ->  .2957878   .061983   4.77
+Change in P(arrest) if qemp86 increases by 4
+lincom _b[qemp86]*4    ->  .1713175   .0216182   7.92
+=#
+println("pcnv +.5:");        lincom(m712a, ["pcnv" => 0.5])
+println("ptime86 +6:");      lincom(m712a, ["ptime86" => 6.0])
+println("_cons - ptime86*12:"); lincom(m712a, ["(Intercept)" => 1.0, "ptime86" => -12.0])
+println("qemp86 +4:");       lincom(m712a, ["qemp86" => 4.0]);
+```
+
+```{julia}
+#=
+reg arr86 pcnv avgsen tottime ptime86 qemp86 black hispan
+        pcnv |    .152062   .0210655     7.22   0.000     .1107561     .193368
+      avgsen |  -.0046191   .0063888    -0.72   0.470    -.0171465    .0079083
+     tottime |   .0025619   .0049259     0.52   0.603    -.0070969    .0122207
+     ptime86 |   .0236954   .0045948     5.16   0.000     .0146858     .032705
+      qemp86 |   .0384737   .0054016     7.12   0.000     .0278821    .0490653
+       black |  -.1697631   .0236738    -7.17   0.000    -.2161836   -.1233426
+      hispan |  -.0961866   .0207105    -4.64   0.000    -.1367965   -.0555766
+       _cons |   .6195717   .0187272    33.08   0.000     .5828507    .6562927
+   R-squared = 0.0682
+=#
+m712b = stata_regress(crime1; y = :arr86,
+        x = [:pcnv, :avgsen, :tottime, :ptime86, :qemp86, :black, :hispan])
+```
+
+The linear probability model reproduces Stata exactly (`pcnv = .1624448`,
+`qemp86 = .0428294`, `R² = 0.0474`). All four `lincom` effects match the
+published numbers (`.0812224`, `.1317984`, `.2957878`, `.1713175`), as does the
+race-augmented model (`black = -.1697631`, `hispan = -.0961866`, `R² = 0.0682`).

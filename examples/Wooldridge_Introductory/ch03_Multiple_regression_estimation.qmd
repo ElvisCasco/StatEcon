@@ -1,0 +1,341 @@
+---
+title: "Wooldridge Introductory Econometrics -- Ch. 3: Multiple regression analysis: estimation (via StatEcon)"
+Authors:
+- Jeffrey M. Wooldridge
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    code-fold: true
+    code-tools: true
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+**Source.** Stata examples reproduced from Wooldridge, *Introductory Econometrics: A Modern Approach* (Cengage). Data are the book's companion files.
+
+# Julia setup
+
+```{julia}
+using StatEcon
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+
+const OUT = "output"
+isdir(OUT) || mkpath(OUT)
+outpath(f) = joinpath(OUT, f)
+```
+
+Helper: look up an estimated coefficient by name, the Julia analogue of Stata's
+`_b[varname]` (the intercept is `"(Intercept)"`).
+
+```{julia}
+bcoef(m, nm) = FixedEffectModels.coef(m)[findfirst(==(nm), FixedEffectModels.coefnames(m))]
+```
+
+# 3 Multiple Regression Analysis: Estimation
+
+## Example 3.1: Determinants of College GPA
+
+```{julia}
+#=
+use "data/gpa1.dta", clear
+summ ACT
+
+    Variable |        Obs        Mean    Std. dev.       Min        Max
+-------------+---------------------------------------------------------
+         ACT |        141    24.15603    2.844252         16         33
+=#
+gpa1 = DataFrames.DataFrame(dataset("gpa1"))
+stata_summarize(gpa1, [:ACT])
+```
+
+```{julia}
+#=
+reg colGPA hsGPA ACT
+
+      Source |       SS           df       MS      Number of obs   =       141
+-------------+----------------------------------   F(2, 138)       =     14.78
+       Model |  3.42365506         2  1.71182753   Prob > F        =    0.0000
+    Residual |  15.9824444       138  .115814814   R-squared       =    0.1764
+-------------+----------------------------------   Adj R-squared   =    0.1645
+       Total |  19.4060994       140  .138614996   Root MSE        =    .34032
+
+------------------------------------------------------------------------------
+      colGPA | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+       hsGPA |   .4534559   .0958129     4.73   0.000     .2640047    .6429071
+         ACT |    .009426   .0107772     0.87   0.383    -.0118838    .0307358
+       _cons |   1.286328   .3408221     3.77   0.000      .612419    1.960237
+------------------------------------------------------------------------------
+=#
+m31 = stata_regress(gpa1; y = :colGPA, x = [:hsGPA, :ACT])
+```
+
+```{julia}
+#=
+reg colGPA ACT
+
+      Source |       SS           df       MS      Number of obs   =       141
+-------------+----------------------------------   F(1, 139)       =      6.21
+       Model |  .829558811         1  .829558811   Prob > F        =    0.0139
+    Residual |  18.5765406       139  .133644177   R-squared       =    0.0427
+-------------+----------------------------------   Adj R-squared   =    0.0359
+       Total |  19.4060994       140  .138614996   Root MSE        =    .36557
+
+------------------------------------------------------------------------------
+      colGPA | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+         ACT |    .027064   .0108628     2.49   0.014     .0055862    .0485417
+       _cons |   2.402979   .2642027     9.10   0.000     1.880604    2.925355
+------------------------------------------------------------------------------
+=#
+m31b = stata_regress(gpa1; y = :colGPA, x = [:ACT])
+```
+
+Controlling for `hsGPA`, the partial effect of `ACT` is `.009426` and
+insignificant; dropping `hsGPA` inflates it to `.027064`. Both fits match the
+published tables exactly (`R² = 0.1764` and `0.0427`).
+
+## Example 3.2: Hourly Wage Equation
+
+```{julia}
+#=
+use "data/wage1.dta", clear
+reg lwage educ exper tenure
+
+      Source |       SS           df       MS      Number of obs   =       526
+-------------+----------------------------------   F(3, 522)       =     80.39
+       Model |  46.8741776         3  15.6247259   Prob > F        =    0.0000
+    Residual |  101.455574       522  .194359337   R-squared       =    0.3160
+-------------+----------------------------------   Adj R-squared   =    0.3121
+       Total |  148.329751       525   .28253286   Root MSE        =    .44086
+
+------------------------------------------------------------------------------
+       lwage | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        educ |    .092029   .0073299    12.56   0.000     .0776292    .1064288
+       exper |   .0041211   .0017233     2.39   0.017     .0007357    .0075065
+      tenure |   .0220672   .0030936     7.13   0.000     .0159897    .0281448
+       _cons |   .2843595   .1041904     2.73   0.007     .0796756    .4890435
+------------------------------------------------------------------------------
+=#
+wage1 = DataFrames.DataFrame(dataset("wage1"))
+m32 = stata_regress(wage1; y = :lwage, x = [:educ, :exper, :tenure])
+```
+
+`educ = .092029 (.0073299)`, `exper = .0041211`, `tenure = .0220672`,
+`R² = 0.3160` — an exact match.
+
+## Example 3.3: Participation in 401(K) Pension Plan
+
+```{julia}
+#=
+use "data/401k.dta", clear
+summ prate mrate age
+
+    Variable |        Obs        Mean    Std. dev.       Min        Max
+-------------+---------------------------------------------------------
+       prate |      1,534    87.36291    16.71654          3        100
+       mrate |      1,534    .7315124    .7795393        .01       4.91
+         age |      1,534    13.18123    9.171114          4         51
+=#
+k401 = DataFrames.DataFrame(dataset("401k"))
+stata_summarize(k401, [:prate, :mrate, :age])
+```
+
+```{julia}
+#=
+reg prate mrate age
+
+      Source |       SS           df       MS      Number of obs   =     1,534
+-------------+----------------------------------   F(2, 1531)      =     77.79
+       Model |  39517.1118         2  19758.5559   Prob > F        =    0.0000
+    Residual |  388868.428     1,531   253.99636   R-squared       =    0.0922
+-------------+----------------------------------   Adj R-squared   =    0.0911
+       Total |  428385.539     1,533  279.442622   Root MSE        =    15.937
+
+------------------------------------------------------------------------------
+       prate | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+       mrate |   5.521289   .5258844    10.50   0.000     4.489759    6.552819
+         age |   .2431466   .0446999     5.44   0.000     .1554671     .330826
+       _cons |   80.11905   .7790208   102.85   0.000     78.59099    81.64711
+------------------------------------------------------------------------------
+=#
+m33 = stata_regress(k401; y = :prate, x = [:mrate, :age])
+```
+
+```{julia}
+#=
+reg prate mrate
+
+      Source |       SS           df       MS      Number of obs   =     1,534
+-------------+----------------------------------   F(1, 1532)      =    123.68
+       Model |  32001.7271         1  32001.7271   Prob > F        =    0.0000
+    Residual |  396383.812     1,532   258.73617   R-squared       =    0.0747
+-------------+----------------------------------   Adj R-squared   =    0.0741
+       Total |  428385.539     1,533  279.442622   Root MSE        =    16.085
+
+------------------------------------------------------------------------------
+       prate | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+       mrate |   5.861079   .5270107    11.12   0.000      4.82734    6.894818
+       _cons |   83.07546   .5632844   147.48   0.000     81.97057    84.18035
+------------------------------------------------------------------------------
+=#
+m33b = stata_regress(k401; y = :prate, x = [:mrate])
+```
+
+With `age` controlled, `mrate = 5.521289`; omitting `age` raises it slightly to
+`5.861079`. Both regressions (N = 1,534) match the published output exactly.
+
+## Example 3.4: Determinants of College GPA
+
+```{julia}
+#=
+use "data/gpa1.dta", clear
+reg colGPA hsGPA ACT   (identical table to Example 3.1)
+=#
+m34 = stata_regress(gpa1; y = :colGPA, x = [:hsGPA, :ACT])
+```
+
+The same two-regressor GPA equation as Example 3.1, here used to discuss the
+interpretation of `R² = 0.1764`. Exact match.
+
+## Example 3.5: Explaining Arrest Records
+
+```{julia}
+#=
+use "data/crime1.dta", clear
+sum narr86 pcnv avgsen ptime86 qemp86
+
+    Variable |        Obs        Mean    Std. dev.       Min        Max
+-------------+---------------------------------------------------------
+      narr86 |      2,725    .4044037    .8590768          0         12
+        pcnv |      2,725    .3577872     .395192          0          1
+      avgsen |      2,725    .6322936    3.508031          0       59.2
+     ptime86 |      2,725     .387156    1.950051          0         12
+      qemp86 |      2,725    2.309028    1.610428          0          4
+=#
+crime1 = DataFrames.DataFrame(dataset("crime1"))
+stata_summarize(crime1, [:narr86, :pcnv, :avgsen, :ptime86, :qemp86])
+```
+
+```{julia}
+#=
+reg narr86 pcnv ptime86 qemp86
+
+      Source |       SS           df       MS      Number of obs   =     2,725
+-------------+----------------------------------   F(3, 2721)      =     39.10
+       Model |  83.0741941         3   27.691398   Prob > F        =    0.0000
+    Residual |  1927.27296     2,721  .708295833   R-squared       =    0.0413
+-------------+----------------------------------   Adj R-squared   =    0.0403
+       Total |  2010.34716     2,724  .738012906   Root MSE        =     .8416
+
+------------------------------------------------------------------------------
+      narr86 | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        pcnv |  -.1499274   .0408653    -3.67   0.000    -.2300576   -.0697973
+     ptime86 |  -.0344199    .008591    -4.01   0.000    -.0512655   -.0175744
+      qemp86 |   -.104113   .0103877   -10.02   0.000    -.1244816   -.0837445
+       _cons |   .7117715   .0330066    21.56   0.000      .647051     .776492
+------------------------------------------------------------------------------
+=#
+m35 = stata_regress(crime1; y = :narr86, x = [:pcnv, :ptime86, :qemp86])
+```
+
+```{julia}
+#=
+display _b[pcnv]*.5      -> -.07496372   (convictions +.5, one man)
+display _b[ptime86]*12   -> -.41303901   (prison time, one man)
+display _b[qemp86]*100   -> -10.411303   (legal employment, 100 men)
+=#
+Printf.@printf("_b[pcnv]*.5   = %.8f\n", bcoef(m35, "pcnv") * 0.5)
+Printf.@printf("_b[ptime86]*12 = %.8f\n", bcoef(m35, "ptime86") * 12)
+Printf.@printf("_b[qemp86]*100 = %.6f\n", bcoef(m35, "qemp86") * 100)
+```
+
+```{julia}
+#=
+reg narr86 pcnv avgsen ptime86 qemp86
+
+      Source |       SS           df       MS      Number of obs   =     2,725
+-------------+----------------------------------   F(4, 2720)      =     29.96
+       Model |  84.8242895         4  21.2060724   Prob > F        =    0.0000
+    Residual |  1925.52287     2,720  .707912819   R-squared       =    0.0422
+-------------+----------------------------------   Adj R-squared   =    0.0408
+       Total |  2010.34716     2,724  .738012906   Root MSE        =    .84138
+
+------------------------------------------------------------------------------
+      narr86 | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        pcnv |  -.1508319   .0408583    -3.69   0.000    -.2309484   -.0707154
+      avgsen |   .0074431   .0047338     1.57   0.116    -.0018392    .0167254
+     ptime86 |  -.0373908   .0087941    -4.25   0.000    -.0546345   -.0201471
+      qemp86 |   -.103341   .0103965    -9.94   0.000    -.1237268   -.0829552
+       _cons |   .7067565   .0331515    21.32   0.000     .6417519     .771761
+------------------------------------------------------------------------------
+=#
+m35b = stata_regress(crime1; y = :narr86, x = [:pcnv, :avgsen, :ptime86, :qemp86])
+```
+
+Both arrest-record regressions match exactly (N = 2,725). The predicted-change
+displays reproduce Stata: `-.07496372`, `-.41303901`, `-10.411303`. Adding
+`avgsen` leaves the other coefficients essentially unchanged and `avgsen` itself
+is insignificant (`.0074431`, t = 1.57).
+
+## Example 3.6: Hourly Wage Equation
+
+```{julia}
+#=
+use "data/wage1.dta", clear
+reg lwage educ
+
+      Source |       SS           df       MS      Number of obs   =       526
+-------------+----------------------------------   F(1, 524)       =    119.58
+       Model |  27.5606288         1  27.5606288   Prob > F        =    0.0000
+    Residual |  120.769123       524  .230475425   R-squared       =    0.1858
+-------------+----------------------------------   Adj R-squared   =    0.1843
+       Total |  148.329751       525   .28253286   Root MSE        =    .48008
+
+------------------------------------------------------------------------------
+       lwage | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+        educ |   .0827444   .0075667    10.94   0.000     .0678796    .0976091
+       _cons |   .5837727   .0973358     6.00   0.000     .3925563    .7749891
+------------------------------------------------------------------------------
+=#
+m36 = stata_regress(wage1; y = :lwage, x = [:educ])
+```
+
+The simple log-wage-on-education regression (`educ = .0827444`), used here to
+contrast with the multiple regression in Example 3.2. Exact match.
+
+# Verification summary
+
+| Example | Quantity | Stata | Julia | Match |
+|---|---|---|---|---|
+| 3.1 | `hsGPA`,`ACT` coef | .4534559 / .009426 | .4534559 / .009426 | yes |
+| 3.1 | R² (both fits) | 0.1764 / 0.0427 | 0.1764 / 0.0427 | yes |
+| 3.2 | `educ`/`exper`/`tenure` | .092029 / .0041211 / .0220672 | same | yes |
+| 3.2 | R² / F | 0.3160 / 80.39 | 0.3160 / 80.39 | yes |
+| 3.3 | `mrate`,`age` | 5.521289 / .2431466 | same | yes |
+| 3.3 | `mrate` (no age) | 5.861079 | 5.861079 | yes |
+| 3.4 | `hsGPA` / R² | .4534559 / 0.1764 | same | yes |
+| 3.5 | `pcnv`,`ptime86`,`qemp86` | -.1499274 / -.0344199 / -.104113 | same | yes |
+| 3.5 | `_b[qemp86]*100` | -10.411303 | -10.411303 | yes |
+| 3.5 | +`avgsen`: R² | 0.0422 | 0.0422 | yes |
+| 3.6 | `educ` / R² | .0827444 / 0.1858 | same | yes |
+
+Every regression, summary and predicted-change calculation in Chapter 3
+reproduces the published Stata output to the printed digits.
