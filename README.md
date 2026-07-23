@@ -4,10 +4,11 @@ Julia equivalents of common **Stata** commands, printing output in Stata's own f
 
 Written to make Stata-to-Julia translations readable side by side: the numbers come from
 Julia's econometrics stack (`FixedEffectModels`, `GLM`, `Optim`), but the tables look like
-Stata's. The package covers the estimators used throughout Cameron & Trivedi,
-*Microeconometrics Using Stata* — **106 commands** across linear, nonlinear,
-limited-dependent-variable, discrete-choice and panel models — and ships the book's
-datasets so every example runs out of the box.
+Stata's. **106 commands** span linear, nonlinear, limited-dependent-variable,
+discrete-choice and panel models — enough to work through Cameron & Trivedi,
+*Microeconometrics Using Stata*, and Wooldridge, *Econometric Analysis of Cross Section and
+Panel Data*. Both books' datasets (**44 files**) ship with the package, so every example
+runs out of the box.
 
 ## Installation
 
@@ -54,15 +55,19 @@ auto.uh = FixedEffectModels.residuals(m, auto)
 
 ## Data
 
-The 31 datasets used throughout the book ship with the package and are loaded **by name** —
+The datasets used by both example sets ship with the package and are loaded **by name** —
 no paths, no folder layout to remember:
 
 ```julia
-auto = dataset("auto")          # data/auto.dta            -> DataFrame
-df10 = dataset("mus10data")     # data/musr/mus10data.dta  -> DataFrame
+auto = dataset("auto")          # data/auto.dta                 -> DataFrame
+df10 = dataset("mus10data")     # data/musr/mus10data.dta       -> DataFrame
+mroz = dataset("mroz")          # data/wooldridge/mroz.dta      -> DataFrame
 
 datasets()                      # every bundled file
 ```
+
+Cameron & Trivedi's files live in `data/musr/` and `data/mus2/`, Wooldridge's in
+`data/wooldridge/`, so the two books' data stay separate; `dataset` searches all of them.
 
 The name may be a bare stem or a full file name. When a stem exists in several formats the
 `.dta` version wins, so ask for `dataset("mus14gdata.csv")` when you want the CSV. `.dta`
@@ -131,10 +136,31 @@ For the full list: `names(StatEcon)`.
 
 ## Examples
 
-`examples/Cameron_Trivedi/` reproduces **all 18 chapters** of *Microeconometrics Using
-Stata* as Quarto notebooks (`ch01 … ch18`). Each one keeps the book's original Stata
-commands in `#= ... =#` comment blocks next to the Julia that reproduces them, so the two
-can be read side by side, and calls `StatEcon` rather than defining estimators inline.
+Two sets of worked examples live under `examples/`. Both keep the original **Stata
+commands in `#= ... =#` comment blocks** next to the Julia that reproduces them, so the two
+can be read side by side, and both call `StatEcon` rather than defining estimators inline.
+
+### Cameron & Trivedi — `examples/Cameron_Trivedi/`
+
+**All 18 chapters** of *Microeconometrics Using Stata* (`ch01 … ch18`).
+
+### Wooldridge — `examples/Wooldridge_Panel/`
+
+The **13 chapters that carry Stata code** in the UCLA OARC examples for *Econometric
+Analysis of Cross Section and Panel Data* — chapters 4–7, 9–11 and 15–20 (the rest of the
+book is theory). Each notebook links the UCLA page it reproduces.
+
+Because those pages print Stata's **output tables** as well as its code, every result can
+be checked rather than assumed, and each notebook records the comparison. Most agree to the
+printed precision. Where they do not, the notebook says so and gives the arithmetic —
+`ivreg2`'s divisor-`N` variance against `ivregress`'s `N−K`, legacy `ivreg`'s *t*/*F*
+against modern *z*/χ², an auxiliary regression that is near-singular by construction, and a
+hand-rolled Weibull for ch20 because `streg` has no StatEcon equivalent.
+
+That comparison is also what surfaced several bugs now fixed in the package (a crash in
+`stata_ologit`, its log-likelihood being overwritten, and wrong degrees of freedom and
+variance scaling in `stata_xtreg_re`), which is a good argument for checking a
+reimplementation against published output rather than only against itself.
 
 The notebooks have their own environment, so rendering works out of the box:
 
@@ -156,7 +182,9 @@ Each renders to a self-contained HTML file (no side-car `_files/` directory).
 ## Source of the Stata code and data
 
 The Stata commands reproduced in the examples, and the datasets bundled under `data/`,
-come from the book and its companion material:
+come from two books and their companion material.
+
+### Cameron & Trivedi
 
 > Cameron, A. Colin, and Pravin K. Trivedi. *Microeconometrics Using Stata*.
 > College Station, TX: Stata Press.
@@ -171,6 +199,21 @@ come from the book and its companion material:
   caches it locally.
 * The Stata code shown in the `#= ... =#` blocks of each notebook is the book's, quoted
   verbatim for comparison; the Julia translation alongside it is this package's.
+
+### Wooldridge
+
+> Wooldridge, Jeffrey M. *Econometric Analysis of Cross Section and Panel Data*.
+> Cambridge, MA: MIT Press.
+
+* The Stata code and the printed output reproduced in `examples/Wooldridge_Panel/` come
+  from the **UCLA OARC** textbook-examples pages,
+  <https://stats.oarc.ucla.edu/other/examples/eacspd/>; each notebook links the specific
+  chapter page it reproduces.
+* The datasets in `data/wooldridge/` are the book's own companion files, distributed by
+  Stata at <https://www.stata.com/data/jwooldridge/eacsap/>. Note these are **not** the
+  same as the similarly named files for Wooldridge's *Introductory Econometrics*: eight of
+  the thirteen differ, and using the wrong set makes every result disagree with the
+  published output.
 
 Copyright in the book and its datasets remains with the authors and Stata Press. They are
 included here for study and reproduction of the book's results; refer to Stata Press for
