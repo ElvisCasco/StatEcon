@@ -170,4 +170,35 @@ df = DataFrame(
         @test isapprox(r.σ_u^2 / (r.σ_u^2 + r.σ_ε^2), 0.88634984; atol = 5e-8)
     end
 
+
+    @testset "stata_regress prints Stata's ANOVA block (Wooldridge Ex. 4.1)" begin
+        # Plain `regress` shows Source/SS/df/MS and Adj R-squared; vce(robust)
+        # does not. Values are Stata's published output for
+        #   reg lwage exper expersq educ age kidslt6 kidsge6   (mroz.dta)
+        mroz = dataset("mroz")
+        capture(f) = mktemp() do path, io
+            redirect_stdout(io) do; f(); end
+            flush(io); read(path, String)
+        end
+        out = capture() do
+            stata_regress(mroz; y = :lwage,
+                          x = [:exper, :expersq, :educ, :age, :kidslt6, :kidsge6])
+        end
+        for frag in ("Source |", "Model |", "Residual |", "Total |",
+                     "Adj R-squared", "35.3398089", "5.88996815",
+                     "187.987632", ".446526442", "223.327441", ".523015084",
+                     "0.1582", "0.1462", ".66823")
+            @test occursin(frag, out)
+        end
+
+        # vce(robust): Stata drops the ANOVA table and Adj R-squared
+        rout = capture() do
+            stata_regress(mroz; y = :lwage, x = [:exper, :expersq, :educ],
+                          vce = :robust)
+        end
+        @test occursin("Linear regression", rout)
+        @test !occursin("Source |", rout)
+        @test !occursin("Adj R-squared", rout)
+    end
+
 end

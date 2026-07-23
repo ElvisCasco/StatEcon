@@ -219,20 +219,51 @@ function stata_regress(m; yname::Union{Nothing,AbstractString} = nothing,
     clustered = occursin("cluster", vt)
 
     # ---- header block --------------------------------------------------
-    hdr = [("Number of obs", Printf.@sprintf("%d", N)),
-           (Printf.@sprintf("F(%d, %d)", df1, df2), Printf.@sprintf("%.2f", m.F)),
-           ("Prob > F",  Printf.@sprintf("%.4f", m.p)),
-           ("R-squared", Printf.@sprintf("%.4f", R2)),
-           ("Root MSE",  _sr_num(rmse, 5))]
-    # Stata's xtreg,fe also reports the within R-squared
-    if hasfe && hasproperty(m, :r2_within) && m.r2_within !== nothing
-        insert!(hdr, 5, ("R-sq: within", Printf.@sprintf("%.4f", m.r2_within)))
-    end
-    lw = maximum(length(h[1]) for h in hdr)
-    vw = maximum(length(h[2]) for h in hdr)
-    println(rpad(ttl, 48) * rpad(hdr[1][1], lw) * " = " * lpad(hdr[1][2], vw))
-    for k in 2:length(hdr)
-        println(" "^48 * rpad(hdr[k][1], lw) * " = " * lpad(hdr[k][2], vw))
+    # Plain `regress` prints the ANOVA table (Source / SS / df / MS) and
+    # Adj R-squared. Stata drops both under vce(robust)/vce(cluster) and uses a
+    # different layout for xtreg,fe, so those keep the compact header below.
+    if !robust && !hasfe
+        rss_  = m.rss
+        tss_  = rss_ / max(1 - R2, eps())
+        mss_  = tss_ - rss_
+        dfT   = N - 1
+        adjR2 = 1 - (1 - R2) * dfT / df2
+        rblk = [("Number of obs", Printf.@sprintf("%d", N)),
+                (Printf.@sprintf("F(%3d, %5d)", df1, df2), Printf.@sprintf("%.2f", m.F)),
+                ("Prob > F",      Printf.@sprintf("%.4f", m.p)),
+                ("R-squared",     Printf.@sprintf("%.4f", R2)),
+                ("Adj R-squared", Printf.@sprintf("%.4f", adjR2)),
+                ("Root MSE",      _sr_num(rmse, 5))]
+        lw  = maximum(length(h[1]) for h in rblk)
+        vw  = maximum(length(h[2]) for h in rblk)
+        rt(i) = rpad(rblk[i][1], lw) * " = " * lpad(rblk[i][2], vw)
+        sep = "-"^13 * "+" * "-"^30
+        Printf.@printf("%12s |%12s%6s%12s   %s\n", "Source", "SS", "df", "MS", rt(1))
+        println(sep, "   ", rt(2))
+        Printf.@printf("%12s |%12s%6d%12s   %s\n",
+                       "Model", _sr_num(mss_, 9), df1, _sr_num(mss_ / df1, 9), rt(3))
+        Printf.@printf("%12s |%12s%6d%12s   %s\n",
+                       "Residual", _sr_num(rss_, 9), df2, _sr_num(rss_ / df2, 9), rt(4))
+        println(sep, "   ", rt(5))
+        Printf.@printf("%12s |%12s%6d%12s   %s\n",
+                       "Total", _sr_num(tss_, 9), dfT, _sr_num(tss_ / dfT, 9), rt(6))
+        println()
+    else
+        hdr = [("Number of obs", Printf.@sprintf("%d", N)),
+               (Printf.@sprintf("F(%d, %d)", df1, df2), Printf.@sprintf("%.2f", m.F)),
+               ("Prob > F",  Printf.@sprintf("%.4f", m.p)),
+               ("R-squared", Printf.@sprintf("%.4f", R2)),
+               ("Root MSE",  _sr_num(rmse, 5))]
+        # Stata's xtreg,fe also reports the within R-squared
+        if hasfe && hasproperty(m, :r2_within) && m.r2_within !== nothing
+            insert!(hdr, 5, ("R-sq: within", Printf.@sprintf("%.4f", m.r2_within)))
+        end
+        lw = maximum(length(h[1]) for h in hdr)
+        vw = maximum(length(h[2]) for h in hdr)
+        println(rpad(ttl, 48) * rpad(hdr[1][1], lw) * " = " * lpad(hdr[1][2], vw))
+        for k in 2:length(hdr)
+            println(" "^48 * rpad(hdr[k][1], lw) * " = " * lpad(hdr[k][2], vw))
+        end
     end
     # Stata's clustered-SE note, e.g. (Std. err. adjusted for 545 clusters in id)
     if clustered && hasproperty(m, :nclusters) && m.nclusters !== nothing
