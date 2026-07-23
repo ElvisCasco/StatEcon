@@ -972,12 +972,9 @@ df17c.muhat = GLM.predict(pois17)
 df17c.ystar = ((df17c.docvis .- df17c.muhat).^2 .- df17c.docvis) ./
               df17c.muhat
 
-# `regress ystar muhat, noconstant noheader` — auxiliary OLS via
-# `FixedEffectModels.reg` + chunk-1 `stata_regress(model;
-# noheader = true)`.
-m_over_17 = FixedEffectModels.reg(df17c,
-                                  GLM.@formula(ystar ~ muhat + 0))
-stata_regress(m_over_17);
+# `regress ystar muhat, noconstant noheader` — auxiliary OLS through
+# `stata_regress`, with the variables named in the call.
+m_over_17 = stata_regress(df17c; y = :ystar, x = [:muhat], nocons = true);
 ```
 
 #### Coefficient interpretation and marginal effects
@@ -2131,14 +2128,12 @@ xlist17_2 = [:medicaid, :age, :age2, :educyr, :actlim, :totchr]
 df17_iv = DataFrames.dropmissing(
     df17[:, vcat([:docvis, :private, :income, :ssiratio], xlist17_2)])
 
-m_first17 = FixedEffectModels.reg(df17_iv,
-    GLM.@formula(private ~ medicaid + age + age2 + educyr + actlim +
-                            totchr + income + ssiratio),
-    FixedEffectModels.Vcov.robust())
-
-# `regress … , vce(robust)` — Stata-style table via `stata_regress`
-# (chunk 1).
-stata_regress(m_first17)
+# `regress … , vce(robust)` — first stage, with the variables named in
+# the call so the specification is visible here.
+m_first17 = stata_regress(df17_iv; y = :private,
+    x = [:medicaid, :age, :age2, :educyr, :actlim,
+         :totchr, :income, :ssiratio],
+    vce = :robust)
 
 # `predict lpuhat, residual` — first-stage residual (control function).
 df17_iv.lpuhat = df17_iv.private .-

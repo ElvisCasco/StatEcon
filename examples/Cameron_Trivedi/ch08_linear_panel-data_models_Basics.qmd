@@ -726,10 +726,8 @@ ereturn_list(m_fe);
 * Within or FE estimator with cluster-robust standard errors
 xtreg lwage exp exp2 wks ed, fe vce(cluster id)
 =#
-m_fe_c = FixedEffectModels.reg(df8,
-    @formula(lwage ~ exp + exp2 + wks + ed + fe(id)),
-    Vcov.cluster(:id))
-stata_regress(m_fe_c);
+m_fe_c = stata_regress(df8; y = :lwage, x = [:exp, :exp2, :wks, :ed],
+                       absorb = :id, vce = :cluster, cluster = :id);
 ```
 
 ### 8.5.4 Least-squares dummy-variables regression

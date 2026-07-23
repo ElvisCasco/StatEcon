@@ -9,6 +9,7 @@ _ch*
 .quarto/
 **/*_files/
 *.quarto_ipynb
+/examples/**/*.log
 
 # figures and exported data the example notebooks produce while rendering
 # (each notebook creates ./output and writes there; scoped to examples/ so the
