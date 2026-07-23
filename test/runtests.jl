@@ -132,4 +132,42 @@ df = DataFrame(
         @test isapprox(r.ll, -201.9227; atol = 1e-3)  # verified by hand
     end
 
+
+    @testset "stata_xtreg_re matches Stata (Wooldridge Ex. 10.4)" begin
+        # Two bugs found by the Wooldridge verification:
+        #  1. time-invariant regressors (dropped by the within transform) were
+        #     still charged a degree of freedom, inflating both variance
+        #     components and shifting every RE coefficient;
+        #  2. the classical VCE scaled (X*'X*)^-1 by the within-step sigma^2_eps
+        #     instead of the theta-demeaned GLS residual variance, leaving every
+        #     standard error ~0.2% low.
+        # `union` is constant within firm here, which is what triggers (1).
+        jt = dataset("jtrain1")
+        r = redirect_stdout(devnull) do
+            stata_xtreg_re(jt, :lscrap, [:d88, :d89, :union, :grant, :grant_1], :fcode)
+        end
+        nm = string.(r.coefnames)
+        b(v)  = r.β[findfirst(==(v), nm)]
+        se(v) = r.se[findfirst(==(v), nm)]
+
+        @test isapprox(b("d88"),     -0.0934519; atol = 5e-7)
+        @test isapprox(b("d89"),     -0.2698336; atol = 5e-7)
+        @test isapprox(b("union"),    0.5478021; atol = 5e-7)
+        @test isapprox(b("grant"),   -0.2146960; atol = 5e-7)
+        @test isapprox(b("grant_1"), -0.3770698; atol = 5e-7)
+        @test isapprox(b("_cons"),    0.4148333; atol = 5e-7)
+
+        @test isapprox(se("d88"),     0.1091559; atol = 5e-7)
+        @test isapprox(se("d89"),     0.1316496; atol = 5e-7)
+        @test isapprox(se("union"),   0.4106250; atol = 5e-7)
+        @test isapprox(se("grant"),   0.1477838; atol = 5e-7)
+        @test isapprox(se("grant_1"), 0.2053516; atol = 5e-7)
+        @test isapprox(se("_cons"),   0.2434322; atol = 5e-7)
+
+        # sigma_e equals the FE Root MSE Stata publishes for Example 10.5
+        @test isapprox(r.σ_ε, 0.49774421; atol = 5e-8)
+        @test isapprox(r.σ_u, 1.39002870; atol = 5e-8)
+        @test isapprox(r.σ_u^2 / (r.σ_u^2 + r.σ_ε^2), 0.88634984; atol = 5e-8)
+    end
+
 end

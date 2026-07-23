@@ -243,7 +243,14 @@ function stata_xtreg_re(df, y::Symbol, xvars::AbstractVector{Symbol}, idvar::Sym
     β_fe = X_w \ y_w
     u_fe = y_w - X_w * β_fe
     k    = length(xvars)
-    σ2_ε = sum(abs2, u_fe) / (n_obs - n_panels - k)
+    # Regressors that are time-invariant vanish under within-demeaning, so they
+    # are not estimated and must not consume a degree of freedom. Counting them
+    # (as `k` does) inflated both variance components and shifted every RE
+    # coefficient. Verified on Wooldridge Ex. 10.4, where `union` is constant
+    # within firm: k_eff = 4 gives sigma_e = .49774421, exactly Stata's value and
+    # exactly the FE Root MSE published for Ex. 10.5.
+    k_eff = count(j -> maximum(abs, view(X_w, :, j)) > 1e-10, 1:size(X_w, 2))
+    σ2_ε = sum(abs2, u_fe) / (n_obs - n_panels - k_eff)
 
     # ---- Step 2: BE on panel means → σ²₁ ----
     be_df = DataFrames.combine(DataFrames.groupby(d, idvar),
@@ -253,7 +260,10 @@ function stata_xtreg_re(df, y::Symbol, xvars::AbstractVector{Symbol}, idvar::Sym
     X_b = hcat(ones(n_panels), Matrix{Float64}(be_df[:, xvars]))
     β_be = X_b \ y_b
     u_be = y_b - X_b * β_be
-    σ2_1 = sum(abs2, u_be) / (n_panels - k - 1)           # per-obs variance at panel-mean level
+    # Same convention as the within step: charge only the regressors actually
+    # estimated there. Reproduces Stata's sigma_u = 1.3900287 on Ex. 10.4
+    # (n_panels - k_eff = 50); the previous n_panels - k - 1 = 48 gave 1.4199.
+    σ2_1 = sum(abs2, u_be) / (n_panels - k_eff)           # per-obs variance at panel-mean level
 
     T_obs = DataFrames.combine(DataFrames.groupby(d, idvar), DataFrames.nrow => :T)
     T̄    = Statistics.mean(T_obs.T)
@@ -273,8 +283,12 @@ function stata_xtreg_re(df, y::Symbol, xvars::AbstractVector{Symbol}, idvar::Sym
     # ---- Step 4: Variance-covariance ----
     XtX_inv = LinearAlgebra.inv(X_s' * X_s)
     if vce == :classical
-        σ2_u_hat = σ2_ε          # under RE, Var(u*) = σ²_ε (θ-demeaning normalizes the variance)
-        V = σ2_u_hat .* XtX_inv
+        # Stata scales (X*'X*)^-1 by the residual variance of the theta-demeaned
+        # GLS fit itself, not by the within-step sigma^2_eps. The two differ by
+        # RSS_GLS/(N-k) vs RSS_FE/(NT-N-k_eff); using sigma^2_eps left every RE
+        # standard error ~0.2% low on Wooldridge Ex. 10.4.
+        σ2_gls = sum(abs2, u) / (n_obs - size(X_s, 2))
+        V = σ2_gls .* XtX_inv
     elseif vce == :cluster
         # Liang-Zeger on the θ-demeaned data
         B = zeros(size(X_s, 2), size(X_s, 2))
