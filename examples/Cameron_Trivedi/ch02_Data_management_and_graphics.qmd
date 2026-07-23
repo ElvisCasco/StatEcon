@@ -45,6 +45,11 @@ CairoMakie.activate!(type = "png")
 
 # Tiny helper: unwrap a ReadStatTables.LabeledValue -> its underlying number.
 _rawval(x) = hasproperty(x, :value) ? x.value : x
+
+# Artifacts this notebook produces (figures, exported data) go to `output/`.
+const OUT = "output"
+isdir(OUT) || mkpath(OUT)
+outpath(f) = joinpath(OUT, f)
 ```
 
 # 2 Data management and graphics
@@ -146,7 +151,7 @@ use http://www.stata-press.com/data/r10/census.dta, clear
 # fall back gracefully when offline (the rest of this chapter doesn't
 # depend on `census`, so skipping is safe).
 const _CENSUS_URL  = "https://www.stata-press.com/data/r10/census.dta"
-const _CENSUS_FILE = "census.dta"
+const _CENSUS_FILE = outpath("census.dta")
 census = try
     if !isfile(_CENSUS_FILE)
         Downloads.download(_CENSUS_URL, _CENSUS_FILE)
@@ -798,7 +803,7 @@ println("agesqdemean: N=$(length(col2))  Mean=$(round(mean(col2), digits=4))  St
 save musr/mus02psid92m_test.dta, replace
 =#
 # Save as Stata data file -- save as CSV instead
-CSV.write("mus02psid92m_test.csv", psid)
+CSV.write(outpath("mus02psid92m_test.csv"), psid)
 ```
 
 ```{julia}
@@ -812,7 +817,7 @@ let
     save_cols = [:age, :education]
     append!(save_cols, eddummy_local)
     append!(save_cols, [:earnings, :d1, :hours])
-    CSV.write("mus02psid92m_test_subset.csv", psid[!, save_cols])
+    CSV.write(outpath("mus02psid92m_test_subset.csv"), psid[!, save_cols])
 end
 ```
 
@@ -828,7 +833,7 @@ let
     append!(cols, eddummy_local)
     append!(cols, [:earnings, :d1, :hours])
     sub = psid[!, cols]
-    open("mus02psid92m.asc", "w") do io
+    open(outpath("mus02psid92m.asc"), "w") do io
         for i in 1:DataFrames.nrow(sub)
             parts = String[]
             for c in cols
@@ -1008,7 +1013,7 @@ psid_plot_clean = DataFrames.dropmissing(psid_plot, [:lnearns, :hours])
 fig = CairoMakie.Figure()
 ax = CairoMakie.Axis(fig[1, 1], xlabel="Hours", ylabel="Log Earnings")
 CairoMakie.scatter!(ax, psid_plot_clean.hours, psid_plot_clean.lnearns, markersize=4)
-CairoMakie.save("mus02two1.png", fig)
+CairoMakie.save(outpath("mus02two1.png"), fig)
 fig
 ```
 
@@ -1030,7 +1035,7 @@ model_plot = FixedEffectModels.reg(psid_plot_clean, @formula(lnearns ~ hours))
 x_range = range(minimum(psid_plot_clean.hours), maximum(psid_plot_clean.hours), length=100)
 y_hat = StatsBase.coef(model_plot)[1] .+ StatsBase.coef(model_plot)[2] .* x_range
 CairoMakie.lines!(ax, collect(x_range), y_hat, color=:red, linewidth=2)
-CairoMakie.save("mus02two2.png", fig)
+CairoMakie.save(outpath("mus02two2.png"), fig)
 fig
 ```
 
@@ -1053,7 +1058,7 @@ model_plot = FixedEffectModels.reg(psid_plot_clean, @formula(lnearns ~ hours))
 x_range = range(minimum(psid_plot_clean.hours), maximum(psid_plot_clean.hours), length=100)
 y_hat = StatsBase.coef(model_plot)[1] .+ StatsBase.coef(model_plot)[2] .* x_range
 CairoMakie.lines!(ax, collect(x_range), y_hat, color=:red, linewidth=2)
-CairoMakie.save("mus02examplefigure.png", fig)
+CairoMakie.save(outpath("mus02examplefigure.png"), fig)
 fig
 ```
 
@@ -1113,7 +1118,7 @@ ax = CairoMakie.Axis(fig[1, 1],
     ylabel="Annual hours worked by education",
     xticks=(1:4, [edtype[i] for i in 1:4]))
 boxplot!(ax, Int.(psid_box.edcat), Float64.(psid_box.hours), markersize=3)
-CairoMakie.save("mus02boxfig.png", fig)
+CairoMakie.save(outpath("mus02boxfig.png"), fig)
 fig
 ```
 
@@ -1142,7 +1147,7 @@ fig = CairoMakie.Figure()
 ax = CairoMakie.Axis(fig[1, 1], xlabel="Log Earnings", ylabel="Density")
 bins = range(4.0, maximum(skipmissing(psid_hist.lnearns)) + 0.25, step=0.25)
 hist!(ax, Float64.(psid_hist.lnearns), bins=collect(bins), normalization=:pdf)
-CairoMakie.save("mus02hist.png", fig)
+CairoMakie.save(outpath("mus02hist.png"), fig)
 fig
 ```
 
@@ -1179,7 +1184,7 @@ x_norm = range(minimum(kd2.x), maximum(kd2.x), length=4000)
 y_norm = @. (1 / (sigma_kd * sqrt(2pi))) * exp(-0.5 * ((x_norm - mu_kd) / sigma_kd)^2)
 CairoMakie.lines!(ax, collect(x_norm), y_norm, linewidth=2, linestyle=:dash, label="Normal")
 axislegend(ax)
-CairoMakie.save("mus02kd1.png", fig)
+CairoMakie.save(outpath("mus02kd1.png"), fig)
 fig
 ```
 
@@ -1205,7 +1210,7 @@ ax = CairoMakie.Axis(fig[1, 1],
 bins = range(minimum(Float64.(psid_hd.lnearns)), maximum(Float64.(psid_hd.lnearns)) + 0.25, step=0.25)
 hist!(ax, Float64.(psid_hd.lnearns), bins=collect(bins), normalization=:pdf, color=(:steelblue, 0.5))
 CairoMakie.lines!(ax, kd3.x, kd3.density, linewidth=2, color=:red)
-CairoMakie.save("mus02histdens.png", fig)
+CairoMakie.save(outpath("mus02histdens.png"), fig)
 fig
 ```
 
@@ -1244,7 +1249,7 @@ fig = CairoMakie.Figure()
 ax = CairoMakie.Axis(fig[1, 1], xlabel="Hours", ylabel="Log Earnings")
 CairoMakie.lines!(ax, x_sorted, pred, color=:blue, linewidth=2)
 CairoMakie.scatter!(ax, psid_sc.hours_f, psid_sc.lnearns_f, markersize=4, color=:gray)
-CairoMakie.save("mus02scatter2.png", fig)
+CairoMakie.save(outpath("mus02scatter2.png"), fig)
 fig
 ```
 
@@ -1322,7 +1327,7 @@ CairoMakie.lines!(ax, hours_grid, lowess_pred, linewidth=2, color=:blue, label="
 CairoMakie.lines!(ax, hours_grid[valid_ll], ll_pred[valid_ll],
     linewidth=2, color=:red, label="Local linear")
 axislegend(ax, position=:rc)
-CairoMakie.save("mus02twoway.png", fig)
+CairoMakie.save(outpath("mus02twoway.png"), fig)
 fig
 ```
 

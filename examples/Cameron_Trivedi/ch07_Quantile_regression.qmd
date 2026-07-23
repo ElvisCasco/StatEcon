@@ -39,6 +39,7 @@ CairoMakie.activate!(type = "png")
 using Optim
 import Distributions
 using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+using KernelDensity                # kde() for the density panel in §7.x
 
 # -- ReadStatTables labelled-value unwrap (mirrors StatEcon internals)
 _rawval(x) = hasproperty(x, :value) ? x.value : x

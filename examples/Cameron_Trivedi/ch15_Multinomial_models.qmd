@@ -33,7 +33,12 @@ using Optim, ForwardDiff
 import Distributions
 using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
 
-_rawval(x) = hasproperty(x, :value) ? x.value : x  # unwrap ReadStatTables.LabeledValue
+_rawval(x) = hasproperty(x, :value) ? x.value : x
+
+# Artifacts this notebook produces (figures, exported data) go to `output/`.
+const OUT = "output"
+isdir(OUT) || mkpath(OUT)
+outpath(f) = joinpath(OUT, f)  # unwrap ReadStatTables.LabeledValue
 ```
 
 The multinomial-model estimators for this chapter now live in `StatEcon`
@@ -482,7 +487,7 @@ DataFrames.sort!(df15long, [:id])
 # directory* for parity (the textbook's downstream Stata sessions
 # reload from .dta — Julia sessions can use the bundled copy via
 # `dataset("mus15datalong.csv")` / `dataset("mus15datalong")`).
-CSV.write("mus15datalong.csv", df15long);
+CSV.write(outpath("mus15datalong.csv"), df15long);
 ```
 
 ```{julia}

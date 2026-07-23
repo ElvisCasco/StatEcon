@@ -29,6 +29,10 @@ jupyter: julia-1.12
 
 ```{julia}
 using StatEcon
+# Artifacts this notebook produces (figures, exported data) go to `output/`.
+const OUT = "output"
+isdir(OUT) || mkpath(OUT)
+outpath(f) = joinpath(OUT, f)
 using DataFrames, ReadStatTables, CSV, Downloads
 using Statistics, StatsBase, LinearAlgebra, Printf, Random
 using GLM, FixedEffectModels, StatsModels
@@ -40,8 +44,11 @@ using RegressionTables
 import Distributions
 using Distributions: cdf, quantile, Normal, TDist, FDist, Chisq
 
-# Small helper: unwrap ReadStatTables.LabeledValue.
-_rawval(x) = hasproperty(x, :value) ? x.value : x
+# Small helper: unwrap ReadStatTables.LabeledValue and CategoricalArrays.CategoricalValue.
+function _rawval(x)
+    x isa CategoricalArrays.CategoricalValue && return _rawval(CategoricalArrays.unwrap(x))
+    hasproperty(x, :value) ? x.value : x
+end
 ```
 
 # 3 Linear regression basics
@@ -448,7 +455,7 @@ quietly esttab REG1 REG2 using musr/mus03table.tex, replace b(%10.4f) se scalars
 RegressionTables.regtable(
     REG1, REG2;
     render = RegressionTables.LatexTable(),
-    file = "mus03table.tex",
+    file = outpath("mus03table.tex"),
     keep = ["suppins", "age", "income", "educyr", "(Intercept)"],
     regression_statistics = [
         RegressionTables.Nobs,

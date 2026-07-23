@@ -6,7 +6,7 @@
 # =============================================================================
 
 # Private helpers matching StatsBase / NamedTuple duck-typing used by stata_hausman.
-_coef_of(m)      = hasproperty(m, :Î²) ? m.Î²      : StatsBase.coef(m)
+_coef_of(m)      = hasproperty(m, :β) ? m.β      : StatsBase.coef(m)
 _coefnames_of(m) = hasproperty(m, :coefnames) ? string.(m.coefnames) :
                                                 string.(StatsBase.coefnames(m))
 _vcov_of(m)      = hasproperty(m, :V) ? m.V      : StatsBase.vcov(m)

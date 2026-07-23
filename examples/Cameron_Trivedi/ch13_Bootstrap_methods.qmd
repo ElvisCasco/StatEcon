@@ -33,6 +33,11 @@ using Optim, ForwardDiff
 import Distributions
 using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
 _rawval(x) = hasproperty(x, :value) ? x.value : x
+
+# Artifacts this notebook produces (figures, exported data) go to `output/`.
+const OUT = "output"
+isdir(OUT) || mkpath(OUT)
+outpath(f) = joinpath(OUT, f)
 ```
 
 The canonical estimators used in this chapter now live in `StatEcon` and are
@@ -1507,7 +1512,7 @@ Printf.@printf("done in %.2fs\n", time() - t0)
 
 # Persist the 400 replicates (Stata's `saving(musr/coeffofvar, replace)`)
 # to the working directory.
-CSV.write("coeffofvar.csv", DataFrames.DataFrame(coeffvar = vec(cv_boot)))
+CSV.write(outpath("coeffofvar.csv"), DataFrames.DataFrame(coeffvar = vec(cv_boot)))
 
 bootstrap_b_table_stata(cv_obs, cv_boot, ["coeffvar"];
                         n_obs = n_bd, depvar = "",
@@ -1542,7 +1547,7 @@ df_boot = _c13_bootdata()
 ptres = bootstrap_tstar_stata(df_boot, GLM.@formula(docvis ~ chronic), :chronic;
                               B = 999, seed = 10101, vce = :robust,
                               command = "poisson docvis chronic, vce(robust)",
-                              save_csv = "percentilet.csv")
+                              save_csv = outpath("percentilet.csv"))
 β_orig  = ptres.β_orig; se_orig = ptres.se_orig; tstars = ptres.tstars
 ```
 
@@ -1622,7 +1627,7 @@ display "p-value = " r(N)/_N
 ptres2 = bootstrap_tstar_stata(df_boot, GLM.@formula(docvis ~ chronic), :chronic;
                                B = 999, seed = 10101, vce = :robust,
                                command = "poisson docvis chronic, vce(robust)",
-                               save_csv = "percentilet2.csv", quiet = true)
+                               save_csv = outpath("percentilet2.csv"), quiet = true)
 percentilet_pvalue_stata(ptres2.tstars, ptres2.β_orig, ptres2.se_orig);
 ```
 
@@ -1747,8 +1752,17 @@ global alpha = e(alpha)
 nb_boot = stata_nbreg(df_boot, GLM.@formula(docvis ~ chronic))
 
 # Stata `predict muhat` after nbreg — conditional mean μ̂_i = exp(x_iᵀβ̂).
-muhat = exp.(GLM.modelmatrix(nb_boot.model) * nb_boot.β_glm)
-alpha = nb_boot.α
+# `nb_boot.model` is a StatEcon.NBregModel (β / V / coefnames only), so it has
+# no design matrix to hand back. Rebuild X exactly as `stata_nbreg` does
+# internally: dropmissing on the formula's termvars, then take the model matrix
+# of the Poisson GLM it uses for warm-start. That guarantees the same column
+# order as `nb_boot.β_glm` (intercept first).
+_nb_f    = GLM.@formula(docvis ~ chronic)
+_nb_df   = DataFrames.dropmissing(df_boot[:, StatsModels.termvars(_nb_f)])
+_nb_X    = GLM.modelmatrix(GLM.glm(_nb_f, _nb_df,
+                                   Distributions.Poisson(), GLM.LogLink()))
+muhat = exp.(_nb_X * nb_boot.β_glm)
+alpha = nb_boot.alpha
 Printf.@printf("alpha = %.6f   mean(muhat) = %.6f\n", alpha, Statistics.mean(muhat))
 ```
 
@@ -1791,7 +1805,7 @@ Random.seed!(10101)
                                      GLM.@formula(dvhat ~ chronic); quiet = true)
         [f.β_glm[findfirst(==("chronic"),     f.coefnames_glm)],
          f.β_glm[findfirst(==("(Intercept)"), f.coefnames_glm)],
-         f.lnα]
+         f.lnalpha]
     end
     for _ in 1:400])'
 

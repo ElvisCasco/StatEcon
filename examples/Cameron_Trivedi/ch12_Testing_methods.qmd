@@ -41,7 +41,12 @@ using KernelDensity               # kdensity for the chi-vs-F density plot
 import Distributions
 using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
 
-_rawval(x) = hasproperty(x, :value) ? x.value : x  # unwrap ReadStatTables.LabeledValue
+_rawval(x) = hasproperty(x, :value) ? x.value : x
+
+# Artifacts this notebook produces (figures, exported data) go to `output/`.
+const OUT = "output"
+isdir(OUT) || mkpath(OUT)
+outpath(f) = joinpath(OUT, f)  # unwrap ReadStatTables.LabeledValue
 ```
 
 The testing estimators/commands used in this chapter now live in `StatEcon`:
@@ -263,7 +268,7 @@ CairoMakie.axislegend(ax, position = :lt)
 
 # Export like: graph export musr/mus12fandchi5.eps, replace
 # (written to the working directory — the packaged data folder is read-only)
-CairoMakie.save("mus12fandchi5.eps", fig)
+CairoMakie.save(outpath("mus12fandchi5.eps"), fig)
 
 fig
 ```
@@ -896,7 +901,7 @@ pvalues = [_one_rep_size() for _ in 1:1000]
 Printf.@printf("done in %.2fs\n", time() - t0)
 
 df_sim = DataFrames.DataFrame(pvalues = pvalues)
-CSV.write("pvalues_12_6_2.csv", df_sim)
+CSV.write(outpath("pvalues_12_6_2.csv"), df_sim)
 Printf.@printf("Saved %d p-values to pvalues_12_6_2.csv\n", DataFrames.nrow(df_sim));
 ```
 
@@ -909,8 +914,8 @@ summarize pvalues
 # Read back the p-values written by the previous chunk (same plain filename in
 # the working directory). If that chunk was skipped, fall back to the in-memory
 # `pvalues` vector so this cell can never error the render.
-df_sim = isfile("pvalues_12_6_2.csv") ?
-         CSV.read("pvalues_12_6_2.csv", DataFrames.DataFrame) :
+df_sim = isfile(outpath("pvalues_12_6_2.csv")) ?
+         CSV.read(outpath("pvalues_12_6_2.csv"), DataFrames.DataFrame) :
          DataFrames.DataFrame(pvalues = pvalues)
 stata_summarize(df_sim, :pvalues)
 ```
@@ -1014,7 +1019,7 @@ power_grid = [stata_power(1000, 150, 2.00, b, 0.05) for b in b2Ha_grid]
 Printf.@printf("done in %.2fs\n", time() - t0)
 
 df_pow = DataFrames.DataFrame(b2Ha = b2Ha_grid, power = power_grid)
-CSV.write("simresults.csv", df_pow)
+CSV.write(outpath("simresults.csv"), df_pow)
 stata_summarize(df_pow, [:b2Ha, :power]);
 ```
 
@@ -1039,7 +1044,7 @@ CairoMakie.scatter!(ax_pow, df_pow.b2Ha, df_pow.power,
 CairoMakie.hlines!(ax_pow, [0.05]; linestyle = :dash, color = :gray,
                    linewidth = 1.2)
 
-CairoMakie.save("mus12power.eps", fig_pow)
+CairoMakie.save(outpath("mus12power.eps"), fig_pow)
 fig_pow
 ```
 

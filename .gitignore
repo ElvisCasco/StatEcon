@@ -8,6 +8,12 @@ _ch*
 *.html
 .quarto/
 **/*_files/
+*.quarto_ipynb
+
+# figures and exported data the example notebooks produce while rendering
+# (each notebook creates ./output and writes there; scoped to examples/ so the
+# tracked datasets under data/ are unaffected)
+/examples/**/output/
 
 *.jl.cov
 *.jl.*.cov
