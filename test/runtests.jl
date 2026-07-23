@@ -201,4 +201,36 @@ df = DataFrame(
         @test !occursin("Adj R-squared", rout)
     end
 
+
+    @testset "stata_probit uses observed information (Wooldridge Ex. 15.2)" begin
+        # GLM's vcov is the EXPECTED information from IRLS; Stata's vce(oim)
+        # default reports the OBSERVED information. They differ for the
+        # non-canonical probit link, which left every probit SE 1-2% high.
+        # Values are Stata's published output for
+        #   probit inlf nwifeinc educ exper expersq age kidslt6 kidsge6  (mroz)
+        mroz = dataset("mroz")
+        r = redirect_stdout(devnull) do
+            stata_probit(mroz, @formula(inlf ~ nwifeinc + educ + exper +
+                                               expersq + age + kidslt6 + kidsge6))
+        end
+        nm = string.(r.coefnames)
+        se(v) = r.se[findfirst(==(v), nm)]
+        b(v)  = r.β[findfirst(==(v), nm)]
+
+        # standard errors: the point of the fix, must match to the printed digits
+        @test isapprox(se("nwifeinc"), 0.0048398; atol = 5e-7)
+        @test isapprox(se("educ"),     0.0252542; atol = 5e-7)
+        @test isapprox(se("exper"),    0.0187164; atol = 5e-7)
+        @test isapprox(se("age"),      0.0084772; atol = 5e-7)
+        @test isapprox(se("kidslt6"),  0.1185223; atol = 5e-7)
+        @test isapprox(se("kidsge6"),  0.0434768; atol = 5e-7)
+        @test isapprox(se("_cons"),    0.5085930; atol = 5e-7)
+
+        # coefficients agree to ~4e-6 (GLM's IRLS vs Stata's Newton), and the
+        # log-likelihood to the printed precision
+        @test isapprox(b("nwifeinc"), -0.0120237; atol = 1e-5)
+        @test isapprox(b("kidslt6"),  -0.8683285; atol = 1e-5)
+        @test isapprox(r.ll, -401.30219; atol = 1e-4)
+    end
+
 end

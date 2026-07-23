@@ -65,9 +65,24 @@ function stata_probit(df, formula; vce::Symbol=:oim, level::Float64=0.95,
     yv = Float64.(GLM.response(m))
     Xm = GLM.modelmatrix(m)
 
+    # Observed information, which is what Stata's vce(oim) default reports.
+    # `GLM.vcov` is the EXPECTED information from IRLS; for the non-canonical
+    # probit link the two differ, which left every probit standard error about
+    # 1-2% above Stata's. With q = 2y-1, z = q*eta and lambda = q*phi(z)/Phi(z),
+    # the negative Hessian is  sum_i lambda_i (lambda_i + eta_i) x_i x_i'.
+    A_oim = let η = Xm * β
+        q  = 2 .* yv .- 1
+        z  = q .* η
+        Φz = Distributions.cdf.(Distributions.Normal(), z)
+        φz = Distributions.pdf.(Distributions.Normal(), z)
+        λ  = q .* (φz ./ max.(Φz, 1e-12))
+        w  = λ .* (λ .+ η)
+        LinearAlgebra.inv(LinearAlgebra.Symmetric(Xm' * (w .* Xm)))
+    end
+
     V = if vce == :robust
-        # Robust sandwich for probit: V = A · meat · A · (n/(n-1)) with
-        # A = OIM vcov and meat = Σ s_i s_iᵀ where the per-obs score is
+        # Robust sandwich: V = A · meat · A · (n/(n-1)) with A the observed-
+        # information inverse and meat = Σ s_i s_iᵀ, the per-obs score being
         # s_i = ((y_i − μ_i) / [μ_i(1−μ_i)]) · φ(η_i) · x_i.
         η  = Xm * β                                 # linear index
         μ  = GLM.predict(m)
@@ -75,10 +90,9 @@ function stata_probit(df, formula; vce::Symbol=:oim, level::Float64=0.95,
         u  = (yv .- μ) ./ (μ .* (1 .- μ)) .* ϕ
         s  = u .* Xm
         meat = s' * s
-        A = Matrix(GLM.vcov(m))                     # OIM vcov is A⁻¹ already
-        A * meat * A * (n / (n - 1))
+        A_oim * meat * A_oim * (n / (n - 1))
     else
-        Matrix(GLM.vcov(m))
+        Matrix(A_oim)
     end
     se = sqrt.(max.(LinearAlgebra.diag(V), 0.0))
     z  = β ./ se
