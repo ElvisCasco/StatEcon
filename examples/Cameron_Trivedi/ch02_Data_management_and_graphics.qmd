@@ -32,7 +32,7 @@ from the package, while data manipulation and graphs stay in plain Julia.
 
 ```{julia}
 using StatEcon                # stata_summarize, kdensity, stata_regress, ...
-const DATA = first(filter(d -> isdir(d) && (isfile(joinpath(d, "auto.dta")) || isdir(joinpath(d, "musr"))), ["../../data", "data", raw"C:/EC/GitHub/StatEcon/data"]))
+const DATA = let c = filter(d -> isdir(d) && (isfile(joinpath(d, "auto.dta")) || isdir(joinpath(d, "musr"))), ["../../data", "../data", "data"]); isempty(c) ? error("StatEcon example data not found; run this notebook from its own folder (examples/Cameron_Trivedi) or the repo root.") : first(c) end
 using DataFrames
 using ReadStatTables
 using CSV
