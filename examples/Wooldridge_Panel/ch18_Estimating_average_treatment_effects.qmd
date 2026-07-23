@@ -104,10 +104,12 @@ pscore_18_2 = stata_probit(
 
 All nine coefficients match the published table to six digits, as do
 $N = 445$, LR $\chi^2(8) = 16.07$, log-likelihood $-294.0675$ and
-pseudo-$R^2 = 0.0266$. Standard errors differ in the third significant digit
-because `StatEcon`'s probit variance is the expected-information (IRLS) matrix
-from `GLM.jl`, whereas Stata's `probit` reports the observed-information
-inverse. Because the NSW data are from a randomised experiment, the covariates
+pseudo-$R^2 = 0.0266$. The standard errors now match too: `re74` 0.0159392,
+`re75` 0.0271086, `age` 0.0534045, `agesq` 0.0008734, `nodegree` 0.1515457,
+`married` 0.1726192, `black` 0.2271609, `hisp` 0.3079228 (Stata 0.3079227) and
+`_cons` 0.8154274 (Stata 0.8154273) — every one identical to the printed digits,
+because `stata_probit` reports the observed-information variance that Stata's
+`vce(oim)` default uses. Because the NSW data are from a randomised experiment, the covariates
 should be — and essentially are — unrelated to assignment.
 
 ## Regression on the propensity score
@@ -407,9 +409,14 @@ fert.propensity = GLM.predict(pscore_18_3.model);
 
 Coefficients match to five–six digits (`frsthalf` $-0.220663$ vs $-0.2206627$,
 `tv` $0.9281441$ vs $0.9281707$), and $N = 4358$, LR $\chi^2(7) = 1130.84$,
-log-likelihood $-2428.384$, pseudo-$R^2 = 0.1889$ are identical. Once again the
-standard errors are the expected-information versions and differ from Stata's
-observed-information ones by 0.1–2%.
+log-likelihood $-2428.384$, pseudo-$R^2 = 0.1889$ are identical. The standard
+errors likewise agree to the last printed digit — `tv` 0.0977457 vs Stata's
+0.0977462, `frsthalf` 0.0418562 vs 0.0418563, `age` 0.0174845, `agesq`
+0.0002897, `evermarr` 0.0486734, `urban` 0.0432321, `electric` 0.0751253 vs
+0.0751255 and `_cons` 0.2440054 vs 0.2440057 — since `stata_probit` reports the
+observed information, matching Stata's `vce(oim)` default. The residual
+differences of a few units in the seventh digit are optimiser tolerance, not a
+variance-convention gap.
 
 ## IV using the propensity score
 
@@ -567,6 +574,9 @@ comparison
 
 Every point estimate agrees with the published Stata output to at least four
 significant digits, and every OLS/2SLS standard error (classical and robust)
-agrees to at least five. The single systematic difference in this chapter is in
-the **probit standard errors**, where `StatEcon`/`GLM.jl` report the
-expected-information variance and Stata reports the observed-information one.
+agrees to at least five. The **probit standard errors** now agree as well:
+`stata_probit` reports the observed-information variance that Stata's
+`vce(oim)` default uses, so both propensity-score probits reproduce the
+published standard errors to the printed digits. What little disagreement is
+left anywhere in this chapter sits in the sixth or seventh significant digit
+and reflects optimiser convergence tolerances only.

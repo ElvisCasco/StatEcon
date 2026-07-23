@@ -325,13 +325,17 @@ every sensitivity/specificity/PPV/NPV percentage (the single 0.01-point
 difference, logit "False − rate for classified −" 28.12% vs Stata's 28.13%, is
 a rounding-mode artefact of 81/288 = 28.125%).
 
-The standard errors differ in the fourth significant digit for probit
-(e.g. `nwifeinc` .0049392 here vs .0048398 in Stata). `stata_probit` fits the
-model with `GLM.jl`'s IRLS, whose variance matrix is the *expected* information
-(Fisher). Stata's `probit` default `vce(oim)` uses the *observed* information
-(the Hessian of the log-likelihood), which is not identical to the expected
-information for the non-canonical probit link. Logit SEs agree closely because
-the logit link is canonical, where observed and expected information coincide.
+The standard errors also match. `stata_probit` reports the *observed*
+information (the Hessian of the log-likelihood), which is exactly what Stata's
+`probit` default `vce(oim)` uses, so all eight probit SEs reproduce the printed
+digits: `nwifeinc` .0048398, `educ` .0252542, `exper` .0187164, `expersq` .0006,
+`age` .0084772, `kidslt6` .1185222 (Stata .1185223), `kidsge6` .0434768,
+`_cons` .5085928 (Stata .508593) — the last two differ only in the eighth
+significant digit, a display-rounding artefact. (Earlier releases used GLM's
+IRLS *expected*-information variance, which for the non-canonical probit link
+left every SE 1–2% high; that discrepancy is gone.) Logit SEs likewise agree,
+as they always did — the logit link is canonical, so observed and expected
+information coincide there.
 
 ## Example 15.3 (mroz.dta)
 
@@ -409,10 +413,12 @@ coefficients and SEs, `F(9,743) = 74.07`, `R-squared = 0.4729`,
 `Root MSE = 1.6655`). The control-function probit reproduces every coefficient
 to six or seven digits — in particular `u = .0433656` vs Stata's `.0433658`,
 log-likelihood −400.9255 vs −400.92551, `LR chi2(8) = 227.90`, pseudo R²
-0.2213. As in Example 15.2, the probit standard errors are 1–2% larger because
-`stata_probit` uses GLM's expected-information VCE rather than Stata's observed
-information; the substantive conclusion is unchanged (t on `u` ≈ 0.86 vs
-Stata's 0.87, p ≈ 0.39 either way — `educ` is not rejected as exogenous).
+0.2213. As in Example 15.2, the probit standard errors also reproduce Stata's
+observed-information (`vce(oim)`) values to the printed digits — `nwifeinc`
+.0052347, `educ` .0403061, `exper` .0190256, `expersq` .0006032, `age` .0086633,
+`kidslt6` .1187393, `kidsge6` .04379, `u` .050021, `_cons` .6497409 — so the
+z-statistics and p-values match as well (z on `u` = 0.87, p = 0.386, and `educ`
+is not rejected as exogenous).
 
 ## Example 15.4 (keane.dta)
 
