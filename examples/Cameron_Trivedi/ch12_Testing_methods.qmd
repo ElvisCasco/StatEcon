@@ -295,7 +295,7 @@ p_t30     = 2 * (1 - Distributions.cdf(Distributions.TDist(30), y))
 p_f1and30 = 1 - Distributions.cdf(Distributions.FDist(1, 30), y^2)
 p_z       = 2 * (1 - Distributions.cdf(Distributions.Normal(),  y))
 p_chi1    = 1 - Distributions.cdf(Distributions.Chisq(1), y^2)
-@printf("p-values  t(30) =%7.4f  F(1,30)=%7.4f  z =%7.4f  chi(1)=%7.4f\n",
+Printf.@printf("p-values  t(30) =%7.4f  F(1,30)=%7.4f  z =%7.4f  chi(1)=%7.4f\n",
         p_t30, p_f1and30, p_z, p_chi1)
 ```
 
@@ -316,7 +316,7 @@ c_t30  = Distributions.quantile(Distributions.TDist(30), 1 - α/2)
 c_f130 = Distributions.quantile(Distributions.FDist(1, 30), 1 - α)
 c_z    = Distributions.quantile(Distributions.Normal(),  1 - α/2)
 c_chi1 = Distributions.quantile(Distributions.Chisq(1), 1 - α)
-@printf("crit. vals: t(30)=%.3f  F(1,30)=%.3f  z=%.3f  χ²(1)=%.3f\n",
+Printf.@printf("crit. vals: t(30)=%.3f  F(1,30)=%.3f  z=%.3f  χ²(1)=%.3f\n",
         c_t30, c_f130, c_z, c_chi1)
 ```
 
@@ -492,7 +492,7 @@ h  = size(R, 1)
 # `ccdf` (= 1 − cdf) is computed directly so the tail probability survives
 # even when cdf ≈ 1.0 underflows; for W ≈ 594.7, the χ²(4) tail is ≈ 2e-131.
 p  = Distributions.ccdf(Distributions.Chisq(h), W)
-@printf("Wald test statistic: %.5f  with p-value: %.2e\n", W, p)
+Printf.@printf("Wald test statistic: %.5f  with p-value: %.2e\n", W, p)
 ```
 
 ### 12.3.3 One-sided Wald tests
@@ -532,7 +532,7 @@ _c12_test(s.model;
 β_p = β[i_p]; β_c = β[i_c]
 lc = β_p + β_c - 1
 se_lc = sqrt(V[i_p, i_p] + V[i_c, i_c] + 2 * V[i_p, i_c])
-@printf("lincom = %.6f  se=%.6f  95%% CI = [%.4f, %.4f]\n",
+Printf.@printf("lincom = %.6f  se=%.6f  95%% CI = [%.4f, %.4f]\n",
         lc, se_lc, lc - 1.96 * se_lc, lc + 1.96 * se_lc)
 ```
 
@@ -556,7 +556,7 @@ g_val = β_f / β_p - 1
 ∇g[i_f] = 1 / β_p
 ∇g[i_p] = -β_f / β_p^2
 se_g = sqrt(∇g' * V * ∇g)
-@printf("nlcom = %.6f  se=%.6f  95%% CI = [%.4f, %.4f]\n",
+Printf.@printf("nlcom = %.6f  se=%.6f  95%% CI = [%.4f, %.4f]\n",
         g_val, se_g, g_val - 1.96 * se_g, g_val + 1.96 * se_g)
 ```
 
@@ -578,7 +578,7 @@ lincom private, eform
 # CI for exp(β_private) (incidence rate ratio): use lincom + exponentiate
 β_p_val = β[i_p]; se_p_val = sqrt(V[i_p, i_p])
 lo, hi = β_p_val - 1.96 * se_p_val, β_p_val + 1.96 * se_p_val
-@printf("exp(β_private) = %.4f  95%% CI = [%.4f, %.4f]\n",
+Printf.@printf("exp(β_private) = %.4f  95%% CI = [%.4f, %.4f]\n",
         exp(β_p_val), exp(lo), exp(hi))
 ```
 
@@ -603,7 +603,7 @@ stata_lincom(w, β, V; eform = true, depvar = "docvis");
 nlcom exp(_b[private])
 =#
 # Same as above (lincom-then-exponentiate uses the symmetric CI on the log scale)
-@printf("β_private = %.4f  95%% CI = [%.4f, %.4f]\n",
+Printf.@printf("β_private = %.4f  95%% CI = [%.4f, %.4f]\n",
         β_p_val, lo, hi)
 ```
 
@@ -620,7 +620,7 @@ stata_lincom(w, β, V; depvar = "docvis");
 ```{julia}
 # CI via delta method on exp(β_private): se = exp(β) * se(β)
 expβ = exp(β_p_val); se_expβ = expβ * se_p_val
-@printf("exp(β_private) (delta) = %.4f  se=%.4f  CI=[%.4f, %.4f]\n",
+Printf.@printf("exp(β_private) (delta) = %.4f  se=%.4f  CI=[%.4f, %.4f]\n",
         expβ, se_expβ, expβ - 1.96 * se_expβ, expβ + 1.96 * se_expβ)
 ```
 
@@ -718,7 +718,7 @@ ll_unr = nb_unr.ll
 ll_res = nb_unr.ll_pois
 lr     = -2 * (ll_res - ll_unr)
 p      = Distributions.ccdf(Distributions.Chisq(1), lr)
-@printf("LR = %.5f with p = %.3e\n", lr, p)
+Printf.@printf("LR = %.5f with p = %.3e\n", lr, p)
 ```
 
 ```{julia}
@@ -727,7 +727,7 @@ p      = Distributions.ccdf(Distributions.Chisq(1), lr)
 # returned p by 2 gives the half-mixture (`chibar2(01)`) corrected p-value
 # for the boundary parameter α = 0.
 res = stata_lrtest(nb_unr.ll, nb_unr.ll_pois, 1)
-@printf("Corrected p-value for LR-test = %.10f\n", res.p / 2)
+Printf.@printf("Corrected p-value for LR-test = %.10f\n", res.p / 2)
 ```
 
 ## 12.5 Lagrange multiplier (score) test
@@ -808,7 +808,7 @@ one_v  = Base.ones(N)                 # local name avoids shadowing Base.ones
 LM     = sum(abs2, ŷ_aux)              # ≡ N · uncentered R²
 p_lm  = Distributions.ccdf(Distributions.Chisq(2), LM)
 
-@printf("LM = N x uncentered Rsq = %.5f and p = %.3e\n", LM, p_lm)
+Printf.@printf("LM = N x uncentered Rsq = %.5f and p = %.3e\n", LM, p_lm)
 ```
 
 ## 12.6 Test size and power
@@ -892,11 +892,11 @@ Random.seed!(10101)
 print("running 1000 reps... ")
 t0 = time()
 pvalues = [_one_rep_size() for _ in 1:1000]
-@printf("done in %.2fs\n", time() - t0)
+Printf.@printf("done in %.2fs\n", time() - t0)
 
 df_sim = DataFrames.DataFrame(pvalues = pvalues)
 CSV.write("pvalues_12_6_2.csv", df_sim)
-@printf("Saved %d p-values to pvalues_12_6_2.csv\n", DataFrames.nrow(df_sim));
+Printf.@printf("Saved %d p-values to pvalues_12_6_2.csv\n", DataFrames.nrow(df_sim));
 ```
 
 ```{julia}
@@ -919,7 +919,7 @@ display "Test size from 1000 simulations = " r(N)/1000
 # p-values that fall below 0.05. Under H0 (β_x = 2 is the DGP truth) and a
 # correctly-sized test this should be ≈ 0.05.
 n_rej = count(<(0.05), df_sim.pvalues)
-@printf("Test size from %d simulations = %.4f\n",
+Printf.@printf("Test size from %d simulations = %.4f\n",
         DataFrames.nrow(df_sim), n_rej / DataFrames.nrow(df_sim))
 ```
 
@@ -978,7 +978,7 @@ power 1000 150 2.00 2.20 0.05
 display r(power) " is the test power"
 =#
 power = stata_power(1000, 150, 2.00, 2.20, 0.05)
-@printf("Power of test of b2H0=%.2f when b2Ha=%.2f, S=%d, N=%d, alpha=%.2f is %.4f\n",
+Printf.@printf("Power of test of b2H0=%.2f when b2Ha=%.2f, S=%d, N=%d, alpha=%.2f is %.4f\n",
         2.00, 2.20, 1000, 150, 0.05, power)
 ```
 
@@ -1005,7 +1005,7 @@ b2Ha_grid = collect(1.6:0.025:2.4)
 print("running 34 × 1000 reps... ")
 t0 = time()
 power_grid = [stata_power(1000, 150, 2.00, b, 0.05) for b in b2Ha_grid]
-@printf("done in %.2fs\n", time() - t0)
+Printf.@printf("done in %.2fs\n", time() - t0)
 
 df_pow = DataFrames.DataFrame(b2Ha = b2Ha_grid, power = power_grid)
 CSV.write("musr/simresults.csv", df_pow)
@@ -1049,7 +1049,7 @@ lambda = 5.67
 alpha  = 0.05
 crit   = Distributions.quantile(Distributions.Chisq(1), 1 - alpha)
 power   = 1 - Distributions.cdf(Distributions.NoncentralChisq(1, lambda), crit)
-@printf("Power of chi(1) test when noncentrality parameter lambda = %.2f is %.4f\n", lambda, power)
+Printf.@printf("Power of chi(1) test when noncentrality parameter lambda = %.2f is %.4f\n", lambda, power)
 ```
 
 ## 12.7 Specification tests

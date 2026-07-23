@@ -73,7 +73,7 @@ end
 # Observation-level bootstrap (no cluster structure).
 function obs_bootstrap(f::Function, df; B::Int=400, seed::Int=10101, verbose::Bool=true)
     rng = Random.MersenneTwister(seed)
-    n = nrow(df); results = Vector{Vector{Float64}}(); n_fail = 0
+    n = DataFrames.nrow(df); results = Vector{Vector{Float64}}(); n_fail = 0
     for b in 1:B
         row_idx = StatsBase.sample(rng, 1:n, n; replace=true)
         sub = df[row_idx, :]
@@ -93,7 +93,7 @@ function _fe_iv_coefs(sub, idvar, yvar, xvars, endog, instruments)
     demeaned = Dict{Symbol, Vector{Float64}}()
     for v in all_vars
         col = Float64.(sub[!, v]); dc = similar(col)
-        for rows in values(id_to_rows); dc[rows] .= col[rows] .- mean(col[rows]); end
+        for rows in values(id_to_rows); dc[rows] .= col[rows] .- Statistics.mean(col[rows]); end
         demeaned[v] = dc
     end
     y = demeaned[yvar]
@@ -149,7 +149,7 @@ xtivreg lwage exp exp2 (wks = ms), fe
 =#
 # use musr/mus08psidextract.dta, clear
 # xtivreg lwage exp exp2 (wks = ms), fe
-df9 = DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus08psidextract.dta"))
+df9 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus08psidextract.dta"))
 for c in names(df9)
     eltype(df9[!, c]) <: Union{Float32, Missing} &&
         (df9[!, c] = convert.(Union{Float64, Missing}, df9[!, c]))
@@ -501,7 +501,7 @@ summarize pharvis lnhhexp illness commune
 =#
 # use musr/mus09vietnam_ex2.dta, clear
 # summarize pharvis lnhhexp illness commune
-df9v = DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus09vietnam_ex2.dta"))
+df9v = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus09vietnam_ex2.dta"))
 stata_summarize(df9v, [:pharvis, :lnhhexp, :illness, :commune]);
 ```
 
@@ -605,25 +605,25 @@ fe_vill_cons = re_vill.β[end]
 
 println()
 println("-"^74)
-@printf("    Variable | %-9s %-9s %-9s %-9s %-9s %-9s\n",
+Printf.@printf("    Variable | %-9s %-9s %-9s %-9s %-9s %-9s\n",
         "OLS_hh", "RE_hh", "FE_hh", "OLS_v~l", "RE_vill", "FE_vill")
 println("-"^13, "+", "-"^60)
 for var in ["lnhhexp", "illness", "_cons"]
-    @printf("%12s |", var)
+    Printf.@printf("%12s |", var)
     for (lbl, fn1, fn2, fn3, mdl) in models
         b, _ = var == "lnhhexp" ? fn1(mdl) :
                var == "illness" ? fn2(mdl) : fn3(mdl)
         if isnan(b) && var == "_cons"
             b = lbl == "FE_hh" ? fe_hh_cons : (lbl == "FE_vill" ? fe_vill_cons : NaN)
         end
-        if isnan(b);  @printf(" %9s",  ".");  else  @printf("  %.4f ", b);  end
+        if isnan(b);  Printf.@printf(" %9s",  ".");  else  Printf.@printf("  %.4f ", b);  end
     end
     println()
-    @printf("%12s |", "")
+    Printf.@printf("%12s |", "")
     for (lbl, fn1, fn2, fn3, mdl) in models
         _, s = var == "lnhhexp" ? fn1(mdl) :
                var == "illness" ? fn2(mdl) : fn3(mdl)
-        if isnan(s);  @printf(" %9s",  ".");  else  @printf("  %.4f ", s);  end
+        if isnan(s);  Printf.@printf(" %9s",  ".");  else  Printf.@printf("  %.4f ", s);  end
     end
     println()
 end

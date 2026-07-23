@@ -22,10 +22,10 @@ function stata_margins(model, df, varname::Symbol;
 end
 
 function _margins_dydx(model, df, varname::Symbol; level::Float64 = 0.95)
-    β   = coef(model)
-    V   = vcov(model)
-    nm  = string.(coefnames(model))
-    N   = Int(nobs(model))
+    β   = StatsBase.coef(model)
+    V   = StatsBase.vcov(model)
+    nm  = string.(StatsBase.coefnames(model))
+    N   = Int(StatsBase.nobs(model))
     vstr = string(varname)
 
     idx_main = findfirst(==(vstr), nm)
@@ -110,9 +110,9 @@ function _xbar_from_coefnames(nm, df)
 end
 
 function _margins_eyex(model, df, varname::Symbol; level::Float64 = 0.95)
-    β   = coef(model)
-    V   = vcov(model)
-    nm  = string.(coefnames(model))
+    β   = StatsBase.coef(model)
+    V   = StatsBase.vcov(model)
+    nm  = string.(StatsBase.coefnames(model))
     vstr = string(varname)
 
     idx = findfirst(==(vstr), nm)

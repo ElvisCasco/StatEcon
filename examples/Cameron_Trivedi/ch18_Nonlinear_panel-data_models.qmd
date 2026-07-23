@@ -55,7 +55,7 @@ time_now2() = println(Dates.now())
 function meddiff(a, b)
     diff = a .- b
     md = Statistics.median(skipmissing(diff))
-    @printf("Median difference = %.4f\n", md)
+    Printf.@printf("Median difference = %.4f\n", md)
     return md
 end
 
@@ -1297,10 +1297,10 @@ display(results)
 ```{julia}
 # Pretty-print results table
 println("─" ^ 50)
-@printf("%-12s %12s %12s %10s\n", "Var", "Coef", "Std.Err", "t")
+Printf.@printf("%-12s %12s %12s %10s\n", "Var", "Coef", "Std.Err", "t")
 println("─" ^ 50)
 for (i, n) in enumerate(["totchr", "_cons"])
-    @printf("%-12s %12.6f %12.6f %10.3f\n",
+    Printf.@printf("%-12s %12.6f %12.6f %10.3f\n",
             n, vec(β)[i], se[i], t[i])
 end
 println("─" ^ 50)
@@ -1429,7 +1429,7 @@ y_v = df_a.ltotexp
 x_v = Float64.(df_a.totchr)
 diff = y_v .- x_v
 medylx = Statistics.median(skipmissing(diff))
-@printf("Median = %.4f\n", medylx)
+Printf.@printf("Median = %.4f\n", medylx)
 ```
 
 ### A.3.3 Tracing / logging

@@ -1527,9 +1527,9 @@ Random.seed!(10101)
 xpois2   = Distributions.rand(Distributions.Poisson(1), N17)
 xg2      = Distributions.rand(Distributions.Gamma(1, 1), N17)
 xnegbin2 = [Distributions.rand(Distributions.Poisson(g)) for g in xg2]
-@printf("xpois2:   mean = %.4f, sd = %.4f\n",
+Printf.@printf("xpois2:   mean = %.4f, sd = %.4f\n",
         Statistics.mean(xpois2), Statistics.std(xpois2))
-@printf("xnegbin2: mean = %.4f, sd = %.4f\n",
+Printf.@printf("xnegbin2: mean = %.4f, sd = %.4f\n",
         Statistics.mean(xnegbin2), Statistics.std(xnegbin2))
 ```
 

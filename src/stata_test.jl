@@ -11,9 +11,9 @@ or vcov row are dropped (mirroring Stata's handling of collinear terms).
 Returns `(F, df1, df2, p, chi2)`.
 """
 function stata_test(model, vars::AbstractVector; values = zeros(length(vars)))
-    β     = coef(model)
-    V     = vcov(model)
-    names = string.(coefnames(model))
+    β     = StatsBase.coef(model)
+    V     = StatsBase.vcov(model)
+    names = string.(StatsBase.coefnames(model))
     vs    = string.(vars)
     idx   = [findfirst(==(v), names) for v in vs]
     miss  = findall(x -> x === nothing, idx)
@@ -33,7 +33,7 @@ function stata_test(model, vars::AbstractVector; values = zeros(length(vars)))
     q    = length(vs)
     Rβ   = β[idx] .- vals
     W    = LinearAlgebra.dot(Rβ, V[idx, idx] \ Rβ)
-    dfr  = dof_residual(model)
+    dfr  = StatsBase.dof_residual(model)
     Fst  = W / q
     p    = 1 - Distributions.cdf(Distributions.FDist(q, dfr), Fst)
 

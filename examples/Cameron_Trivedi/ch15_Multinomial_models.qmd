@@ -305,7 +305,7 @@ mlogit mode income, rr baseoutcome(1) nolog
 # Relative-risk ratios = exp(β)
 println("\n— Relative-risk ratios (exp(β)) —")
 for (j, alt) in enumerate(("pier", "private", "charter"))
-    @printf("%-10s  exp(intercept) = %9.6f   exp(β_income) = %9.6f\n",
+    Printf.@printf("%-10s  exp(intercept) = %9.6f   exp(β_income) = %9.6f\n",
             alt, exp(β_mnl[1, j]), exp(β_mnl[2, j]))
 end
 ```

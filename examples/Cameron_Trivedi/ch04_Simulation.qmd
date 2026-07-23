@@ -90,8 +90,8 @@ summarize x
 Random.seed!(10101)
 x = rand(1000)
 println("First 5: ", x[1:5])
-@printf("mean = %.4f, sd = %.4f, min = %.4f, max = %.4f\n",
-        mean(x), std(x), minimum(x), maximum(x))
+Printf.@printf("mean = %.4f, sd = %.4f, min = %.4f, max = %.4f\n",
+        Statistics.mean(x), Statistics.std(x), minimum(x), maximum(x))
 ```
 
 ```{julia}
@@ -115,11 +115,11 @@ pwcorr x L.x L2.x L3.x, star(0.05)
 =#
 # First three autocorrelations of the uniform draws
 function autocor_lag(v, k)
-    n = length(v); m = mean(v)
+    n = length(v); m = Statistics.mean(v)
     sum((v[1:n-k] .- m) .* (v[k+1:n] .- m)) / sum((v .- m).^2)
 end
 for k in 1:3
-    @printf("Autocorrelation lag %d = %.4f\n", k, autocor_lag(x, k))
+    Printf.@printf("Autocorrelation lag %d = %.4f\n", k, autocor_lag(x, k))
 end
 ```
 
@@ -161,8 +161,8 @@ stnormal  = randn(N)
 norm5and2 = 5 .+ 2 .* randn(N)
 
 for (n, v) in [("uniform", uniform), ("stnormal", stnormal), ("norm5and2", norm5and2)]
-    @printf("%-10s mean=%8.4f sd=%7.4f skew=%7.4f kurt=%7.4f min=%7.3f max=%7.3f\n",
-            n, mean(v), std(v), skewness(v), kurtosis(v) + 3,
+    Printf.@printf("%-10s mean=%8.4f sd=%7.4f skew=%7.4f kurt=%7.4f min=%7.3f max=%7.3f\n",
+            n, Statistics.mean(v), Statistics.std(v), skewness(v), kurtosis(v) + 3,
             minimum(v), maximum(v))
 end
 ```
@@ -189,9 +189,9 @@ xc  = rand(Chisq(10), N)
 xfn = rand(Chisq(10), N) ./ 10
 xfd = rand(Chisq(5),  N) ./ 5
 xf  = xfn ./ xfd
-@printf("xt: mean=%8.4f sd=%7.4f\n", mean(xt), std(xt))
-@printf("xc: mean=%8.4f sd=%7.4f\n", mean(xc), std(xc))
-@printf("xf: mean=%8.4f sd=%7.4f\n", mean(xf), std(xf))
+Printf.@printf("xt: mean=%8.4f sd=%7.4f\n", Statistics.mean(xt), Statistics.std(xt))
+Printf.@printf("xc: mean=%8.4f sd=%7.4f\n", Statistics.mean(xc), Statistics.std(xc))
+Printf.@printf("xf: mean=%8.4f sd=%7.4f\n", Statistics.mean(xf), Statistics.std(xf))
 ```
 
 ### 4.2.4 Draws from binomial, Poisson, and negative binomial
@@ -212,9 +212,9 @@ N = 2000
 p1     = rand(N)
 trials = ceil.(Int, 10 .* rand(N))
 xbin   = [rand(Binomial(t, p)) for (t, p) in zip(trials, p1)]
-@printf("p1     mean=%.4f\n", mean(p1))
-@printf("trials mean=%.4f\n", mean(trials))
-@printf("xbin   mean=%.4f\n", mean(xbin))
+Printf.@printf("p1     mean=%.4f\n", Statistics.mean(p1))
+Printf.@printf("trials mean=%.4f\n", Statistics.mean(trials))
+Printf.@printf("xbin   mean=%.4f\n", Statistics.mean(xbin))
 ```
 
 #### Independent (but not identically distributed) draws from Poisson
@@ -240,7 +240,7 @@ xp  = rand(Poisson(5), N)
 xp1 = [rand(Poisson(m)) for m in xb]
 xp2 = [rand(Poisson(m)) for m in xbh]
 for (n, v) in [("xg", xg), ("xb", xb), ("xp", xp), ("xp1", xp1), ("xp2", xp2)]
-    @printf("%-4s mean=%8.4f sd=%7.4f\n", n, mean(v), std(v))
+    Printf.@printf("%-4s mean=%8.4f sd=%7.4f\n", n, Statistics.mean(v), Statistics.std(v))
 end
 ```
 
@@ -287,9 +287,9 @@ postclose sim_mem
 =#
 # Simulation of sample means: 10,000 reps × N=30
 Random.seed!(10101)
-xmeans = [mean(rand(30)) for _ in 1:10_000]
-@printf("Mean of sample means = %.6f\n", mean(xmeans))
-@printf("SD   of sample means = %.6f\n", std(xmeans))
+xmeans = [Statistics.mean(rand(30)) for _ in 1:10_000]
+Printf.@printf("Mean of sample means = %.6f\n", Statistics.mean(xmeans))
+Printf.@printf("SD   of sample means = %.6f\n", Statistics.std(xmeans))
 ```
 
 ```{julia}
@@ -299,8 +299,8 @@ use musr/simresults, clear
 summarize
 =#
 # Same data — view summary again
-@printf("N=%d, mean=%.6f, sd=%.6f, min=%.4f, max=%.4f\n",
-        length(xmeans), mean(xmeans), std(xmeans),
+Printf.@printf("N=%d, mean=%.6f, sd=%.6f, min=%.4f, max=%.4f\n",
+        length(xmeans), Statistics.mean(xmeans), Statistics.std(xmeans),
         minimum(xmeans), maximum(xmeans))
 ```
 
@@ -327,7 +327,7 @@ quietly histogram x, width(0.1) xtitle("x from one sample")
 
 quietly graph export musr/mus04fig1clt.eps, replace
 =#
-@printf("mean=%.4f sd=%.4f\n", mean(x), std(x))
+Printf.@printf("mean=%.4f sd=%.4f\n", Statistics.mean(x), Statistics.std(x))
 fig_clt = Figure(size = (600, 400))
 ax = Axis(fig_clt[1, 1], xlabel = "x from one sample", ylabel = "freq")
 hist!(ax, x, bins = 0:0.1:1)
@@ -339,7 +339,7 @@ fig_clt
 
 ```{julia}
 Random.seed!(10101)
-@printf("Sample mean = %.6f\n", onesample())
+Printf.@printf("Sample mean = %.6f\n", onesample())
 ```
 
 ### 4.3.2 The simulate equivalent
@@ -351,15 +351,15 @@ xbar = [onesample() for _ in 1:10_000]
 ```
 
 ```{julia}
-@printf("xbar: N=%d mean=%.4f sd=%.4f\n",
-        length(xbar), mean(xbar), std(xbar))
+Printf.@printf("xbar: N=%d mean=%.4f sd=%.4f\n",
+        length(xbar), Statistics.mean(xbar), Statistics.std(xbar))
 
 # Histogram with normal overlay
 fig_clt2 = Figure(size = (700, 400))
 ax = Axis(fig_clt2[1, 1], xlabel = "xbar from many samples", ylabel = "density")
 hist!(ax, xbar, bins = 30, normalization = :pdf, color = (:steelblue, 0.5))
 xs = range(minimum(xbar), maximum(xbar), length=200)
-lines!(ax, xs, pdf.(Normal(mean(xbar), std(xbar)), xs),
+lines!(ax, xs, pdf.(Normal(Statistics.mean(xbar), Statistics.std(xbar)), xs),
        color = :red, linewidth = 2)
 fig_clt2
 ```
@@ -387,10 +387,10 @@ postclose sim_mem
 Random.seed!(10101)
 results = Float64[]
 for _ in 1:10_000
-    push!(results, mean(rand(30)))
+    push!(results, Statistics.mean(rand(30)))
 end
-@printf("N=%d mean=%.6f sd=%.6f\n",
-        length(results), mean(results), std(results))
+Printf.@printf("N=%d mean=%.6f sd=%.6f\n",
+        length(results), Statistics.mean(results), Statistics.std(results))
 ```
 
 ## 4.4 Pseudorandom-number generators: Further details
@@ -427,9 +427,9 @@ summarize xstn xue xbernoulli
 =#
 # Bernoulli(0.6)
 xbernoulli = rand(2000) .> 0.6
-@printf("xstn       mean=%.4f sd=%.4f\n", mean(xstn), std(xstn))
-@printf("xue        mean=%.4f sd=%.4f\n", mean(xue), std(xue))
-@printf("xbern(0.6) mean=%.4f sd=%.4f\n", mean(xbernoulli), std(xbernoulli))
+Printf.@printf("xstn       mean=%.4f sd=%.4f\n", Statistics.mean(xstn), Statistics.std(xstn))
+Printf.@printf("xue        mean=%.4f sd=%.4f\n", Statistics.mean(xue), Statistics.std(xue))
+Printf.@printf("xbern(0.6) mean=%.4f sd=%.4f\n", Statistics.mean(xbernoulli), Statistics.std(xbernoulli))
 ```
 
 ### 4.4.2 Direct transformation
@@ -459,8 +459,8 @@ u = rand(N)
 Φa, Φb = cdf(Normal(), (a - μ)/σ), cdf(Normal(), (b - μ)/σ)
 w = Φa .+ u .* (Φb - Φa)
 xtrunc = μ .+ σ .* quantile.(Normal(), w)
-@printf("xtrunc: mean=%.4f sd=%.4f min=%.4f max=%.4f\n",
-        mean(xtrunc), std(xtrunc), minimum(xtrunc), maximum(xtrunc))
+Printf.@printf("xtrunc: mean=%.4f sd=%.4f min=%.4f max=%.4f\n",
+        Statistics.mean(xtrunc), Statistics.std(xtrunc), minimum(xtrunc), maximum(xtrunc))
 ```
 
 ### 4.4.5 Draws from multivariate normal
@@ -488,9 +488,9 @@ MU    = [10.0, 20.0]
 SIGMA = [4.0  sig12; sig12  9.0]
 Y = rand(MvNormal(MU, SIGMA), 1000)'   # 1000×2
 y1 = Y[:, 1]; y2 = Y[:, 2]
-@printf("y1: mean=%.4f sd=%.4f\n", mean(y1), std(y1))
-@printf("y2: mean=%.4f sd=%.4f\n", mean(y2), std(y2))
-@printf("cor(y1,y2) = %.4f\n", cor(y1, y2))
+Printf.@printf("y1: mean=%.4f sd=%.4f\n", Statistics.mean(y1), Statistics.std(y1))
+Printf.@printf("y2: mean=%.4f sd=%.4f\n", Statistics.mean(y2), Statistics.std(y2))
+Printf.@printf("cor(y1,y2) = %.4f\n", Statistics.cor(y1, y2))
 ```
 
 #### Transformation using Cholesky decomposition
@@ -517,9 +517,9 @@ for i in 2:(s0 + s1)
     y2[i] = sqrt(1 - ρ^2) * randn() + ρ * y1[i]
 end
 y = hcat(y1[s0+1:end], y2[s0+1:end])
-println("means:    ", mean(y, dims = 1))
-println("variance: ", cov(y))
-println("corr:     ", cor(y))
+println("means:    ", Statistics.mean(y, dims = 1))
+println("variance: ", Statistics.cov(y))
+println("corr:     ", Statistics.cor(y))
 ```
 
 ```{julia}
@@ -544,7 +544,7 @@ end
 # Correlation between y2_t and y2_{t-1}
 y2_kept = y[:, 2]
 println("cor(y2, y2[lag1]) = ",
-        cor(y2_kept[2:end], y2_kept[1:end-1]))
+        Statistics.cor(y2_kept[2:end], y2_kept[1:end-1]))
 ```
 
 ## 4.5 Computing integrals
@@ -569,7 +569,7 @@ display "After 100 draws the MC estimate of E[exp{-exp(x)}] is " Egy
 Random.seed!(10101)
 y  = quantile.(Normal(), rand(100))   # standard normal draws
 gy = exp.(.-exp.(y))
-@printf("After 100 draws E[exp(-exp(x))] ≈ %.6f\n", mean(gy))
+Printf.@printf("After 100 draws E[exp(-exp(x))] ≈ %.6f\n", Statistics.mean(gy))
 ```
 
 ### 4.5.3 Monte Carlo integration using different S
@@ -610,7 +610,7 @@ mcintegration 100000
 # Run 1000 times
 Random.seed!(10101)
 mutilde = [simulateexample() for _ in 1:1000]
-@printf("mean=%.4f sd=%.4f\n", mean(mutilde), std(mutilde))
+Printf.@printf("mean=%.4f sd=%.4f\n", Statistics.mean(mutilde), Statistics.std(mutilde))
 ```
 
 ```{julia}
@@ -635,9 +635,9 @@ end
 Random.seed!(10101)
 mutilde2 = Float64[]
 for _ in 1:1000
-    push!(mutilde2, median(randn(9)))
+    push!(mutilde2, Statistics.median(randn(9)))
 end
-@printf("mean=%.4f sd=%.4f\n", mean(mutilde2), std(mutilde2))
+Printf.@printf("mean=%.4f sd=%.4f\n", Statistics.mean(mutilde2), Statistics.std(mutilde2))
 ```
 
 ## 4.6 Simulation for regression: Introduction
@@ -683,9 +683,9 @@ t2f      = [s.t2 for s in sims]
 reject2f = [s.r2 for s in sims]
 p2f      = [s.p2 for s in sims]
 
-@printf("Mean b2     = %.4f\n", mean(b2f))
-@printf("Mean se2    = %.4f\n", mean(se2f))
-@printf("Reject rate = %.4f\n", mean(reject2f))
+Printf.@printf("Mean b2     = %.4f\n", Statistics.mean(b2f))
+Printf.@printf("Mean se2    = %.4f\n", Statistics.mean(se2f))
+Printf.@printf("Reject rate = %.4f\n", Statistics.mean(reject2f))
 ```
 
 ```{julia}
@@ -698,9 +698,9 @@ quietly test x=2
 return list
 =#
 # Summary statistics
-@printf("b2:      mean=%.4f sd=%.4f\n", mean(b2f), std(b2f))
-@printf("se2:     mean=%.4f sd=%.4f\n", mean(se2f), std(se2f))
-@printf("rejects: %.4f\n", mean(reject2f))
+Printf.@printf("b2:      mean=%.4f sd=%.4f\n", Statistics.mean(b2f), Statistics.std(b2f))
+Printf.@printf("se2:     mean=%.4f sd=%.4f\n", Statistics.mean(se2f), Statistics.std(se2f))
+Printf.@printf("rejects: %.4f\n", Statistics.mean(reject2f))
 ```
 
 ### 4.6.2 Interpreting simulation output
@@ -760,9 +760,9 @@ end
 =#
 Random.seed!(10101)
 sims = [chi2datab() for _ in 1:NUMSIMS]
-@printf("Mean b2     = %.4f\n", mean(s.b2 for s in sims))
-@printf("Mean se2    = %.4f\n", mean(s.se2 for s in sims))
-@printf("Reject rate = %.4f\n", mean(s.r2 for s in sims))
+Printf.@printf("Mean b2     = %.4f\n", Statistics.mean(s.b2 for s in sims))
+Printf.@printf("Mean se2    = %.4f\n", Statistics.mean(s.se2 for s in sims))
+Printf.@printf("Reject rate = %.4f\n", Statistics.mean(s.r2 for s in sims))
 ```
 
 #### Different error distributions
@@ -791,7 +791,7 @@ xstar = draws[:, 1]; u = draws[:, 2]; v = draws[:, 3]
 y = 1 .* xstar .+ u
 x = xstar .+ v
 β_eiv = (x'x) \ (x'y)
-@printf("OLS estimate (no constant) = %.4f  (true = 1.00)\n", β_eiv)
+Printf.@printf("OLS estimate (no constant) = %.4f  (true = 1.00)\n", β_eiv)
 ```
 
 ### 4.6.5 Simulation with endogenous regressors
@@ -820,9 +820,9 @@ end
 =#
 Random.seed!(10101)
 sims = [endogreg() for _ in 1:NUMSIMS]
-@printf("Mean b2     = %.4f  (true = 2.00; OLS biased)\n", mean(s.b2 for s in sims))
-@printf("Mean se2    = %.4f\n", mean(s.se2 for s in sims))
-@printf("Reject rate = %.4f\n", mean(s.r2 for s in sims))
+Printf.@printf("Mean b2     = %.4f  (true = 2.00; OLS biased)\n", Statistics.mean(s.b2 for s in sims))
+Printf.@printf("Mean se2    = %.4f\n", Statistics.mean(s.se2 for s in sims))
+Printf.@printf("Reject rate = %.4f\n", Statistics.mean(s.r2 for s in sims))
 ```
 
 
@@ -833,10 +833,10 @@ mean b2r se2r reject2r
 =#
 Random.seed!(10101)
 sims = [randomreg() for _ in 1:NUMSIMS]
-@printf("Mean b2     = %.4f  (true = 5)\n", mean(s.b2 for s in sims))
-@printf("Mean se2    = %.4f\n", mean(s.se2 for s in sims))
-@printf("Mean t2     = %.4f\n", mean(s.t2 for s in sims))
-@printf("Reject rate = %.4f\n", mean(s.r2 for s in sims))
+Printf.@printf("Mean b2     = %.4f  (true = 5)\n", Statistics.mean(s.b2 for s in sims))
+Printf.@printf("Mean se2    = %.4f\n", Statistics.mean(s.se2 for s in sims))
+Printf.@printf("Mean t2     = %.4f\n", Statistics.mean(s.t2 for s in sims))
+Printf.@printf("Reject rate = %.4f\n", Statistics.mean(s.r2 for s in sims))
 ```
 
 ```{julia}
@@ -869,8 +869,8 @@ for _ in 1:NUMSIMS
     push!(results.t2, s.t2)
     push!(results.reject, s.r2)
 end
-@printf("mean b2 = %.4f, mean se2 = %.4f, mean reject = %.4f\n",
-        mean(results.b2), mean(results.se2), mean(results.reject))
+Printf.@printf("mean b2 = %.4f, mean se2 = %.4f, mean reject = %.4f\n",
+        Statistics.mean(results.b2), Statistics.mean(results.se2), Statistics.mean(results.reject))
 ```
 
 ```{julia}
@@ -884,8 +884,8 @@ mean b2r se2r t2r reject2r p2r, noheader
 # Endogenous regressors: another run
 Random.seed!(10101)
 sims = [endogreg() for _ in 1:NUMSIMS]
-@printf("OLS with endogenous regressor — mean b2 = %.4f (true = 2)\n",
-        mean(s.b2 for s in sims))
+Printf.@printf("OLS with endogenous regressor — mean b2 = %.4f (true = 2)\n",
+        Statistics.mean(s.b2 for s in sims))
 ```
 
 ## 4.7 Stata resources

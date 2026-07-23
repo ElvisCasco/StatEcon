@@ -22,7 +22,7 @@ function _er_print_matrix(M::AbstractMatrix; colnames = nothing, rownames = noth
     m, n = size(M)
     colnames = colnames === nothing ? ["c$(j)" for j in 1:n] : String.(colnames)
     rownames = rownames === nothing ? String[] : String.(rownames)
-    cellstrs = [@sprintf("%.6g", M[i, j]) for i in 1:m, j in 1:n]
+    cellstrs = [Printf.@sprintf("%.6g", M[i, j]) for i in 1:m, j in 1:n]
     colw = [max(length(colnames[j]),
                 maximum(length(cellstrs[i, j]) for i in 1:m; init = 0)) for j in 1:n]
     rowlblw = isempty(rownames) ? 0 : maximum(length.(rownames))
@@ -59,7 +59,7 @@ function ereturn_list(m)
     # ---- e()-macros --------------------------------------------------------
     depvar = hasproperty(m, :yname)        ? string(m.yname) :
              hasproperty(m, :responsename) ? string(m.responsename) : missing
-    indeps = try join(string.(coefnames(m)), " ") catch; missing end
+    indeps = try join(string.(StatsBase.coefnames(m)), " ") catch; missing end
     macros = (; depvar = depvar, indeps = indeps,
                 cmd    = string(nameof(typeof(m))))
 
@@ -80,12 +80,12 @@ function ereturn_list(m)
     end
     println("\nmatrices:")
     if !ismissing(b)
-        names_ = try coefnames(m) catch; ["x$i" for i in eachindex(b)] end
+        names_ = try StatsBase.coefnames(m) catch; ["x$i" for i in eachindex(b)] end
         println("  e(b)  : 1 x $(length(b))")
         _er_print_matrix(reshape(b, 1, :); colnames = names_)
     end
     if !ismissing(V)
-        names_ = try coefnames(m) catch; ["x$i" for i in 1:size(V, 1)] end
+        names_ = try StatsBase.coefnames(m) catch; ["x$i" for i in 1:size(V, 1)] end
         println("  e(V)  : $(size(V, 1)) x $(size(V, 2))")
         _er_print_matrix(V; colnames = names_, rownames = names_)
     end

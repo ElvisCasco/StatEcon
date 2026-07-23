@@ -22,8 +22,8 @@ function stata_ttest(df::AbstractDataFrame, var::Symbol, by::Symbol;
     g1 = Float64.(yvec[bvec .== levs[2]])
 
     n0, n1 = length(g0), length(g1)
-    μ0, μ1 = mean(g0), mean(g1)
-    s0, s1 = std(g0), std(g1)
+    μ0, μ1 = Statistics.mean(g0), Statistics.mean(g1)
+    s0, s1 = Statistics.std(g0), Statistics.std(g1)
     dif    = μ0 - μ1
 
     if unequal

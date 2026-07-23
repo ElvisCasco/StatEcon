@@ -147,7 +147,7 @@ se_rob = stata_robust_se_glm(pois10)
 β = GLM.coef(pois10); cn = GLM.coefnames(pois10)
 println("\n— Poisson with robust SE —")
 for i in eachindex(β)
-    @printf("%-12s coef=%10.6f  rob.se=%10.6f  z=%7.2f\n",
+    Printf.@printf("%-12s coef=%10.6f  rob.se=%10.6f  z=%7.2f\n",
             cn[i], β[i], se_rob[i], β[i]/se_rob[i])
 end
 ```

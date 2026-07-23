@@ -113,10 +113,10 @@ function stata_reg3(df::DataFrames.AbstractDataFrame, eqs::Pair...;
     for j in 1:M
         push!(sum_rows,
               [eqnames[j], string(N), string(ks[j] - 1),
-               @sprintf("%.6f", rmse[j]),
-               @sprintf("%.4f", r2s[j]),
-               @sprintf("%.2f", chi2s[j]),
-               @sprintf("%.4f", pvals[j])])
+               Printf.@sprintf("%.6f", rmse[j]),
+               Printf.@sprintf("%.4f", r2s[j]),
+               Printf.@sprintf("%.2f", chi2s[j]),
+               Printf.@sprintf("%.4f", pvals[j])])
     end
     _sug_print_table(sum_headers, sum_rows,
                      [:l, :r, :r, :r, :r, :r, :r])
@@ -142,12 +142,12 @@ function stata_reg3(df::DataFrames.AbstractDataFrame, eqs::Pair...;
             push!(rows,
                   [first_row ? eqnames[j] : "",
                    cns[j][i],
-                   @sprintf("%.7f", β_i),
-                   @sprintf("%.7f", se_i),
-                   @sprintf("%.2f", z_i),
-                   @sprintf("%.3f", p_i),
-                   @sprintf("%.7f", lo),
-                   @sprintf("%.7f", hi)])
+                   Printf.@sprintf("%.7f", β_i),
+                   Printf.@sprintf("%.7f", se_i),
+                   Printf.@sprintf("%.2f", z_i),
+                   Printf.@sprintf("%.3f", p_i),
+                   Printf.@sprintf("%.7f", lo),
+                   Printf.@sprintf("%.7f", hi)])
             first_row = false; nrows += 1
         end
         j < M && push!(hline_at, nrows)

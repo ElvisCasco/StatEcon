@@ -637,7 +637,7 @@ function percentilet_pvalue_stata(tstars::AbstractVector, β_orig::Real, se_orig
                                   null::Real = 0.0, quiet::Bool = false)
     t_obs = (β_orig - null) / se_orig; B = length(tstars)
     p_val = sum(abs(t) > abs(t_obs) for t in tstars) / B
-    quiet || @printf("p-value = %.7g\n", p_val)
+    quiet || Printf.@printf("p-value = %.7g\n", p_val)
     return (; t_obs, p_value = p_val, B)
 end
 
@@ -659,9 +659,9 @@ function percentilet_ci_stata(tstars::AbstractVector, β_orig::Real, se_orig::Re
     pct_str(p) = (q = p * 100; isinteger(q) ? string(Int(q)) :
                   rstrip(rstrip(Printf.@sprintf("%.4f", q), '0'), '.'))
     if !quiet
-        @printf("%s and %s percentiles of t* distn: %s, %s\n",
+        Printf.@printf("%s and %s percentiles of t* distn: %s, %s\n",
                 pct_str(plo), pct_str(phi), gd(q_lo), gd(q_hi))
-        @printf("%g percent percentile-t confidence interval is  (%s,%s)\n",
+        Printf.@printf("%g percent percentile-t confidence interval is  (%s,%s)\n",
                 level * 100, gd(lb), gd(ub))
     end
     return (; q_lo, q_hi, lb, ub, level)
@@ -1026,7 +1026,7 @@ quietly save musr/bootdata, replace
 =#
 # Use first 50 observations of year02 = 1 from the doctor visits data
 df_boot = _c13_bootdata()
-@printf("Bootstrap dataset: %d obs\n", DataFrames.nrow(df_boot))
+Printf.@printf("Bootstrap dataset: %d obs\n", DataFrames.nrow(df_boot))
 ```
 
 ```{julia}
@@ -1157,7 +1157,7 @@ println()
 println("e(b_bs)[1,2]")
 println("       docvis:    docvis:")
 println("      chronic      _cons")
-@printf("y1  %9s  %9s\n",
+Printf.@printf("y1  %9s  %9s\n",
         strip0(Printf.@sprintf("%.8f", chronic)),
         strip0(Printf.@sprintf("%.8f", _cons)))
 ```
@@ -1330,7 +1330,7 @@ print("running 400 reps... "); t0 = time()
 β_boot = obs_bootstrap(df_h; B = 400, seed = 10101, verbose = false) do d
     _hecktwostep(d)
 end
-@printf("done in %.2fs\n", time() - t0)
+Printf.@printf("done in %.2fs\n", time() - t0)
 
 se_b = vec(Statistics.std(β_boot, dims = 1))
 crit = Distributions.quantile(Distributions.Normal(), 0.975)
@@ -1454,7 +1454,7 @@ print("running 400 reps... "); t0 = time()
 β_boot = obs_bootstrap(df6c; B = 400, seed = 10101, verbose = false) do d
     _hausmantest(d)
 end
-@printf("done in %.2fs\n", time() - t0)
+Printf.@printf("done in %.2fs\n", time() - t0)
 
 bootstrap_b_table_stata(β_obs, β_boot, labels; n_obs = n_obs, depvar = "");
 ```
@@ -1501,7 +1501,7 @@ print("running 400 reps... "); t0 = time()
 cv_boot = obs_bootstrap(df_bd; B = 400, seed = 10101, verbose = false) do d
     _coeffvar(d)
 end
-@printf("done in %.2fs\n", time() - t0)
+Printf.@printf("done in %.2fs\n", time() - t0)
 
 # Persist the 400 replicates (Stata's `saving(musr/coeffofvar, replace)`).
 mkpath("musr")
@@ -1747,7 +1747,7 @@ nb_boot = stata_nbreg(df_boot, GLM.@formula(docvis ~ chronic))
 # Stata `predict muhat` after nbreg — conditional mean μ̂_i = exp(x_iᵀβ̂).
 muhat = exp.(GLM.modelmatrix(nb_boot.model) * nb_boot.β_glm)
 alpha = nb_boot.α
-@printf("alpha = %.6f   mean(muhat) = %.6f\n", alpha, Statistics.mean(muhat))
+Printf.@printf("alpha = %.6f   mean(muhat) = %.6f\n", alpha, Statistics.mean(muhat))
 ```
 
 ```{julia}

@@ -14,7 +14,7 @@ function kdensity(v::AbstractVector; npoints::Int = 200,
                   bandwidth::Union{Nothing,Real} = nothing, cut::Real = 3.0)
     x = Float64.(collect(skipmissing(v)))
     n = length(x)
-    s   = std(x)
+    s   = Statistics.std(x)
     iqr = quantile(x, 0.75) - quantile(x, 0.25)
     h = isnothing(bandwidth) ? 0.9 * min(s, iqr / 1.349) * n^(-1/5) : float(bandwidth)
     h = h > 0 ? h : (s > 0 ? s : 1.0)                       # guard degenerate spread

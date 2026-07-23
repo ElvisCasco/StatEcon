@@ -67,25 +67,25 @@ function stata_regress_cluster(df, y, xs::AbstractVector;
     w_norm = w .* (n / sum(w))
     rmse   = sqrt(sum(w_norm .* e .^ 2) / (n - k))
 
-    @printf("%-48s%-18s= %10s\n",  "Linear regression", "Number of obs", _sm_comma(n))
-    @printf("%-48s%-18s= %10.2f\n", "", "F($q, $dfree)", Fstat)
-    @printf("%-48s%-18s= %10.4f\n", "", "Prob > F", pF)
-    @printf("%-48s%-18s= %10.4f\n", "", "R-squared", r2)
-    @printf("%-48s%-18s= %10.4f\n", "", "Root MSE", rmse)
+    Printf.@printf("%-48s%-18s= %10s\n",  "Linear regression", "Number of obs", _sm_comma(n))
+    Printf.@printf("%-48s%-18s= %10.2f\n", "", "F($q, $dfree)", Fstat)
+    Printf.@printf("%-48s%-18s= %10.4f\n", "", "Prob > F", pF)
+    Printf.@printf("%-48s%-18s= %10.4f\n", "", "R-squared", r2)
+    Printf.@printf("%-48s%-18s= %10.4f\n", "", "Root MSE", rmse)
     println()
-    @printf("%78s\n", "(Std. err. adjusted for $M clusters in $cluster)")
+    Printf.@printf("%78s\n", "(Std. err. adjusted for $M clusters in $cluster)")
 
     order = vcat(collect(slope), 1)
     lvl = round(Int, 100 * level)
     headers = [string(ys), "Coefficient", "Robust SE",
                "t", "P>|t|", "[$(lvl)% CI low]", "[$(lvl)% CI high]"]
     rows = [[cn[i],
-             @sprintf("%.7f", β[i]),
-             @sprintf("%.7f", se[i]),
-             @sprintf("%.2f", t_stat[i]),
-             @sprintf("%.3f", pvals[i]),
-             @sprintf("%.7f", ci_lo[i]),
-             @sprintf("%.7f", ci_hi[i])] for i in order]
+             Printf.@sprintf("%.7f", β[i]),
+             Printf.@sprintf("%.7f", se[i]),
+             Printf.@sprintf("%.2f", t_stat[i]),
+             Printf.@sprintf("%.3f", pvals[i]),
+             Printf.@sprintf("%.7f", ci_lo[i]),
+             Printf.@sprintf("%.7f", ci_hi[i])] for i in order]
     _sug_print_table(headers, rows, [:l, :r, :r, :r, :r, :r, :r])
 
     return (; β, V, se, t = t_stat, p = pvals, ci_lo, ci_hi, coefnames = cn,

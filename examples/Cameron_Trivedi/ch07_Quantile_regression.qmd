@@ -94,8 +94,8 @@ drop if ltotexp == .
 summarize ltotexp suppins totchr age female white, separator(0)
 =#
 # Read log medical expenditures data
-df7 = DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus03data.dta"))
-df7 = dropmissing(df7, :ltotexp)
+df7 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus03data.dta"))
+df7 = DataFrames.dropmissing(df7, :ltotexp)
 DataFrames.describe(df7[:, [:ltotexp, :suppins, :totchr, :age, :female, :white]])
 ```
 
@@ -134,15 +134,15 @@ fig7
 qreg ltotexp suppins totchr age female white
 =#
 # Median (q = 0.5) regression
-df7c = dropmissing(df7[:, [:ltotexp, :suppins, :totchr, :age, :female, :white]])
+df7c = DataFrames.dropmissing(df7[:, [:ltotexp, :suppins, :totchr, :age, :female, :white]])
 y    = df7c.ltotexp
-X    = hcat(ones(nrow(df7c)),
+X    = hcat(ones(DataFrames.nrow(df7c)),
             df7c.suppins, df7c.totchr, df7c.age, df7c.female, df7c.white)
 βqr  = quantreg(X, y, 0.5)
 xnms = ["_cons", "suppins", "totchr", "age", "female", "white"]
 println("\n— Quantile regression at τ = 0.5 —")
 for i in eachindex(βqr)
-    @printf("%-10s %12.6f\n", xnms[i], βqr[i])
+    Printf.@printf("%-10s %12.6f\n", xnms[i], βqr[i])
 end
 ```
 
@@ -168,7 +168,7 @@ display "Multiplier of QR in logs coeffs to get AME in levels = " r(mean)
 # Multiplier exp(x'β) — converts QR coefficients in logs to AME in levels
 xb     = X * βqr
 expxb  = exp.(xb)
-@printf("Mean of exp(x'β) = %.4f (multiplier)\n", mean(expxb))
+Printf.@printf("Mean of exp(x'β) = %.4f (multiplier)\n", Statistics.mean(expxb))
 ```
 
 ### 7.3.5 Comparison of estimates at different quantiles
@@ -196,10 +196,10 @@ qr50  = quantreg(X, y, 0.50)
 qr75  = quantreg(X, y, 0.75)
 
 println("\n— OLS vs Quantile Regressions —")
-@printf("%-10s %10s %10s %10s %10s\n",
+Printf.@printf("%-10s %10s %10s %10s %10s\n",
         "Variable", "OLS", "QR_25", "QR_50", "QR_75")
 for i in eachindex(ols7)
-    @printf("%-10s %10.4f %10.4f %10.4f %10.4f\n",
+    Printf.@printf("%-10s %10.4f %10.4f %10.4f %10.4f\n",
             xnms[i], ols7[i], qr25[i], qr50[i], qr75[i])
 end
 ```
@@ -213,10 +213,10 @@ for b in 1:B
     idx = sample(1:length(y), length(y); replace = true)
     β_boot[b, :] = quantreg(X[idx, :], y[idx], 0.5)
 end
-se_boot = vec(std(β_boot, dims = 1))
+se_boot = vec(Statistics.std(β_boot, dims = 1))
 println("\n— Bootstrap SE for τ = 0.5 —")
 for i in eachindex(βqr)
-    @printf("%-10s coef=%10.4f  bs.se=%10.4f\n",
+    Printf.@printf("%-10s coef=%10.4f  bs.se=%10.4f\n",
             xnms[i], βqr[i], se_boot[i])
 end
 ```
@@ -285,8 +285,8 @@ m_ols7 = FixedEffectModels.reg(df7c, @formula(ltotexp ~ suppins + totchr + age +
 yhat7  = FixedEffectModels.predict(m_ols7, df7c)
 df7c.uhat2 = (df7c.ltotexp .- yhat7).^2
 m_bp7 = FixedEffectModels.reg(df7c, @formula(uhat2 ~ suppins + totchr + age + female + white))
-LM = nrow(df7c) * StatsBase.r2(m_bp7)
-@printf("BP LM(5) = %.3f, p = %.4f\n", LM, 1 - cdf(Chisq(5), LM))
+LM = DataFrames.nrow(df7c) * StatsBase.r2(m_bp7)
+Printf.@printf("BP LM(5) = %.3f, p = %.4f\n", LM, 1 - cdf(Chisq(5), LM))
 ```
 
 ### 7.3.7 Hypothesis tests
@@ -310,8 +310,8 @@ for b in 1:B
 end
 i_supp = findfirst(==("suppins"), xnms)
 diff = β25_b[:, i_supp] .- β75_b[:, i_supp]
-@printf("β25(suppins) - β75(suppins): mean=%.4f  bs.se=%.4f  z=%.2f\n",
-        mean(diff), std(diff), mean(diff) / std(diff))
+Printf.@printf("β25(suppins) - β75(suppins): mean=%.4f  bs.se=%.4f  z=%.2f\n",
+        Statistics.mean(diff), Statistics.std(diff), Statistics.mean(diff) / Statistics.std(diff))
 ```
 
 
@@ -366,7 +366,7 @@ for (j, τ) in enumerate(τs)
         idx = sample(1:length(y), length(y); replace = true)
         bs[b, :] = quantreg(X[idx, :], y[idx], τ)
     end
-    se = vec(std(bs, dims = 1))
+    se = vec(Statistics.std(bs, dims = 1))
     lo_mat[j, :] = β .- 1.96 .* se
     up_mat[j, :] = β .+ 1.96 .* se
 end
@@ -441,9 +441,9 @@ qr25g = quantreg(Xg, yg_v, 0.25)
 qr50g = quantreg(Xg, yg_v, 0.50)
 qr75g = quantreg(Xg, yg_v, 0.75)
 println("\n— QR at three quantiles —")
-@printf("%-7s %10s %10s %10s\n", "Var", "QR25", "QR50", "QR75")
+Printf.@printf("%-7s %10s %10s %10s\n", "Var", "QR25", "QR50", "QR75")
 for (i, n) in enumerate(("_cons","x2","x3"))
-    @printf("%-7s %10.4f %10.4f %10.4f\n", n, qr25g[i], qr50g[i], qr75g[i])
+    Printf.@printf("%-7s %10.4f %10.4f %10.4f\n", n, qr25g[i], qr50g[i], qr75g[i])
 end
 ```
 
@@ -480,7 +480,7 @@ sqreg y x2 x3, quantile(.25 .50 .75)
 # Theoretical β_x2(τ) = 1 + 0.5·F_e^{-1}(τ) where e ~ N(0, 25)
 σ_e = 5
 for τ in (0.25, 0.50, 0.75)
-    @printf("Predicted β_x2(τ=%.2f) = %.4f\n",
+    Printf.@printf("Predicted β_x2(τ=%.2f) = %.4f\n",
             τ, 1 + 0.5 * quantile(Normal(0, σ_e), τ))
 end
 ```
@@ -550,9 +550,9 @@ estimates table OLS OLS_Rob QR_25 QR_50 QR_75, b(%7.3f) se
 # OLS and QR comparison on the simulated data
 ols_g  = (Xg' * Xg) \ (Xg' * yg_v)
 println("\n— OLS vs QR (simulated heteroskedastic data) —")
-@printf("%-7s %10s %10s %10s %10s\n", "Var", "OLS", "QR25", "QR50", "QR75")
+Printf.@printf("%-7s %10s %10s %10s %10s\n", "Var", "OLS", "QR25", "QR50", "QR75")
 for (i, n) in enumerate(("_cons","x2","x3"))
-    @printf("%-7s %10.4f %10.4f %10.4f %10.4f\n",
+    Printf.@printf("%-7s %10.4f %10.4f %10.4f %10.4f\n",
             n, ols_g[i], qr25g[i], qr50g[i], qr75g[i])
 end
 ```
@@ -628,8 +628,8 @@ for _ in 1:200
     b75 = quantreg(Xg[idx, :], yg_v[idx], 0.75)
     push!(diffs, b25[2] - b75[2])
 end
-@printf("β_x2(.25) - β_x2(.75) = %.4f  bs.se = %.4f  z = %.2f\n",
-        mean(diffs), std(diffs), mean(diffs) / std(diffs))
+Printf.@printf("β_x2(.25) - β_x2(.75) = %.4f  bs.se = %.4f  z = %.2f\n",
+        Statistics.mean(diffs), Statistics.std(diffs), Statistics.mean(diffs) / Statistics.std(diffs))
 ```
 
 ```{julia}
@@ -662,7 +662,7 @@ stata_test_sureg(sq_25_75, ["[q25]x3 = [q75]x3"]; df_F = sq_25_75.df_resid);
 use musr/mus07qrcnt.dta, clear
 summarize docvis private totchr age female white, separator(0)
 =#
-df7q = DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus07qrcnt.dta"))
+df7q = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus07qrcnt.dta"))
 for c in names(df7q)
     if eltype(df7q[!, c]) <: Union{Missing, Float32} || eltype(df7q[!, c]) === Float32
         df7q[!, c] = convert.(Union{Missing, Float64}, df7q[!, c])
@@ -710,7 +710,7 @@ margins, dydx(*) atmean noatlegend
 =#
 # Quantile plots: docvis vs jittered docvisu
 Random.seed!(10101)
-df7q.docvisu = df7q.docvis .+ rand(nrow(df7q))
+df7q.docvisu = df7q.docvis .+ rand(DataFrames.nrow(df7q))
 sub = filter(r -> r.docvis < 40, df7q)
 
 fig7q = Figure(size = (900, 400))
@@ -731,12 +731,12 @@ nb7 = negbin(@formula(docvis ~ private + totchr + age + female + white),
 println(nb7)
 
 # AME for Poisson/NB: ∂μ/∂x_j = β_j · μ(x); average over sample
-df7q_clean = dropmissing(df7q, [:docvis, :private, :totchr, :age, :female, :white])
+df7q_clean = DataFrames.dropmissing(df7q, [:docvis, :private, :totchr, :age, :female, :white])
 μhat = GLM.predict(nb7, df7q_clean)
 println("\n— Average marginal effects (NB) —")
 for (name, β) in zip(StatsBase.coefnames(nb7), StatsBase.coef(nb7))
     name == "(Intercept)" && continue
-    @printf("%-10s %12.6f\n", name, β * mean(μhat))
+    Printf.@printf("%-10s %12.6f\n", name, β * Statistics.mean(μhat))
 end
 ```
 
@@ -744,7 +744,7 @@ end
 #* Marginal effects from conventional negative binomial model
 #quietly nbreg docvis i.private totchr age i.female i.white, vce(robust)
 #margins, dydx(*) atmean noatlegend
-df7m = dropmissing(df7q, [:docvis, :private, :totchr, :age, :female, :white])
+df7m = DataFrames.dropmissing(df7q, [:docvis, :private, :totchr, :age, :female, :white])
 nb7m = GLM.negbin(@formula(docvis ~ private + totchr + age + female + white),
                   df7m, GLM.LogLink())
 stata_margins_count(nb7m, df7m;
@@ -760,7 +760,7 @@ stata_margins_count(nb7m, df7m;
 # MEM for NB model: for continuous x_j, dy/dx_j = β_j · μ(x̄);
 # for binary (i.) regressors use the discrete change μ(x=1) − μ(x=0).
 # SEs by the delta method with the nbreg vcov.
-df7m = dropmissing(df7q, [:docvis, :private, :totchr, :age, :female, :white])
+df7m = DataFrames.dropmissing(df7q, [:docvis, :private, :totchr, :age, :female, :white])
 nb7m = GLM.negbin(@formula(docvis ~ private + totchr + age + female + white),
                   df7m, GLM.LogLink())
 stata_margins_count(nb7m, df7m;
@@ -777,9 +777,9 @@ stata_margins_count(nb7m, df7m;
 #            (3) repeat for R replications, average the coefficients
 #            (4) marginal effects: dy/dx = exp(x'β) · β_j  (for continuous x)
 Random.seed!(10101)
-df7qc = dropmissing(df7q, [:docvis, :private, :totchr, :age, :female, :white])
+df7qc = DataFrames.dropmissing(df7q, [:docvis, :private, :totchr, :age, :female, :white])
 yq = Float64.(df7qc.docvis)
-Xq = hcat(ones(nrow(df7qc)), df7qc.private, df7qc.totchr, df7qc.age,
+Xq = hcat(ones(DataFrames.nrow(df7qc)), df7qc.private, df7qc.totchr, df7qc.age,
           df7qc.female, df7qc.white)
 xnms_q = ["_cons", "private", "totchr", "age", "female", "white"]
 nq = length(yq)
@@ -799,7 +799,7 @@ end
 β_qcr50 = qcount_est(yq, Xq, 0.50; R = 500)
 println("— Quantile count regression at τ = 0.50 —")
 for i in eachindex(β_qcr50)
-    @printf("%-10s %12.6f\n", xnms_q[i], β_qcr50[i])
+    Printf.@printf("%-10s %12.6f\n", xnms_q[i], β_qcr50[i])
 end
 ```
 
@@ -822,11 +822,11 @@ qc_fit = stata_qcount(df7q, :docvis,
 
 ```{julia}
 # qcount_mfx at τ = 0.50  — marginal effects: ME_j = β_j · exp(x̄'β)
-xbar = vec(mean(Xq, dims = 1))
+xbar = vec(Statistics.mean(Xq, dims = 1))
 expxb = exp(dot(xbar, β_qcr50))
 println("— QCR marginal effects at τ = 0.50 (at sample means) —")
 for i in 2:length(β_qcr50)   # skip constant
-    @printf("%-10s  dy/dx = %12.6f\n", xnms_q[i], β_qcr50[i] * expxb)
+    Printf.@printf("%-10s  dy/dx = %12.6f\n", xnms_q[i], β_qcr50[i] * expxb)
 end
 ```
 
@@ -848,11 +848,11 @@ stata_margins_count(qc_fit, df7q;
 expxb75 = exp(dot(xbar, β_qcr75))
 println("— Quantile count regression at τ = 0.75 —")
 for i in eachindex(β_qcr75)
-    @printf("%-10s %12.6f\n", xnms_q[i], β_qcr75[i])
+    Printf.@printf("%-10s %12.6f\n", xnms_q[i], β_qcr75[i])
 end
 println("\n— QCR marginal effects at τ = 0.75 (at sample means) —")
 for i in 2:length(β_qcr75)
-    @printf("%-10s  dy/dx = %12.6f\n", xnms_q[i], β_qcr75[i] * expxb75)
+    Printf.@printf("%-10s  dy/dx = %12.6f\n", xnms_q[i], β_qcr75[i] * expxb75)
 end
 ```
 
@@ -913,10 +913,10 @@ twoway connected b1 percentile || line upper percentile||line lower percentile, 
 graph save musr/bsqrcoef1.gph, replace
 =#
 # Save quantile-coefficient series for τ = 0.10, 0.20, ..., 0.90 and plot
-df7p = dropmissing(DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus03data.dta"))[:,
+df7p = DataFrames.dropmissing(DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus03data.dta"))[:,
         [:ltotexp, :suppins, :age, :female, :white, :totchr]])
 yp = df7p.ltotexp
-Xp = hcat(ones(nrow(df7p)),
+Xp = hcat(ones(DataFrames.nrow(df7p)),
           df7p.suppins, df7p.age, df7p.female, df7p.white, df7p.totchr)
 
 τs = 0.10:0.10:0.90
@@ -930,7 +930,7 @@ for τ in τs
         idx = sample(1:length(yp), length(yp); replace = true)
         push!(bs, quantreg(Xp[idx, :], yp[idx], τ)[2])
     end
-    se = std(bs)
+    se = Statistics.std(bs)
     push!(ups, β[2] + 1.96 * se)
     push!(los, β[2] - 1.96 * se)
 end

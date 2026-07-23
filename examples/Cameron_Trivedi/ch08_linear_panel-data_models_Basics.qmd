@@ -65,7 +65,7 @@ bootstrap used later in the chapter).
 """
     panel_r2s(df, y, xs, idvar, β_slopes)
 
-Stata-style overall, between, and within panel R²s: `cor(y, Xβ̂)²` at the
+Stata-style overall, between, and within panel R²s: `Statistics.cor(y, Xβ̂)²` at the
 observation, panel-mean, and within-demeaned levels respectively.
 """
 function panel_r2s(df, y::Symbol, xs::AbstractVector{Symbol}, idvar::Symbol,
@@ -400,7 +400,7 @@ describe
 =#
 # use musr/mus08psidextract.dta, clear
 # describe
-df8 = DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus08psidextract.dta"))
+df8 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus08psidextract.dta"))
 DataFrames.describe(df8)
 ```
 
@@ -1132,7 +1132,7 @@ println(m_fd)
 ```{julia}
 # use musr/mus08cigar.dta, clear
 # describe
-df8c = DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus08cigar.dta"))
+df8c = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus08cigar.dta"))
 DataFrames.describe(df8c)
 ```
 
@@ -1192,9 +1192,9 @@ m_ols_dk = FixedEffectModels.reg(df8c, @formula(lnc ~ lnp + lny + lnpmin + year)
 function xtpcse_ar1(df, yvar, xvars, panelvar, timevar)
     dfs = sort(df, [panelvar, timevar])
     panels = sort(unique(dfs[!, panelvar]))
-    N = length(panels); T = nrow(dfs) ÷ N
+    N = length(panels); T = DataFrames.nrow(dfs) ÷ N
     y = Float64.(dfs[!, yvar])
-    X = hcat(ones(nrow(dfs)), hcat([Float64.(dfs[!, v]) for v in xvars]...))
+    X = hcat(ones(DataFrames.nrow(dfs)), hcat([Float64.(dfs[!, v]) for v in xvars]...))
     k = size(X, 2); pidx = [((i-1)*T+1):(i*T) for i in 1:N]
     # Common AR(1) coefficient from OLS residuals
     e0 = y - X * (X \ y)
@@ -1232,9 +1232,9 @@ m_ar1 = xtpcse_ar1(df8c, :lnc, [:lnp, :lny, :lnpmin, :year], :state, :year)
 function xtgls_ar1_iid(df, yvar, xvars, panelvar, timevar)
     dfs = sort(df, [panelvar, timevar])
     panels = sort(unique(dfs[!, panelvar]))
-    N = length(panels); T = nrow(dfs) ÷ N
+    N = length(panels); T = DataFrames.nrow(dfs) ÷ N
     y = Float64.(dfs[!, yvar])
-    X = hcat(ones(nrow(dfs)), hcat([Float64.(dfs[!, v]) for v in xvars]...))
+    X = hcat(ones(DataFrames.nrow(dfs)), hcat([Float64.(dfs[!, v]) for v in xvars]...))
     k = size(X, 2); pidx = [((i-1)*T+1):(i*T) for i in 1:N]
     e0 = y - X * (X \ y)
     num = sum(dot(e0[pidx[i]][2:end], e0[pidx[i]][1:end-1]) for i in 1:N)
@@ -1262,7 +1262,7 @@ vars_show = ["lnp", "lny", "lnpmin", "year"]
 idx_show(cn) = [findfirst(==(v), cn) for v in vars_show]
 
 println("Comparison of pooled OLS and GLS estimators (Stata Table 8.10.4)")
-@printf("%-8s  %10s %10s %10s %10s %10s %10s\n",
+Printf.@printf("%-8s  %10s %10s %10s %10s %10s %10s\n",
         "", "OLS_iid", "OLS_cor", "OLS_DK", "AR1_cor", "FGLSAR1", "FGLSCAR")
 for v in vars_show
     i1 = findfirst(==(v), StatsBase.coefnames(m_ols_iid))
@@ -1271,10 +1271,10 @@ for v in vars_show
     i4 = findfirst(==(v), m_ar1.coefnames)
     i5 = findfirst(==(v), m_fglsar1.coefnames)
     i6 = findfirst(==(v), m_fgls.coefnames)
-    @printf("%-8s  %10.3f %10.3f %10.3f %10.3f %10.3f %10.3f\n", v,
+    Printf.@printf("%-8s  %10.3f %10.3f %10.3f %10.3f %10.3f %10.3f\n", v,
             coef(m_ols_iid)[i1], coef(m_ols_cor)[i2], coef(m_ols_dk)[i3],
             m_ar1.β[i4], m_fglsar1.β[i5], m_fgls.β[i6])
-    @printf("%-8s  (%8.3f) (%8.3f) (%8.3f) (%8.3f) (%8.3f) (%8.3f)\n", "",
+    Printf.@printf("%-8s  (%8.3f) (%8.3f) (%8.3f) (%8.3f) (%8.3f) (%8.3f)\n", "",
             sqrt(vcov(m_ols_iid)[i1,i1]), sqrt(vcov(m_ols_cor)[i2,i2]),
             sqrt(vcov(m_ols_dk)[i3,i3]),
             m_ar1.se[i4], m_fglsar1.se[i5], m_fgls.se[i6])

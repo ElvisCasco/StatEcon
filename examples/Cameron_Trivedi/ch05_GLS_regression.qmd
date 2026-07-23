@@ -183,8 +183,8 @@ drop uhat
 # Breusch–Pagan test of heteroskedasticity (regress uhat² on regressors)
 df5.uhat2 = df5.uhat.^2
 m_bp5 = FixedEffectModels.reg(df5, @formula(uhat2 ~ x2 + x3))
-LM = nrow(df5) * StatsBase.r2(m_bp5)
-@printf("BP LM(2) = %.4f, p = %.4f\n", LM, 1 - cdf(Chisq(2), LM))
+LM = DataFrames.nrow(df5) * StatsBase.r2(m_bp5)
+Printf.@printf("BP LM(2) = %.4f, p = %.4f\n", LM, 1 - cdf(Chisq(2), LM))
 ```
 
 ```{julia}
@@ -196,22 +196,22 @@ estat hettest x2 x3, mtest
 p_individual = Float64[]
 for v in (:x2, :x3)
     m = FixedEffectModels.reg(df5, term(:uhat2) ~ term(v))
-    LM = nrow(df5) * StatsBase.r2(m)
+    LM = DataFrames.nrow(df5) * StatsBase.r2(m)
     p = 1 - cdf(Chisq(1), LM)
     push!(p_individual, p)
-    @printf("BP test on %s only: LM(1) = %.4f, p = %.4f\n", v, LM, p)
+    Printf.@printf("BP test on %s only: LM(1) = %.4f, p = %.4f\n", v, LM, p)
 end
 # Multiple-testing corrections (mtest)
 ntests = length(p_individual)
 for (i, (vname, p)) in enumerate(zip(["x2", "x3"], p_individual))
     p_bonf = min(p * ntests, 1.0)
     p_sidak = 1 - (1 - p)^ntests
-    @printf("  %s: Bonferroni p = %.4f, Šidák p = %.4f\n", vname, p_bonf, p_sidak)
+    Printf.@printf("  %s: Bonferroni p = %.4f, Šidák p = %.4f\n", vname, p_bonf, p_sidak)
 end
 # Joint test
 m_joint = FixedEffectModels.reg(df5, @formula(uhat2 ~ x2 + x3))
-LM_joint = nrow(df5) * StatsBase.r2(m_joint)
-@printf("BP joint test on x2 x3: LM(2) = %.4f, p = %.4f\n",
+LM_joint = DataFrames.nrow(df5) * StatsBase.r2(m_joint)
+Printf.@printf("BP joint test on x2 x3: LM(2) = %.4f, p = %.4f\n",
         LM_joint, 1 - cdf(Chisq(2), LM_joint))
 ```
 
@@ -266,7 +266,7 @@ end
 res_α = optimize(α -> neg_lik(α, df5.x2, df5.uhat2), [0.0, 0.0])
 α_hat = Optim.minimizer(res_α)
 df5.varu = exp.(α_hat[1] .+ α_hat[2] .* df5.x2)
-@printf("α̂ = (%.4f, %.4f)\n", α_hat[1], α_hat[2])
+Printf.@printf("α̂ = (%.4f, %.4f)\n", α_hat[1], α_hat[2])
 ```
 
 ```{julia}
@@ -325,7 +325,7 @@ yhat2 = StatsBase.coef(wls_sub)[1] .+ StatsBase.coef(wls_sub)[2] .* df5.x2 .+ St
 perr1 = df5.y .- yhat1
 perr2 = df5.y .- yhat2
 
-test_df = DataFrame(y = df5.y[451:end],
+test_df = DataFrames.DataFrame(y = df5.y[451:end],
                     yhat_ols = yhat1[451:end], yhat_wls = yhat2[451:end],
                     err_ols  = perr1[451:end], err_wls  = perr2[451:end])
 DataFrames.describe(test_df)
@@ -370,7 +370,7 @@ sureg (ldrugexp age age2 actlim totchr medicaid private) ///
   (ltotothr age age2 educyr actlim totchr private), corr
 =#
 # Not included in book
-sub = dropmissing(df_sur, [:ldrugexp, :ltotothr])
+sub = DataFrames.dropmissing(df_sur, [:ldrugexp, :ltotothr])
 DataFrames.describe(sub[:, [:ldrugexp]])
 ```
 
@@ -387,8 +387,8 @@ stata_summarize(sub)
 ```{julia}
 # SUR estimation (FGLS) — sureg (ldrugexp ...) (ltotothr ...), corr
 # Step 1: equation-by-equation OLS to get Σ̂; Step 2: FGLS using Σ⁻¹ ⊗ I_N
-sur_data = dropmissing(df_sur, [:ldrugexp, :ltotothr, :age, :age2, :educyr, :actlim, :totchr, :medicaid, :private])
-Ns = nrow(sur_data)
+sur_data = DataFrames.dropmissing(df_sur, [:ldrugexp, :ltotothr, :age, :age2, :educyr, :actlim, :totchr, :medicaid, :private])
+Ns = DataFrames.nrow(sur_data)
 
 # Design matrices (equation-specific regressors)
 X1 = hcat(ones(Ns), sur_data.age, sur_data.age2, sur_data.actlim,
@@ -419,16 +419,16 @@ se_sur = sqrt.(max.(LinearAlgebra.diag(V_sur), 0.0))
 
 k1 = size(X1, 2); k2 = size(X2, 2)
 println("=== SUR (FGLS) Equation 1: ldrugexp ===")
-println(DataFrame(variable=cn1, Coef=β_sur[1:k1], SE=se_sur[1:k1],
+println(DataFrames.DataFrame(variable=cn1, Coef=β_sur[1:k1], SE=se_sur[1:k1],
               z=β_sur[1:k1]./se_sur[1:k1]))
 println("\n=== SUR (FGLS) Equation 2: ltotothr ===")
-println(DataFrame(variable=cn2, Coef=β_sur[k1+1:end], SE=se_sur[k1+1:end],
+println(DataFrames.DataFrame(variable=cn2, Coef=β_sur[k1+1:end], SE=se_sur[k1+1:end],
               z=β_sur[k1+1:end]./se_sur[k1+1:end]))
 
 # Cross-equation residual correlation (corr option)
 rho = Σ̂[1,2] / sqrt(Σ̂[1,1] * Σ̂[2,2])
-@printf("\nCorrelation matrix of residuals:\n  ldrugexp  ltotothr\n  1.0000    %.4f\n  %.4f    1.0000\n", rho, rho)
-@printf("Breusch-Pagan test of independence: chi2(1) = %.3f, Pr = %.4f\n",
+Printf.@printf("\nCorrelation matrix of residuals:\n  ldrugexp  ltotothr\n  1.0000    %.4f\n  %.4f    1.0000\n", rho, rho)
+Printf.@printf("Breusch-Pagan test of independence: chi2(1) = %.3f, Pr = %.4f\n",
         Ns * rho^2, 1 - cdf(Chisq(1), Ns * rho^2))
 
 # Save OLS-based models for later use (bootstrap, testparm)
@@ -460,7 +460,7 @@ B = 400
 β1_boot = Vector{Vector{Float64}}(undef, B)
 β2_boot = Vector{Vector{Float64}}(undef, B)
 for b in 1:B
-    idx = sample(1:nrow(sur_data), nrow(sur_data); replace = true)
+    idx = sample(1:DataFrames.nrow(sur_data), DataFrames.nrow(sur_data); replace = true)
     sub = sur_data[idx, :]
     m1 = FixedEffectModels.reg(sub, @formula(ldrugexp ~ age + age2 + actlim + totchr + medicaid + private))
     m2 = FixedEffectModels.reg(sub, @formula(ltotothr ~ age + age2 + educyr + actlim + totchr + private))
@@ -469,8 +469,8 @@ for b in 1:B
 end
 β1_mat = reduce(hcat, β1_boot)'
 β2_mat = reduce(hcat, β2_boot)'
-println("Eq1 bootstrap SEs: ", round.(std(β1_mat, dims = 1), digits = 4))
-println("Eq2 bootstrap SEs: ", round.(std(β2_mat, dims = 1), digits = 4))
+println("Eq1 bootstrap SEs: ", round.(Statistics.std(β1_mat, dims = 1), digits = 4))
+println("Eq2 bootstrap SEs: ", round.(Statistics.std(β2_mat, dims = 1), digits = 4))
 ```
 
 ```{julia}
@@ -502,7 +502,7 @@ W = try
 catch
     NaN
 end
-@printf("W(2) = %.4f, p = %.4f\n", W, 1 - cdf(Chisq(2), W))
+Printf.@printf("W(2) = %.4f, p = %.4f\n", W, 1 - cdf(Chisq(2), W))
 ```
 
 ```{julia}
@@ -524,8 +524,8 @@ test [ldrugexp]private = [ltotothr]private
 β1_priv = β1_mat[:, findfirst(==("private"), StatsBase.coefnames(eq1))]
 β2_priv = β2_mat[:, findfirst(==("private"), StatsBase.coefnames(eq2))]
 diff_b  = β1_priv .- β2_priv
-@printf("mean(diff) = %.4f  bootstrap SE = %.4f  z = %.3f\n",
-        mean(diff_b), std(diff_b), mean(diff_b) / std(diff_b))
+Printf.@printf("mean(diff) = %.4f  bootstrap SE = %.4f  z = %.3f\n",
+        Statistics.mean(diff_b), Statistics.std(diff_b), Statistics.mean(diff_b) / Statistics.std(diff_b))
 ```
 
 ```{julia}
@@ -680,9 +680,9 @@ describe sampl finalwgt strata psu
 summarize sampl finalwgt strata psu
 =#
 # NHANES II data
-df_nh = DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus05nhanes2.dta"))
+df_nh = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus05nhanes2.dta"))
 df_nh = filter(r -> 21 <= r.age <= 65, df_nh)
-@printf("N = %d\n", nrow(df_nh))
+Printf.@printf("N = %d\n", DataFrames.nrow(df_nh))
 DataFrames.describe(df_nh[:, [:sampl, :finalwgt, :strata, :psu]])
 ```
 
@@ -706,8 +706,8 @@ println("Survey design: PSU = :psu, strata = :strata, weight = :finalwgt")
 
 ```{julia}
 # Describe the survey design (counts of strata and PSUs)
-@printf("Number of strata = %d\n", length(unique(df_nh.strata)))
-@printf("Number of PSUs   = %d\n",
+Printf.@printf("Number of strata = %d\n", length(unique(df_nh.strata)))
+Printf.@printf("Number of PSUs   = %d\n",
         length(unique(zip(df_nh.strata, df_nh.psu) |> collect)))
 ```
 
@@ -719,8 +719,8 @@ println("Survey design: PSU = :psu, strata = :strata, weight = :finalwgt")
 svy: mean hgb
 =#
 # Population mean of hgb using sampling weights
-let df = dropmissing(df_nh[:, [:hgb, :finalwgt]])
-    @printf("Weighted mean of hgb = %.4f\n",
+let df = DataFrames.dropmissing(df_nh[:, [:hgb, :finalwgt]])
+    Printf.@printf("Weighted mean of hgb = %.4f\n",
             sum(df.hgb .* df.finalwgt) / sum(df.finalwgt))
 end
 ```
@@ -731,8 +731,8 @@ end
 mean hgb
 =#
 # Unweighted mean of hgb
-@printf("Unweighted mean of hgb = %.4f\n",
-        mean(skipmissing(df_nh.hgb)))
+Printf.@printf("Unweighted mean of hgb = %.4f\n",
+        Statistics.mean(skipmissing(df_nh.hgb)))
 ```
 
 

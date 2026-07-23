@@ -183,7 +183,7 @@ end
 
 # ---------- Printf table helpers (shared with survey/cluster files) --------
 
-_sug_fmt(x, w, d) = @sprintf("%*.*f", w, d, x)
+_sug_fmt(x, w, d) = Printf.@sprintf("%*.*f", w, d, x)
 
 # Print a right-aligned table given column headers, formatters, and rows.
 function _sug_print_table(headers::Vector{String}, rows::Vector{<:Vector},
@@ -206,7 +206,7 @@ function _sug_print_table(headers::Vector{String}, rows::Vector{<:Vector},
     println(rule)
 end
 
-_sug_g(x::Real; d = 4) = isnan(x) ? "." : (isinteger(x) && abs(x) < 1e6 ? string(Int(x)) : @sprintf("%.*f", d, x))
+_sug_g(x::Real; d = 4) = isnan(x) ? "." : (isinteger(x) && abs(x) < 1e6 ? string(Int(x)) : Printf.@sprintf("%.*f", d, x))
 
 # --------------------------------------------------------------------------
 
@@ -219,7 +219,7 @@ function stata_sureg(df::DataFrames.AbstractDataFrame, eqs::Pair...;
     if !isempty(fit.constraints)
         println("Constraints imposed:")
         for (i, c) in enumerate(fit.constraints)
-            @printf(" ( %d)  %s\n", i, c)
+            Printf.@printf(" ( %d)  %s\n", i, c)
         end
         println()
     end
@@ -236,10 +236,10 @@ function stata_sureg(df::DataFrames.AbstractDataFrame, eqs::Pair...;
     for j in 1:M
         push!(sum_rows,
               [eqnames[j], string(N), string(ks[j] - 1),
-               @sprintf("%.6f", rmse[j]),
-               @sprintf("%.4f", r2s[j]),
-               @sprintf("%.2f", chi2s[j]),
-               @sprintf("%.4f", pvals[j])])
+               Printf.@sprintf("%.6f", rmse[j]),
+               Printf.@sprintf("%.4f", r2s[j]),
+               Printf.@sprintf("%.2f", chi2s[j]),
+               Printf.@sprintf("%.4f", pvals[j])])
     end
     _sug_print_table(sum_headers, sum_rows,
                      [:l, :r, :r, :r, :r, :r, :r])
@@ -265,12 +265,12 @@ function stata_sureg(df::DataFrames.AbstractDataFrame, eqs::Pair...;
             push!(rows,
                   [first_row ? eqnames[j] : "",
                    cns[j][i],
-                   @sprintf("%.7f", β_i),
-                   @sprintf("%.7f", se_i),
-                   @sprintf("%.2f", z_i),
-                   @sprintf("%.3f", p_i),
-                   @sprintf("%.7f", β_i - zcrit * se_i),
-                   @sprintf("%.7f", β_i + zcrit * se_i)])
+                   Printf.@sprintf("%.7f", β_i),
+                   Printf.@sprintf("%.7f", se_i),
+                   Printf.@sprintf("%.2f", z_i),
+                   Printf.@sprintf("%.3f", p_i),
+                   Printf.@sprintf("%.7f", β_i - zcrit * se_i),
+                   Printf.@sprintf("%.7f", β_i + zcrit * se_i)])
             first_row = false; nrows += 1
         end
         j < M && push!(hline_at, nrows)
@@ -278,14 +278,14 @@ function stata_sureg(df::DataFrames.AbstractDataFrame, eqs::Pair...;
     println()
     _sug_print_table(coef_headers, rows,
                      [:l, :l, :r, :r, :r, :r, :r, :r]; top_hlines = hline_at)
-    reps > 0 && @printf("  (bootstrap replications = %d)\n", reps)
+    reps > 0 && Printf.@printf("  (bootstrap replications = %d)\n", reps)
 
     # Residual correlation matrix (from OLS-step Σ̂)
     Rmat = [Σ̂[i, j] / sqrt(Σ̂[i, i] * Σ̂[j, j]) for i in 1:M, j in 1:M]
     println("\nCorrelation matrix of residuals:\n")
     corr_headers = vcat("", eqnames)
     corr_rows = [vcat(eqnames[i],
-                      [j <= i ? @sprintf("%.4f", Rmat[i, j]) : ""
+                      [j <= i ? Printf.@sprintf("%.4f", Rmat[i, j]) : ""
                        for j in 1:M]) for i in 1:M]
     _sug_print_table(corr_headers, corr_rows, vcat(:l, fill(:r, M)))
 
@@ -297,7 +297,7 @@ function stata_sureg(df::DataFrames.AbstractDataFrame, eqs::Pair...;
     bp *= N
     df_bp = M * (M - 1) ÷ 2
     p_bp = 1 - Distributions.cdf(Distributions.Chisq(df_bp), bp)
-    @printf("\nBreusch-Pagan test of independence: chi2(%d) = %.3f, Pr = %.4f\n",
+    Printf.@printf("\nBreusch-Pagan test of independence: chi2(%d) = %.3f, Pr = %.4f\n",
             df_bp, bp, p_bp)
     return fit
 end
@@ -367,20 +367,20 @@ function stata_test_sureg(fit, vars::AbstractVector;
     q = length(r)
 
     for (i, lbl) in enumerate(labels)
-        @printf(" ( %d)  %s\n", i, lbl)
+        Printf.@printf(" ( %d)  %s\n", i, lbl)
     end
     println()
 
     if df_F === nothing
         p_chi = 1 - Distributions.cdf(Distributions.Chisq(q), W)
-        @printf("           chi2(%3d) = %7.2f\n", q, W)
-        @printf("         Prob > chi2 = %7.4f\n", p_chi)
+        Printf.@printf("           chi2(%3d) = %7.2f\n", q, W)
+        Printf.@printf("         Prob > chi2 = %7.4f\n", p_chi)
         return (; chi2 = W, df = q, p = p_chi, restrictions = labels, R, r)
     else
         Fs = W / q
         p_F = 1 - Distributions.cdf(Distributions.FDist(q, df_F), Fs)
-        @printf("       F(%3d, %5d) = %7.2f\n", q, df_F, Fs)
-        @printf("            Prob > F = %7.4f\n", p_F)
+        Printf.@printf("       F(%3d, %5d) = %7.2f\n", q, df_F, Fs)
+        Printf.@printf("            Prob > F = %7.4f\n", p_F)
         return (; F = Fs, df1 = q, df2 = df_F, p = p_F,
                   chi2 = W, restrictions = labels, R, r)
     end

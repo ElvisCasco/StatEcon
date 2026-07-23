@@ -1603,7 +1603,7 @@ df14g.logins = [(0 < p < 1) ? log(p / (1 - p)) : missing for p in df14g.av_ins]
 
 mkpath("$(DATA)/musr")
 CSV.write("$(DATA)/musr/mus14gdata.csv", df14g)
-@printf("Grouped data: %d age cells, columns = %s\n",
+Printf.@printf("Grouped data: %d age cells, columns = %s\n",
         DataFrames.nrow(df14g),
         join(string.(DataFrames.names(df14g)), ", "));
 ```

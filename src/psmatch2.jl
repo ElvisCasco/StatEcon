@@ -57,41 +57,41 @@ function psmatch2(df::AbstractDataFrame, treat::Symbol, covars::AbstractVector{S
     wctrl = Dict{Int,Float64}()                    # control-usage weights
     for (k, i) in enumerate(tidx)
         ms = nn(i, cidx)
-        att_i[k] = y[i] - mean(y[ms])
+        att_i[k] = y[i] - Statistics.mean(y[ms])
         for j in ms
             wctrl[j] = get(wctrl, j, 0.0) + 1 / length(ms)
         end
     end
-    ATT = mean(att_i)
+    ATT = Statistics.mean(att_i)
 
     # ---- 2b. ATU: match each control to nearest treated ----------------
     atu_j = Vector{Float64}(undef, N0)
     wtreat = Dict{Int,Float64}()
     for (k, j) in enumerate(cidx)
         ms = nn(j, tidx)
-        atu_j[k] = mean(y[ms]) - y[j]
+        atu_j[k] = Statistics.mean(y[ms]) - y[j]
         for i in ms
             wtreat[i] = get(wtreat, i, 0.0) + 1 / length(ms)
         end
     end
-    ATU = mean(atu_j)
+    ATU = Statistics.mean(atu_j)
 
     # ---- 3. ATE --------------------------------------------------------
     ATE = (N1 * ATT + N0 * ATU) / (N1 + N0)
 
     # Write _pscore and _weight back into the caller's data frame, as Stata's
     # psmatch2 does, so companion commands (e.g. psgraph) can use them.
-    ps_full = Vector{Union{Missing,Float64}}(missing, nrow(df))
+    ps_full = Vector{Union{Missing,Float64}}(missing, DataFrames.nrow(df))
     ps_full[keep] = ps
     df[!, :_pscore] = ps_full
-    w_full = Vector{Union{Missing,Float64}}(missing, nrow(df))
+    w_full = Vector{Union{Missing,Float64}}(missing, DataFrames.nrow(df))
     keeprows = findall(keep)                       # map work-index -> df-row
     for i in tidx;              w_full[keeprows[i]] = 1.0;          end   # treated
     for (j, w) in wctrl;        w_full[keeprows[j]] = w;            end   # matched controls
     df[!, :_weight] = w_full
 
     # ---- psmatch2-style fixed-weights variances ------------------------
-    s1sq = var(y[tidx]); s0sq = var(y[cidx])
+    s1sq = Statistics.var(y[tidx]); s0sq = Statistics.var(y[cidx])
     sumw_ctrl  = sum(w -> w^2, values(wctrl))
     sumw_treat = sum(w -> w^2, values(wtreat))
     var_att = s1sq / N1 + sumw_ctrl  * s0sq / N1^2
@@ -100,22 +100,22 @@ function psmatch2(df::AbstractDataFrame, treat::Symbol, covars::AbstractVector{S
     se = sqrt.([var_att, var_atu, var_ate])
 
     # treated / control mean levels shown by psmatch2
-    treated_mean = [mean(y[tidx]), mean(y[cidx] .+ atu_j), mean(y)]
+    treated_mean = [Statistics.mean(y[tidx]), Statistics.mean(y[cidx] .+ atu_j), Statistics.mean(y)]
     ctrl_mean    = treated_mean .- [ATT, ATU, ATE]
     effects      = [ATT, ATU, ATE]
     tstat        = effects ./ se
 
     # ---- print psmatch2-style table ------------------------------------
-    @printf("%-8s %-9s | %10s %10s %11s %11s %9s\n",
+    Printf.@printf("%-8s %-9s | %10s %10s %11s %11s %9s\n",
             "Variable", "Sample", "Treated", "Controls", "Difference", "S.E.", "T-stat")
     println("-"^76)
     labels = ["ATT", "ATU", "ATE"]
     for r in 1:3
         v = r == 1 ? string(outcome) : ""
-        @printf("%-8s %-9s | %10.5g %10.5g %11.5g %11.5g %9.2f\n",
+        Printf.@printf("%-8s %-9s | %10.5g %10.5g %11.5g %11.5g %9.2f\n",
                 v, labels[r], treated_mean[r], ctrl_mean[r], effects[r], se[r], tstat[r])
     end
 
-    return DataFrame(Sample = labels, Treated = treated_mean, Controls = ctrl_mean,
+    return DataFrames.DataFrame(Sample = labels, Treated = treated_mean, Controls = ctrl_mean,
                      Difference = effects, SE = se, T = tstat)
 end

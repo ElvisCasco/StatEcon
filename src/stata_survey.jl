@@ -22,14 +22,14 @@ function stata_mean(df, var; level::Float64 = 0.95)
     ci_lo = μ - tcrit * se
     ci_hi = μ + tcrit * se
 
-    @printf("Mean estimation                          Number of obs = %s\n\n",
+    Printf.@printf("Mean estimation                          Number of obs = %s\n\n",
             _sm_comma(n))
     lvl = round(Int, 100 * level)
     _sug_print_table(
         ["Variable", "Mean", "Std. err.", "[$(lvl)% CI low]", "[$(lvl)% CI high]"],
         [[string(var),
-          @sprintf("%.5f", μ), @sprintf("%.5f", se),
-          @sprintf("%.5f", ci_lo), @sprintf("%.5f", ci_hi)]],
+          Printf.@sprintf("%.5f", μ), Printf.@sprintf("%.5f", se),
+          Printf.@sprintf("%.5f", ci_lo), Printf.@sprintf("%.5f", ci_hi)]],
         [:l, :r, :r, :r, :r])
     return (; mean = μ, se = se, ci = (ci_lo, ci_hi), df = dfree, n_obs = n)
 end
@@ -70,19 +70,19 @@ function stata_svy_mean(df, var; stratum::Symbol, psu::Symbol, weight::Symbol,
     ci_hi = ybar + tcrit * se
 
     println("Survey: Mean estimation\n")
-    @printf("Number of strata = %-13d Number of obs   = %11s\n",
+    Printf.@printf("Number of strata = %-13d Number of obs   = %11s\n",
             n_str, _sm_comma(n))
-    @printf("Number of PSUs   = %-13d Population size = %11s\n",
+    Printf.@printf("Number of PSUs   = %-13d Population size = %11s\n",
             n_psu, _sm_comma(Int(round(W))))
-    @printf("%33s Design df       = %11d\n", "", dfree)
+    Printf.@printf("%33s Design df       = %11d\n", "", dfree)
     println()
 
     lvl = round(Int, 100 * level)
     _sug_print_table(
         ["Variable", "Mean", "Linearized SE", "[$(lvl)% CI low]", "[$(lvl)% CI high]"],
         [[string(var),
-          @sprintf("%.5f", ybar), @sprintf("%.5f", se),
-          @sprintf("%.5f", ci_lo), @sprintf("%.5f", ci_hi)]],
+          Printf.@sprintf("%.5f", ybar), Printf.@sprintf("%.5f", se),
+          Printf.@sprintf("%.5f", ci_lo), Printf.@sprintf("%.5f", ci_hi)]],
         [:l, :r, :r, :r, :r])
     return (; mean = ybar, se = se, ci = (ci_lo, ci_hi), df = dfree,
               n_obs = n, n_strata = n_str, n_psu, popsize = W)
@@ -152,12 +152,12 @@ function stata_svy_regress(df, y, xs::AbstractVector;
     W_tot = sum(w)
 
     println("Survey: Linear regression\n")
-    @printf("Number of strata = %-30dNumber of obs   = %11s\n", n_str, _sm_comma(n))
-    @printf("Number of PSUs   = %-30dPopulation size = %11s\n", n_psu, _sm_comma(Int(round(W_tot))))
-    @printf("%-49sDesign df       = %11d\n", "", dfree)
-    @printf("%-49s%-16s= %11.2f\n", "", "F($q, $df2)", Fstat)
-    @printf("%-49s%-16s= %11.4f\n", "", "Prob > F", pF)
-    @printf("%-49s%-16s= %11.4f\n", "", "R-squared", r2)
+    Printf.@printf("Number of strata = %-30dNumber of obs   = %11s\n", n_str, _sm_comma(n))
+    Printf.@printf("Number of PSUs   = %-30dPopulation size = %11s\n", n_psu, _sm_comma(Int(round(W_tot))))
+    Printf.@printf("%-49sDesign df       = %11d\n", "", dfree)
+    Printf.@printf("%-49s%-16s= %11.2f\n", "", "F($q, $df2)", Fstat)
+    Printf.@printf("%-49s%-16s= %11.4f\n", "", "Prob > F", pF)
+    Printf.@printf("%-49s%-16s= %11.4f\n", "", "R-squared", r2)
     println()
 
     order = vcat(collect(slope), 1)
@@ -165,12 +165,12 @@ function stata_svy_regress(df, y, xs::AbstractVector;
     headers = [string(ys), "Coefficient", "Linearized SE",
                "t", "P>|t|", "[$(lvl)% CI low]", "[$(lvl)% CI high]"]
     rows = [[cn[i],
-             @sprintf("%.7f", β[i]),
-             @sprintf("%.7f", se[i]),
-             @sprintf("%.2f", t_stat[i]),
-             @sprintf("%.3f", pvals[i]),
-             @sprintf("%.7f", ci_lo[i]),
-             @sprintf("%.7f", ci_hi[i])] for i in order]
+             Printf.@sprintf("%.7f", β[i]),
+             Printf.@sprintf("%.7f", se[i]),
+             Printf.@sprintf("%.2f", t_stat[i]),
+             Printf.@sprintf("%.3f", pvals[i]),
+             Printf.@sprintf("%.7f", ci_lo[i]),
+             Printf.@sprintf("%.7f", ci_hi[i])] for i in order]
     _sug_print_table(headers, rows, [:l, :r, :r, :r, :r, :r, :r])
 
     return (; β, V, se, t = t_stat, p = pvals, ci_lo, ci_hi,

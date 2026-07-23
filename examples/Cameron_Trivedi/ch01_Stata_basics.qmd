@@ -77,7 +77,7 @@ _rawval(x) = hasproperty(x, :value) ? x.value : x
 sysuse auto.dta
 summarize
 =#
-auto = DataFrame(ReadStatTables.readstat("$(DATA)/auto.dta"))
+auto = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/auto.dta"))
 typeof(auto)
 ```
 
@@ -112,9 +112,9 @@ model1 = stata_regress(auto, y = :mpg, x = [:price, :weight])
 #=
 by foreign: regress mpg price weight if weight < 4000, vce(robust)
 =#
-for g in groupby(filter(r -> r.weight < 4000, auto), :foreign)
+for g in DataFrames.groupby(filter(r -> r.weight < 4000, auto), :foreign)
     println("\nforeign = $(first(g.foreign))")
-    stata_regress(DataFrame(g), y = :mpg, x = [:price, :weight]; vce = :robust)
+    stata_regress(DataFrames.DataFrame(g), y = :mpg, x = [:price, :weight]; vce = :robust)
 end
 ```
 
@@ -137,7 +137,7 @@ summarize i.rep78
 =#
 auto.rep78_cat = CategoricalArrays.categorical(auto.rep78)
 println("Summary of rep78 indicator levels:")
-println(combine(groupby(auto, :rep78_cat), nrow => :count))
+println(DataFrames.combine(DataFrames.groupby(auto, :rep78_cat), nrow => :count))
 ```
 
 ```{julia}
@@ -148,7 +148,7 @@ summarize ibn.rep78
 # summarize i.rep78  -- expand rep78 into 0/1 dummies (drop missings), summarize each
 vals = [_rawval(v) for v in skipmissing(auto.rep78)]
 levs = sort(unique(vals))
-dummies = DataFrame((Symbol("$(Int(l)).rep78") => Int.(vals .== l) for l in levs)...)
+dummies = DataFrames.DataFrame((Symbol("$(Int(l)).rep78") => Int.(vals .== l) for l in levs)...)
 stata_summarize(dummies)
 ```
 
@@ -170,11 +170,11 @@ end
 summarize i.rep78#c.weight
 =#
 # summarize i.rep78#i.foreign, allbaselevels  -> one dummy per (rep78, foreign) cell
-sub       = dropmissing(auto[:, [:rep78, :foreign]])
+sub       = DataFrames.dropmissing(auto[:, [:rep78, :foreign]])
 rep78v    = [_rawval(v) for v in sub.rep78]
 foreignv  = [_rawval(v) for v in sub.foreign]
 rlevs, flevs = sort(unique(rep78v)), sort(unique(foreignv))
-dummies = DataFrame((Symbol("$(Int(r)).rep78#$(Int(f)).foreign") =>
+dummies = DataFrames.DataFrame((Symbol("$(Int(r)).rep78#$(Int(f)).foreign") =>
                      Int.((rep78v .== r) .& (foreignv .== f))
                      for r in rlevs, f in flevs)...)
 stata_summarize(dummies)
@@ -187,11 +187,11 @@ regress mpg price c.weight c.weight#c.weight, noheader
 =#
 # summarize i.rep78#c.weight
 # For each level r of rep78: weight when rep78==r, else 0 (drop rows where rep78 is missing)
-sub    = dropmissing(auto[:, [:rep78, :weight]])
+sub    = DataFrames.dropmissing(auto[:, [:rep78, :weight]])
 rep78v = [_rawval(v) for v in sub.rep78]
 wv     = Float64.(sub.weight)
 rlevs  = sort(unique(rep78v))
-inter  = DataFrame((Symbol("$(Int(r)).rep78#c.weight") =>
+inter  = DataFrames.DataFrame((Symbol("$(Int(r)).rep78#c.weight") =>
                     ifelse.(rep78v .== r, wv, 0.0) for r in rlevs)...)
 stata_summarize(inter)
 ```
@@ -308,12 +308,12 @@ auto.dta
 summarize
 =#
 # In Julia, comments use #
-auto = DataFrame(ReadStatTables.readstat("$(DATA)/auto.dta"))
+auto = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/auto.dta"))
 DataFrames.describe(auto)
 ```
 
 ```{julia}
-auto = DataFrame(ReadStatTables.readstat("$(DATA)/auto.dta"))
+auto = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/auto.dta"))
 stata_summarize(auto)
 ```
 
@@ -377,8 +377,8 @@ stata_summarize(auto, :mpg)
 return list
 =#
 # Stata's `return list` after `summarize mpg`: the r() scalars.
-r_mean = mean(auto.mpg)
-r_sd   = std(auto.mpg)
+r_mean = Statistics.mean(auto.mpg)
+r_sd   = Statistics.std(auto.mpg)
 r_min  = minimum(auto.mpg)
 r_max  = maximum(auto.mpg)
 r_N    = length(auto.mpg)
@@ -438,7 +438,7 @@ println("Std errors    = ", StatsBase.stderror(model_ols))
 
 ```{julia}
 # r-squared computed manually from e(rss) and total SS
-tss       = sum((auto.mpg .- mean(auto.mpg)).^2)
+tss       = sum((auto.mpg .- Statistics.mean(auto.mpg)).^2)
 rss       = StatsBase.deviance(model_ols)
 r2_manual = 1 - rss / tss
 println("r-squared = ", round(r2_manual, digits = 6))
@@ -560,7 +560,7 @@ generate x3var = runiform()
 generate x4var = runiform()
 =#
 Random.seed!(10101)
-df_loop = DataFrame(
+df_loop = DataFrames.DataFrame(
     x1var = rand(100),
     x2var = rand(100),
     x3var = rand(100),

@@ -16,10 +16,10 @@ optimizer needed. Prints the Stata-style output and returns
 """
 function stata_boxcox(df::AbstractDataFrame, depvar::Symbol,
                       xvars::Vector{Symbol}; condition = nothing)
-    dfb = dropmissing(df[:, vcat([depvar], xvars)])
+    dfb = DataFrames.dropmissing(df[:, vcat([depvar], xvars)])
     condition !== nothing && (dfb = filter(condition, dfb))
     y = Float64.([_sm_rawval(v) for v in dfb[!, depvar]])
-    X = hcat(ones(nrow(dfb)),
+    X = hcat(ones(DataFrames.nrow(dfb)),
              [Float64.([_sm_rawval(v) for v in dfb[!, v]]) for v in xvars]...)
     cn = vcat(string.(xvars), "_cons")
     n, k = size(X)

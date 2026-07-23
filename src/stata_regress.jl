@@ -54,7 +54,7 @@ end
 # Stata number for the header (%g-style, `sig` significant figures, leading 0 dropped).
 function _sr_num(x::Real, sig::Int = 7)
     isnan(x) && return "."
-    s = @sprintf("%.*g", sig, x)
+    s = Printf.@sprintf("%.*g", sig, x)
     s = replace(s, r"^(-?)0\." => s"\g<1>.")
     return s
 end
@@ -63,7 +63,7 @@ end
 # leading zero suppressed (matches Stata's %9.0g here: .0474800 -> .04748).
 function _sr_coef(x::Real)
     isnan(x) && return "."
-    s = @sprintf("%.7f", x)
+    s = Printf.@sprintf("%.7f", x)
     occursin('.', s) && (s = rstrip(s, '0'); s = rstrip(s, '.'))
     s = replace(s, r"^(-?)0\." => s"\g<1>.")
     return s
@@ -219,14 +219,14 @@ function stata_regress(m; yname::Union{Nothing,AbstractString} = nothing,
     clustered = occursin("cluster", vt)
 
     # ---- header block --------------------------------------------------
-    hdr = [("Number of obs", @sprintf("%d", N)),
-           (@sprintf("F(%d, %d)", df1, df2), @sprintf("%.2f", m.F)),
-           ("Prob > F",  @sprintf("%.4f", m.p)),
-           ("R-squared", @sprintf("%.4f", R2)),
+    hdr = [("Number of obs", Printf.@sprintf("%d", N)),
+           (Printf.@sprintf("F(%d, %d)", df1, df2), Printf.@sprintf("%.2f", m.F)),
+           ("Prob > F",  Printf.@sprintf("%.4f", m.p)),
+           ("R-squared", Printf.@sprintf("%.4f", R2)),
            ("Root MSE",  _sr_num(rmse, 5))]
     # Stata's xtreg,fe also reports the within R-squared
     if hasfe && hasproperty(m, :r2_within) && m.r2_within !== nothing
-        insert!(hdr, 5, ("R-sq: within", @sprintf("%.4f", m.r2_within)))
+        insert!(hdr, 5, ("R-sq: within", Printf.@sprintf("%.4f", m.r2_within)))
     end
     lw = maximum(length(h[1]) for h in hdr)
     vw = maximum(length(h[2]) for h in hdr)
@@ -238,14 +238,14 @@ function stata_regress(m; yname::Union{Nothing,AbstractString} = nothing,
     if clustered && hasproperty(m, :nclusters) && m.nclusters !== nothing
         for (cv, nc) in pairs(m.nclusters)
             println()
-            println(@sprintf("(Std. err. adjusted for %d clusters in %s)", nc, cv))
+            println(Printf.@sprintf("(Std. err. adjusted for %d clusters in %s)", nc, cv))
         end
     end
 
     # ---- coefficient table ---------------------------------------------
     ests = [_sr_coef(est[i]) for i in ord]; ses = [_sr_coef(se[i]) for i in ord]
-    tvs  = [@sprintf("%.2f", tv[i]) for i in ord]
-    pvs  = [@sprintf("%.3f", pv[i]) for i in ord]
+    tvs  = [Printf.@sprintf("%.2f", tv[i]) for i in ord]
+    pvs  = [Printf.@sprintf("%.3f", pv[i]) for i in ord]
     los  = [_sr_coef(lo[i]) for i in ord]; his = [_sr_coef(hi[i]) for i in ord]
 
     namew = max(maximum(length, labels), length(dep), 8)

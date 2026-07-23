@@ -417,7 +417,7 @@ X11 = hcat(Float64.(df11.private), Float64.(df11.chronic),
            ones(DataFrames.nrow(df11)))
 xnms11 = ["private", "chronic", "female", "income", "_cons"]
 n11, k11 = size(X11)
-@printf("n = %d, k = %d\n", n11, k11)
+Printf.@printf("n = %d, k = %d\n", n11, k11)
 ```
 
 
@@ -434,7 +434,7 @@ function poisson_nr(X, y; tol = 1e-16)
         b    = bold .+ LinearAlgebra.cholesky(LinearAlgebra.Symmetric(hes)) \ grad
         cha  = sum((bold .- b).^2) / sum(bold.^2 .+ eps())
         iter += 1
-        @printf("iter = %2d  cha = %12.5g\n", iter, cha)
+        Printf.@printf("iter = %2d  cha = %12.5g\n", iter, cha)
     end
     # Robust sandwich SE
     μ     = exp.(X * b)
@@ -459,14 +459,14 @@ se11  = sqrt.(LinearAlgebra.diag(V11))
 z11   = b11 ./ se11
 p11   = 2 .* (1 .- Distributions.cdf.(Distributions.Normal(), abs.(z11)))
 println("─" ^ 70)
-@printf("%-10s %12s %12s %8s %8s\n", "", "Coef.", "Rob.SE", "z", "P>|z|")
+Printf.@printf("%-10s %12s %12s %8s %8s\n", "", "Coef.", "Rob.SE", "z", "P>|z|")
 println("─" ^ 70)
 for i in 1:k11
-    @printf("%-10s %12.6f %12.6f %8.2f %8.4f\n",
+    Printf.@printf("%-10s %12.6f %12.6f %8.2f %8.4f\n",
             xnms11[i], b11[i], se11[i], z11[i], p11[i])
 end
 println("─" ^ 70)
-@printf("Iterations = %d, n = %d\n", iter11, n11)
+Printf.@printf("Iterations = %d, n = %d\n", iter11, n11)
 ```
 
 ```{julia}
@@ -669,7 +669,7 @@ V_p = try
 se_p = sqrt.(LinearAlgebra.diag(V_p))
 println("\n— Optim.jl Poisson MLE with robust SE —")
 for i in 1:k11
-    @printf("%-10s %12.6f  se=%10.6f\n", xnms11[i], β_pois[i], se_p[i])
+    Printf.@printf("%-10s %12.6f  se=%10.6f\n", xnms11[i], β_pois[i], se_p[i])
 end
 ```
 
@@ -679,7 +679,7 @@ end
 ml search
 =#
 # Compute log-likelihood at optimum
-@printf("Log-likelihood = %.4f\n", -Optim.minimum(res_pois))
+Printf.@printf("Log-likelihood = %.4f\n", -Optim.minimum(res_pois))
 ```
 
 ```{julia}
@@ -778,10 +778,10 @@ res_nb = Optim.optimize(_f_nb, _g_nb!, vcat(β_pois, log(1.0)), Optim.LBFGS())
 α_nb = exp(β_nb[end])
 println("\n— NegBin MLE coefficients —")
 for i in 1:k11
-    @printf("%-10s %12.6f\n", xnms11[i], β_nb[i])
+    Printf.@printf("%-10s %12.6f\n", xnms11[i], β_nb[i])
 end
-@printf("alpha     = %.6f\n", α_nb)
-@printf("logL      = %.4f\n", -Optim.minimum(res_nb))
+Printf.@printf("alpha     = %.6f\n", α_nb)
+Printf.@printf("logL      = %.4f\n", -Optim.minimum(res_nb))
 ```
 
 ```{julia}
@@ -1010,7 +1010,7 @@ println("-"^78)
 Random.seed!(10101)
 df11.extra = df11.income .+ 0.001 .* rand(DataFrames.nrow(df11))
 X11_e = hcat(X11, df11.extra)
-@printf("Condition number = %.2e\n", LinearAlgebra.cond(X11_e))
+Printf.@printf("Condition number = %.2e\n", LinearAlgebra.cond(X11_e))
 ```
 
 ```{julia}
@@ -1128,7 +1128,7 @@ ml maximize, nolog
 # Less severe collinearity
 df11.extra2 = df11.income .+ 0.01 .* rand(DataFrames.nrow(df11))
 X11_e2 = hcat(X11, df11.extra2)
-@printf("Condition number with extra2 = %.2e\n", LinearAlgebra.cond(X11_e2))
+Printf.@printf("Condition number with extra2 = %.2e\n", LinearAlgebra.cond(X11_e2))
 
 _f_e2  = β -> poisson_nll(β, X11_e2, y11)
 _g_e2! = (g, β) -> ForwardDiff.gradient!(g, _f_e2, β)
@@ -1156,10 +1156,10 @@ function vif(X, names)
         vifs[j] = 1 / (1 - r2)
     end
     println("─" ^ 30)
-    @printf("%-10s %12s\n", "Variable", "VIF")
+    Printf.@printf("%-10s %12s\n", "Variable", "VIF")
     println("─" ^ 30)
     for i in 1:p
-        @printf("%-10s %12.2f\n", names[i], vifs[i])
+        Printf.@printf("%-10s %12.2f\n", names[i], vifs[i])
     end
     println("─" ^ 30)
     return vifs
@@ -1189,7 +1189,7 @@ Random.seed!(10101)
 dfc.extra2 = dfc.income .+ 0.01 .* rand(DataFrames.nrow(dfc))
 
 # Verify the correlation is below Stata's drop threshold (so no column is omitted)
-@printf("cor(income, extra2) = %.10f   |1 − cor| = %.2e   (Stata threshold ≈ 1e-5)\n",
+Printf.@printf("cor(income, extra2) = %.10f   |1 − cor| = %.2e   (Stata threshold ≈ 1e-5)\n",
         Statistics.cor(dfc.income, dfc.extra2),
         1 - abs(Statistics.cor(dfc.income, dfc.extra2)))
 
@@ -1362,7 +1362,7 @@ _f_d0  = β -> poisson_nll(β, X_d0, y_d0)
 _g_d0! = (g, β) -> ForwardDiff.gradient!(g, _f_d0, β)
 res_d0  = Optim.optimize(_f_d0, _g_d0!, zeros(size(X_d0, 2)), Optim.LBFGS())
 β_d0 = Optim.minimizer(res_d0)
-@printf("d0 (Optim, autodiff)  log L = %.3f   β = %s\n",
+Printf.@printf("d0 (Optim, autodiff)  log L = %.3f   β = %s\n",
         -Optim.minimum(res_d0), round.(β_d0, digits = 6))
 
 # Same fit via the chunk-1 helper for the Stata-formatted table
@@ -1386,9 +1386,9 @@ res_d1 = Optim.optimize(β -> poisson_nll(β, X_d0, y_d0),
                         zeros(size(X_d0, 2)),
                         Optim.LBFGS())
 β_d1 = Optim.minimizer(res_d1)
-@printf("d1 (Optim, analytical grad)  log L = %.3f   β = %s\n",
+Printf.@printf("d1 (Optim, analytical grad)  log L = %.3f   β = %s\n",
         -Optim.minimum(res_d1), round.(β_d1, digits = 6))
-@printf("|β_d0 − β_d1|_∞ = %.3e (same MLE, different optimiser path)\n",
+Printf.@printf("|β_d0 − β_d1|_∞ = %.3e (same MLE, different optimiser path)\n",
         maximum(abs.(β_d0 .- β_d1)))
 
 # Stata-formatted table — identical to d0 since both methods converge to the
@@ -1457,9 +1457,9 @@ res_d2 = Optim.optimize(β -> poisson_nll(β, X_d0, y_d0),
                         (H, β) -> d2pois_hess!(H, β, X_d0, y_d0),
                         zeros(size(X_d0, 2)), Optim.NewtonTrustRegion())
 β_d2 = Optim.minimizer(res_d2)
-@printf("d2 (Optim, analytical grad + Hess)  log L = %.3f   β = %s\n",
+Printf.@printf("d2 (Optim, analytical grad + Hess)  log L = %.3f   β = %s\n",
         -Optim.minimum(res_d2), round.(β_d2, digits = 6))
-@printf("|β_d0 − β_d2|_∞ = %.3e (same MLE; second-order method converges faster)\n",
+Printf.@printf("|β_d0 − β_d2|_∞ = %.3e (same MLE; second-order method converges faster)\n",
         maximum(abs.(β_d0 .- β_d2)))
 
 # Stata-formatted table — identical to d0 / d1 (same MLE, default OIM SEs).

@@ -446,7 +446,7 @@ tobit lny $xlist, ll ul(9.2103404)
 # fitting intercept-only with only the upper bound active — `ll = nothing`
 # skips left-censoring, `ul = log(10000)` right-clips the obs at ambexp ≥ 10000.
 upper = log(10000)
-@printf("upper = log(10000) = %.7f\n", upper)
+Printf.@printf("upper = log(10000) = %.7f\n", upper)
 tobit_2lim_res = stata_tobit(df16, :lny, Symbol[];
     ll = nothing, ul = upper);
 ```
@@ -490,7 +490,7 @@ threshold   = (γ_amb .- xb) ./ sigma_buggy
 λ_tobit     = [pdf(Normal(), z) / cdf(Normal(), z) for z in threshold]
 gres1       = [df16.dy[i] == 1 ? (df16.lny[i] - xb[i]) / sigma_buggy :
                                  -λ_tobit[i]
-               for i in 1:nrow(df16)]
+               for i in 1:DataFrames.nrow(df16)]
 df16.gres1 = gres1
 stata_summarize(df16, [:gres1]);
 ```
@@ -511,13 +511,13 @@ quietly replace gres4 = -(3*threshold + threshold^3)*lambda if dy == 0
 uifdyeq1 = (df16.lny .- xb) ./ sigma_buggy
 df16.gres2 = [df16.dy[i] == 1 ? uifdyeq1[i]^2 - 1 :
                                 -threshold[i] * λ_tobit[i]
-              for i in 1:nrow(df16)]
+              for i in 1:DataFrames.nrow(df16)]
 df16.gres3 = [df16.dy[i] == 1 ? uifdyeq1[i]^3 :
                                 -(2 + threshold[i]^2) * λ_tobit[i]
-              for i in 1:nrow(df16)]
+              for i in 1:DataFrames.nrow(df16)]
 df16.gres4 = [df16.dy[i] == 1 ? uifdyeq1[i]^4 - 3 :
                                 -(3 * threshold[i] + threshold[i]^3) * λ_tobit[i]
-              for i in 1:nrow(df16)];
+              for i in 1:DataFrames.nrow(df16)];
 ```
 
 #### Test of normality

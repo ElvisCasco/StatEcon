@@ -65,7 +65,7 @@ global x2list totchr age female blhisp linc
 summarize ldrugexp hi_empunion $x2list
 =#
 # Read data
-df6 = DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus06data.dta"))
+df6 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus06data.dta"))
 x2list = [:totchr, :age, :female, :blhisp, :linc]
 DataFrames.describe(df6[:, vcat([:ldrugexp, :hi_empunion], x2list)])
 ```
@@ -91,7 +91,7 @@ stata_summarize(df6)
 summarize ssiratio lowincome multlc firmsz if linc!=.
 =#
 # Summarize available instruments where linc is non-missing
-df6_iv = dropmissing(df6, [:linc])
+df6_iv = DataFrames.dropmissing(df6, [:linc])
 stata_summarize(df6_iv[:, [:ssiratio, :lowincome, :multlc, :firmsz]])
 ```
 
@@ -160,7 +160,7 @@ for (name, m) in [("2SLS robust", iv_over), ("2SLS cluster(age)", iv_clu),
                    ("2SLS default", iv_def)]
     nm = StatsBase.coefnames(m)
     i  = findfirst(==("hi_empunion"), nm)
-    @printf("%-20s coef=%9.5f  se=%9.5f\n",
+    Printf.@printf("%-20s coef=%9.5f  se=%9.5f\n",
             name, StatsBase.coef(m)[i], sqrt(StatsBase.vcov(m)[i, i]))
 end
 ```
@@ -174,7 +174,7 @@ end
 #  4) GMM, wmatrix(cluster age) -- one-step GMM with cluster-robust weight (cluster on age)
 #  5) 2SLS default (classical SE)
 
-df6g = dropmissing(df6, vcat([:ldrugexp, :hi_empunion, :ssiratio, :multlc], x2list))
+df6g = DataFrames.dropmissing(df6, vcat([:ldrugexp, :hi_empunion, :ssiratio, :multlc], x2list))
 n    = DataFrames.nrow(df6g)
 
 y     = Float64.(df6g.ldrugexp)
@@ -324,7 +324,7 @@ test v1hat
 =#
 # Durbin–Wu–Hausman: include first-stage residuals in second-stage regression
 # and test their significance.
-df6c = dropmissing(df6, [:ldrugexp, :hi_empunion, :ssiratio, :totchr, :age,
+df6c = DataFrames.dropmissing(df6, [:ldrugexp, :hi_empunion, :ssiratio, :totchr, :age,
                           :female, :blhisp, :linc])
 m_first = FixedEffectModels.reg(df6c, @formula(hi_empunion ~ ssiratio + totchr + age + female + blhisp + linc))
 df6c.v1hat = df6c.hi_empunion .- FixedEffectModels.predict(m_first, df6c)
@@ -333,7 +333,7 @@ m_dwh = FixedEffectModels.reg(df6c, @formula(ldrugexp ~ hi_empunion + v1hat + to
 nm = StatsBase.coefnames(m_dwh)
 i  = findfirst(==("v1hat"), nm)
 t  = StatsBase.coef(m_dwh)[i] / sqrt(StatsBase.vcov(m_dwh)[i, i])
-@printf("DWH t = %.3f, p = %.4f\n",
+Printf.@printf("DWH t = %.3f, p = %.4f\n",
         t, 2 * (1 - cdf(Normal(), abs(t))))
 ```
 
@@ -348,7 +348,7 @@ estat_endogenous(df6, :ldrugexp, :hi_empunion, :ssiratio, x2list;
 ```{julia}
 # --- (1) OLS for comparison with IV ---
 # regress ldrugexp hi_empunion $x2list, vce(robust)
-df6h = dropmissing(df6, vcat([:ldrugexp, :hi_empunion, :ssiratio], x2list))
+df6h = DataFrames.dropmissing(df6, vcat([:ldrugexp, :hi_empunion, :ssiratio], x2list))
 ols_cmp = FixedEffectModels.reg(df6h,
     @formula(ldrugexp ~ hi_empunion + totchr + age + female + blhisp + linc),
     Vcov.robust())
@@ -393,7 +393,7 @@ println(cf)
 #quietly predict v1hat, resid
 #quietly regress ldrugexp hi_empunion v1hat $x2list, vce(robust)
 #test v1hat
-df6c = dropmissing(df6, [:ldrugexp, :hi_empunion, :ssiratio,
+df6c = DataFrames.dropmissing(df6, [:ldrugexp, :hi_empunion, :ssiratio,
                          :totchr, :age, :female, :blhisp, :linc])
 # Step 1-2: first stage + residuals
 m_first = FixedEffectModels.reg(df6c,
@@ -428,7 +428,7 @@ estat overid
 # Sargan/Hansen J test: regress 2SLS residuals on instruments + exogenous,
 # then J = N·R²
 function sargan_test(model, df, instruments, exog_vars, dep)
-    df_clean = dropmissing(df, vcat([dep], instruments, exog_vars))
+    df_clean = DataFrames.dropmissing(df, vcat([dep], instruments, exog_vars))
     uhat = df_clean[!, dep] .- FixedEffectModels.predict(model, df_clean)
     df_clean.uhat = uhat
     fmla = term(:uhat) ~ sum(term.(vcat(instruments, exog_vars)))
@@ -439,7 +439,7 @@ function sargan_test(model, df, instruments, exog_vars, dep)
 end
 J, df_J, p = sargan_test(iv_over, df6, [:ssiratio, :multlc],
                          [:totchr, :age, :female, :blhisp, :linc], :ldrugexp)
-@printf("Sargan J = %.4f, df = %d, p = %.4f\n", J, df_J, p)
+Printf.@printf("Sargan J = %.4f, df = %d, p = %.4f\n", J, df_J, p)
 ```
 
 ```{julia}
@@ -457,7 +457,7 @@ iv_4 = FixedEffectModels.reg(df6,
 J, df_J, p = sargan_test(iv_4, df6,
     [:ssiratio, :lowincome, :multlc, :firmsz],
     [:totchr, :age, :female, :blhisp, :linc], :ldrugexp)
-@printf("Sargan J (4 instruments) = %.4f, df = %d, p = %.4f\n", J, df_J, p)
+Printf.@printf("Sargan J (4 instruments) = %.4f, df = %d, p = %.4f\n", J, df_J, p)
 ```
 
 
@@ -470,7 +470,7 @@ J, df_J, p = sargan_test(iv_4, df6,
 """Two-step efficient GMM + Hansen J, for linear IV with heteroskedastic robust W."""
 function gmm_overid(df, yvar::Symbol, endog_vars, exog_vars, inst_vars)
     needed = unique(vcat([yvar], endog_vars, exog_vars, inst_vars))
-    d = dropmissing(df, needed)
+    d = DataFrames.dropmissing(df, needed)
     n = DataFrames.nrow(d)
     y = Float64.(d[!, yvar])
     X_endog = Matrix{Float64}(d[:, endog_vars])
@@ -556,7 +556,7 @@ println("treatreg-style estimation: see Sec 16.6 (Heckman) for the manual two-st
 # 3) OLS: ldrugexp ~ Xβ + δ·hi_empunion + σ_ερ·λ + error
 #    coef on λ equals σ_ερ; t-test on it is the endogenous-treatment test.
 
-df6t = dropmissing(df6, vcat([:ldrugexp, :hi_empunion, :ssiratio], x2list))
+df6t = DataFrames.dropmissing(df6, vcat([:ldrugexp, :hi_empunion, :ssiratio], x2list))
 Nobs = DataFrames.nrow(df6t)
 
 # --- Step 1: Probit selection / treatment equation
@@ -636,13 +636,13 @@ quietly ivregress 2sls ldrugexp (hi_empunion = ssiratio) $x2list, vce(robust)
 estat firststage, forcenonrobust all  
 =#
 # First-stage F: regress endogenous on instrument(s) + exogenous
-df6c = dropmissing(df6, [:hi_empunion, :ssiratio, :totchr, :age, :female, :blhisp, :linc])
+df6c = DataFrames.dropmissing(df6, [:hi_empunion, :ssiratio, :totchr, :age, :female, :blhisp, :linc])
 fs1 = FixedEffectModels.reg(df6c, @formula(hi_empunion ~ ssiratio + totchr + age + female + blhisp + linc),
           Vcov.robust())
 nm = StatsBase.coefnames(fs1)
 i  = findfirst(==("ssiratio"), nm)
 F1 = (StatsBase.coef(fs1)[i] / sqrt(StatsBase.vcov(fs1)[i, i]))^2     # squared t = F(1, ·)
-@printf("First-stage F(1) on ssiratio = %.3f\n", F1)
+Printf.@printf("First-stage F(1) on ssiratio = %.3f\n", F1)
 ```
 
 ```{julia}
@@ -657,7 +657,7 @@ F1 = (StatsBase.coef(fs1)[i] / sqrt(StatsBase.vcov(fs1)[i, i]))^2     # squared 
 #    coincides with the first-stage F.
 #  - Stock–Yogo 10/15/20/25% critical values (just-identified: 16.38 for 10%)
 
-df6fs = dropmissing(df6, vcat([:hi_empunion, :ssiratio], x2list))
+df6fs = DataFrames.dropmissing(df6, vcat([:hi_empunion, :ssiratio], x2list))
 N_fs  = DataFrames.nrow(df6fs)
 
 # --- First-stage regression ---
@@ -739,7 +739,7 @@ F4 = try
 catch
     NaN
 end
-@printf("First-stage F(4) on instruments = %.3f\n", F4)
+Printf.@printf("First-stage F(4) on instruments = %.3f\n", F4)
 ```
 
 
@@ -794,7 +794,7 @@ end
 # First-stage F for each instrument
 println("\n— First-stage F-stats —")
 for inst in (:ssiratio, :lowincome, :multlc, :firmsz)
-    df6c = dropmissing(df6, [:hi_empunion, inst, :totchr, :age, :female, :blhisp, :linc])
+    df6c = DataFrames.dropmissing(df6, [:hi_empunion, inst, :totchr, :age, :female, :blhisp, :linc])
     fmla = term(:hi_empunion) ~ term(inst) + term(:totchr) + term(:age) +
                                  term(:female) + term(:blhisp) + term(:linc)
     fs = FixedEffectModels.reg(df6c, fmla)
@@ -802,7 +802,7 @@ for inst in (:ssiratio, :lowincome, :multlc, :firmsz)
     i  = findfirst(==(string(inst)), nm)
     F  = (StatsBase.coef(fs)[i] / sqrt(StatsBase.vcov(fs)[i, i]))^2
     β_iv = StatsBase.coef(iv_models[inst])[findfirst(==("hi_empunion"), StatsBase.coefnames(iv_models[inst]))]
-    @printf("%-12s  IV β=%8.4f   first-stage F=%8.3f\n", inst, β_iv, F)
+    Printf.@printf("%-12s  IV β=%8.4f   first-stage F=%8.3f\n", inst, β_iv, F)
 end
 ```
 
@@ -837,7 +837,7 @@ _wrap_fem(m) = (;
 )
 # Classical first-stage F on the single excluded instrument = Stata's mineig.
 _mineig(df, endog, inst, exog) = begin
-    d = dropmissing(df, unique(vcat(Symbol(endog), Symbol(inst), exog)))
+    d = DataFrames.dropmissing(df, unique(vcat(Symbol(endog), Symbol(inst), exog)))
     f = term(Symbol(endog)) ~ sum(term.(vcat(exog, Symbol(inst))))
     m = FixedEffectModels.reg(d, f)
     nm = string.(StatsBase.coefnames(m))
@@ -886,14 +886,14 @@ Printf.@printf("Minimum eigenvalues are:     %.8g  %.8g  %.8g  %.8g\n",
 =#
 # Anderson–Rubin (AR) test, weak-instrument robust:
 # regress y - β₀·x₁ on instruments (β₀ = 0 here)
-df6c = dropmissing(df6, [:ldrugexp, :ssiratio, :totchr, :age, :female, :blhisp, :linc])
+df6c = DataFrames.dropmissing(df6, [:ldrugexp, :ssiratio, :totchr, :age, :female, :blhisp, :linc])
 df6c.y_ar = df6c.ldrugexp                # β₀ = 0
 m_ar = FixedEffectModels.reg(df6c, @formula(y_ar ~ ssiratio + totchr + age + female + blhisp + linc))
 nm = StatsBase.coefnames(m_ar)
 i_ssi = findfirst(==("ssiratio"), nm)
 β = StatsBase.coef(m_ar)[i_ssi]; se = sqrt(StatsBase.vcov(m_ar)[i_ssi, i_ssi])
 F_ar = (β / se)^2
-@printf("AR F(1) = %.3f, p = %.4f\n",
+Printf.@printf("AR F(1) = %.3f, p = %.4f\n",
         F_ar, 1 - cdf(FDist(1, dof_residual(m_ar)), F_ar))
 ```
 
@@ -949,9 +949,9 @@ estimates store IVREG2
 estimates table TWOSLS LIML JIVE GMM_het IVREG2, b(%7.4f) se 
 =#
 # ivregress 2sls / liml comparison (4 instruments, 1 endogenous)
-df6iv = dropmissing(df6, vcat([:ldrugexp, :hi_empunion, :ssiratio,
+df6iv = DataFrames.dropmissing(df6, vcat([:ldrugexp, :hi_empunion, :ssiratio,
        :lowincome, :multlc, :firmsz], x2list))
-n = nrow(df6iv)
+n = DataFrames.nrow(df6iv)
 
 # 2SLS
 twosls = FixedEffectModels.reg(df6iv,
@@ -1066,9 +1066,9 @@ stata_reg3 (ldrugexp hi_empunion totchr age female blhisp linc) ///
 # 3SLS estimation
 # stata_reg3 (ldrugexp hi_empunion totchr age female blhisp linc)
 #      (hi_empunion ldrugexp totchr female blhisp ssiratio)
-df6_3 = dropmissing(df6, [:ldrugexp, :hi_empunion, :totchr, :age, :female,
+df6_3 = DataFrames.dropmissing(df6, [:ldrugexp, :hi_empunion, :totchr, :age, :female,
                            :blhisp, :linc, :ssiratio])
-n3 = nrow(df6_3)
+n3 = DataFrames.nrow(df6_3)
 
 # Eq 1: ldrugexp  = f(hi_empunion, totchr, age, female, blhisp, linc)
 # Eq 2: hi_empunion = f(ldrugexp, totchr, female, blhisp, ssiratio)
@@ -1112,9 +1112,9 @@ se_3sls = sqrt.(max.(LinearAlgebra.diag(V_3sls), 0.0))
 z_3sls  = β_3sls ./ se_3sls
 
 println("=== 3SLS Equation 1: ldrugexp ===")
-println(DataFrame(variable=cn3_1, Coef=β_3sls[1:k1], SE=se_3sls[1:k1], z=z_3sls[1:k1]))
+println(DataFrames.DataFrame(variable=cn3_1, Coef=β_3sls[1:k1], SE=se_3sls[1:k1], z=z_3sls[1:k1]))
 println("\n=== 3SLS Equation 2: hi_empunion ===")
-println(DataFrame(variable=cn3_2, Coef=β_3sls[k1+1:end], SE=se_3sls[k1+1:end], z=z_3sls[k1+1:end]))
+println(DataFrames.DataFrame(variable=cn3_2, Coef=β_3sls[k1+1:end], SE=se_3sls[k1+1:end], z=z_3sls[k1+1:end]))
 ```
 
 ```{julia}

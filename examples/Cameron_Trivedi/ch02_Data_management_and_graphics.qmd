@@ -99,7 +99,7 @@ sysuse auto.dta
 list in 1/5 // list the first five observations
 =#
 # sysuse auto.dta equivalent
-auto = DataFrame(ReadStatTables.readstat("$(DATA)/auto.dta"))
+auto = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/auto.dta"))
 # Quick check - list first 5 observations
 first(auto, 5)
 ```
@@ -134,7 +134,7 @@ stata_summarize(auto)
 use "mus2/mus202psid92m.dta", clear
 =#
 # Read in existing Stata dataset
-psid = DataFrame(ReadStatTables.readstat("$(DATA)/mus2/mus202psid92m.dta"))
+psid = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/mus2/mus202psid92m.dta"))
 ```
 
 ```{julia}
@@ -177,7 +177,7 @@ input str20 name age female income
 end
 =#
 # Data input from keyboard
-df_input = DataFrame(
+df_input = DataFrames.DataFrame(
     name   = ["Barry", "Carrie", "Gary"],
     age    = [25, 30, 31],
     female = [0, 1, 0],
@@ -251,7 +251,7 @@ list, clean
 =#
 # Read data from fixed-format text file using custom parsing
 lines = readlines("$(DATA)/mus2/mus202file3.txt")
-df_fixed = DataFrame(
+df_fixed = DataFrames.DataFrame(
     name   = [strip(l[1:min(10,length(l))]) for l in lines],
     age    = [parse(Int, strip(l[11:min(12,length(l))])) for l in lines],
     female = [parse(Int, strip(l[13:min(13,length(l))])) for l in lines],
@@ -447,7 +447,7 @@ println(psid[1:2, [:age, :hours]])
 tabulate education
 =#
 # Tabulate all values taken by a single variable
-edu_tab = combine(groupby(psid, :education), nrow => :Freq)
+edu_tab = DataFrames.combine(DataFrames.groupby(psid, :education), nrow => :Freq)
 sort!(edu_tab, :education)
 println(edu_tab)
 ```
@@ -563,7 +563,7 @@ stata_summarize(psid, [:sex, :age, :education, :earnings])
 generate id = _n
 =#
 # Create identifier using generate command
-psid.id = 1:nrow(psid)
+psid.id = 1:DataFrames.nrow(psid)
 ```
 
 ```{julia}
@@ -583,7 +583,7 @@ psid.lnearns = [ismissing(e) ? missing : (e > 0 ? log(e) : missing) for e in psi
 egen aveearnings = mean(earnings) if earnings < .
 =#
 # Create new variable using egen command (mean of earnings)
-psid.aveearnings = fill(mean(skipmissing(psid.earnings)), nrow(psid))
+psid.aveearnings = fill(Statistics.mean(skipmissing(psid.earnings)), DataFrames.nrow(psid))
 ```
 
 #### The recode command
@@ -611,9 +611,9 @@ bysort education: egen aveearnsbyed = mean(earnings)
 sort id
 =#
 # Create new variable using bysort: prefix (mean earnings by education)
-psid_nomiss = dropmissing(psid, [:education, :earnings])
-aveby = combine(groupby(psid_nomiss, :education), :earnings => mean => :aveearnsbyed)
-psid = leftjoin(psid, aveby, on=:education, makeunique=true, matchmissing=:equal)
+psid_nomiss = DataFrames.dropmissing(psid, [:education, :earnings])
+aveby = DataFrames.combine(DataFrames.groupby(psid_nomiss, :education), :earnings => mean => :aveearnsbyed)
+psid = DataFrames.leftjoin(psid, aveby, on=:education, makeunique=true, matchmissing=:equal)
 sort!(psid, :id)
 ```
 
@@ -643,7 +643,7 @@ replace d2 = 1 if earnings > 0
 replace d2 = . if earnings >= .
 =#
 # Create indicator variable using generate and replace commands
-psid.d2 = zeros(Int, nrow(psid))
+psid.d2 = zeros(Int, DataFrames.nrow(psid))
 psid.d2[coalesce.(psid.earnings .> 0, false)] .= 1
 psid.d2 = [ismissing(e) ? missing : psid.d2[i] for (i, e) in enumerate(psid.earnings)]
 ```
@@ -782,7 +782,7 @@ generate double agesqdemean = agedemean^2
 summarize agedemean agesqdemean
 =#
 # Create demeaned variables
-aveage = mean(skipmissing(psid.age))
+aveage = Statistics.mean(skipmissing(psid.age))
 psid.agedemean   = psid.age .- aveage
 psid.agesqdemean = psid.agedemean .^ 2
 col1 = collect(skipmissing(psid.agedemean))
@@ -850,7 +850,7 @@ end
 summarize earnings lnearns if age >= 35 & age <= 44 
 =#
 # Select the sample used in a single command using the if qualifier
-sub_age = dropmissing(psid, [:earnings, :lnearns, :age])
+sub_age = DataFrames.dropmissing(psid, [:earnings, :lnearns, :age])
 sub_age = filter(r -> r.age >= 35 && r.age <= 44, sub_age)
 stata_summarize(sub_age, [:earnings, :lnearns])
 ```
@@ -862,7 +862,7 @@ keep if (lnearns != .) & (age >= 35 & age <= 44)
 summarize earnings lnearns
 =#
 # Select the sample using keep (filter)
-psid_filt = dropmissing(psid, [:lnearns, :age])
+psid_filt = DataFrames.dropmissing(psid, [:lnearns, :age])
 psid_filt = filter(r -> !ismissing(r.lnearns) && r.age >= 35 && r.age <= 44, psid_filt)
 stata_summarize(psid_filt, [:earnings, :lnearns])
 ```
@@ -875,7 +875,7 @@ keep lnearns age
 drop in 1/1000
 =#
 # Select the sample using keep and drop commands
-psid_reload = DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus02psid92m.dta"))
+psid_reload = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus02psid92m.dta"))
 psid_sub = psid_reload[!, [:lnearns, :age]]
 psid_sub = psid_sub[1001:end, :]  # drop first 1000 observations
 ```
@@ -899,7 +899,7 @@ list age in 1/1, noheader clean
 list age in 1/1, noheader clean
 =#
 # Commands preserve and restore illustrated
-psid_full = DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus02psid92m.dta"))
+psid_full = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus02psid92m.dta"))
 println("Original age[1]: ", psid_full.age[1])
 # preserve equivalent: make a copy
 psid_backup = copy(psid_full)
@@ -924,8 +924,8 @@ list in 1/4, clean
 quietly save musr/merge1.dta, replace
 =#
 # Create first dataset with every third observation
-psid_full = DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus02psid92m.dta"))
-merge1 = psid_full[mod.(1:nrow(psid_full), 3) .== 0, [:id, :education, :earnings]]
+psid_full = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus02psid92m.dta"))
+merge1 = psid_full[mod.(1:DataFrames.nrow(psid_full), 3) .== 0, [:id, :education, :earnings]]
 println("merge1 first 4 rows:")
 println(first(merge1, 4))
 ```
@@ -940,7 +940,7 @@ list in 1/4, clean
 quietly save musr/merge2.dta, replace
 =#
 # Create second dataset with every second observation
-merge2 = psid_full[mod.(1:nrow(psid_full), 2) .== 0, [:id, :education, :hours]]
+merge2 = psid_full[mod.(1:DataFrames.nrow(psid_full), 2) .== 0, [:id, :education, :hours]]
 println("merge2 first 4 rows:")
 println(first(merge2, 4))
 ```
@@ -969,7 +969,7 @@ tab _merge
 # Tabulate merge indicator
 merged.source = ifelse.(.!ismissing.(merged.earnings) .& .!ismissing.(merged.hours), "both",
     ifelse.(.!ismissing.(merged.earnings), "merge1_only", "merge2_only"))
-println(combine(groupby(merged, :source), nrow => :Freq))
+println(DataFrames.combine(DataFrames.groupby(merged, :source), nrow => :Freq))
 ```
 
 ### 2.5.5 Appending datasets
@@ -1003,8 +1003,8 @@ twoway scatter lnearns hours
 graph export musr/mus02two1.eps, replace
 =#
 # Load data and create scatter plot
-psid_plot = DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus02psid92m.dta"))
-psid_plot_clean = dropmissing(psid_plot, [:lnearns, :hours])
+psid_plot = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus02psid92m.dta"))
+psid_plot_clean = DataFrames.dropmissing(psid_plot, [:lnearns, :hours])
 
 fig = CairoMakie.Figure()
 ax = CairoMakie.Axis(fig[1, 1], xlabel="Hours", ylabel="Log Earnings")
@@ -1093,7 +1093,7 @@ label define edtype 1 "< High School" 2 "High School" 3 "Some College" 4 "Colleg
 label values edcat edtype
 =#
 # Prepare edcat labels
-psid_plot = DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus02psid92m.dta"))
+psid_plot = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus02psid92m.dta"))
 psid_plot.edcat = [ismissing(e) ? missing :
     e <= 11 ? 1 : e == 12 ? 2 : e <= 15 ? 3 : e <= 17 ? 4 : missing
     for e in psid_plot.education]
@@ -1108,7 +1108,7 @@ graph box hours, over(edcat) scale(1.2) marker(1,msize(vsmall))   ///
 quietly graph export musr/mus02boxfig.eps, replace
 =#
 # Box and whisker plot of single variable over several categories
-psid_box = dropmissing(psid_plot, [:hours, :edcat])
+psid_box = DataFrames.dropmissing(psid_plot, [:hours, :edcat])
 fig = CairoMakie.Figure()
 ax = CairoMakie.Axis(fig[1, 1],
     ylabel="Annual hours worked by education",
@@ -1125,7 +1125,7 @@ fig
 histogram lnearns
 =#
 # histogram lnearns
-psid_hist = dropmissing(psid_plot, :lnearns)
+psid_hist = DataFrames.dropmissing(psid_plot, :lnearns)
 fig = CairoMakie.Figure()
 ax = CairoMakie.Axis(fig[1, 1], xlabel="Log Earnings", ylabel="Density")
 hist!(ax, Float64.(psid_hist.lnearns), normalization=:pdf)
@@ -1154,7 +1154,7 @@ fig
 kdensity lnearns
 =#
 # kdensity lnearns
-psid_kd = dropmissing(psid_plot, :lnearns)
+psid_kd = DataFrames.dropmissing(psid_plot, :lnearns)
 kd = KernelDensity.kde(Float64.(psid_kd.lnearns))
 fig = CairoMakie.Figure()
 ax = CairoMakie.Axis(fig[1, 1], xlabel="Log Earnings", ylabel="Density")
@@ -1174,8 +1174,8 @@ fig = CairoMakie.Figure()
 ax = CairoMakie.Axis(fig[1, 1], xlabel="Log Earnings", ylabel="Density")
 CairoMakie.lines!(ax, kd2.x, kd2.density, linewidth=2, label="Kernel density")
 # Overlay normal density
-mu_kd = mean(Float64.(psid_kd.lnearns))
-sigma_kd = std(Float64.(psid_kd.lnearns))
+mu_kd = Statistics.mean(Float64.(psid_kd.lnearns))
+sigma_kd = Statistics.std(Float64.(psid_kd.lnearns))
 x_norm = range(minimum(kd2.x), maximum(kd2.x), length=4000)
 y_norm = @. (1 / (sigma_kd * sqrt(2pi))) * exp(-0.5 * ((x_norm - mu_kd) / sigma_kd)^2)
 CairoMakie.lines!(ax, collect(x_norm), y_norm, linewidth=2, linestyle=:dash, label="Normal")
@@ -1218,7 +1218,7 @@ fig
 scatter lnearns hours
 =#
 # Simple two-way scatterplot
-psid_sc = dropmissing(psid_plot, [:lnearns, :hours])
+psid_sc = DataFrames.dropmissing(psid_plot, [:lnearns, :hours])
 fig = CairoMakie.Figure()
 ax = CairoMakie.Axis(fig[1, 1], xlabel="Hours", ylabel="Log Earnings")
 CairoMakie.scatter!(ax, Float64.(psid_sc.hours), Float64.(psid_sc.lnearns), markersize=4)
@@ -1238,7 +1238,7 @@ psid_sc.hours2   = psid_sc.hours_f .^ 2
 model_quad = FixedEffectModels.reg(psid_sc, @formula(lnearns_f ~ hours_f + hours2))
 
 x_sorted = sort(psid_sc.hours_f)
-newdata = DataFrame(hours_f=x_sorted, hours2=x_sorted .^ 2)
+newdata = DataFrames.DataFrame(hours_f=x_sorted, hours2=x_sorted .^ 2)
 pred = FixedEffectModels.predict(model_quad, newdata)
 
 fig = CairoMakie.Figure()
@@ -1266,7 +1266,7 @@ graph twoway (scatter lnearns hours, msize(tiny))                 ///
 quietly graph export musr/mus02twoway.eps, replace
 =#
 # Scatterplot with lowess and local linear nonparametric regression
-psid_np = dropmissing(psid_plot, [:lnearns, :hours])
+psid_np = DataFrames.dropmissing(psid_plot, [:lnearns, :hours])
 psid_np = filter(r -> isfinite(r.lnearns) && isfinite(r.hours), psid_np)
 sorted_idx = sortperm(Float64.(psid_np.hours))
 hours_s   = Float64.(psid_np.hours[sorted_idx])
@@ -1338,7 +1338,7 @@ label variable hours "Annual hours"
 graph matrix lnearns hours age, by(edcat) msize(small) 
 =#
 # Multiple scatterplots (scatter matrix by edcat)
-psid_mat = dropmissing(psid_plot, [:lnearns, :hours, :age, :edcat])
+psid_mat = DataFrames.dropmissing(psid_plot, [:lnearns, :hours, :age, :edcat])
 edcat_vals_plot = sort(unique(psid_mat.edcat))
 vars = [:lnearns, :hours, :age]
 var_labels = ["Log earnings", "Annual hours", "Age"]

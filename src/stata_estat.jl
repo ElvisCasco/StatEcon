@@ -50,9 +50,9 @@ differences from Stata's `estat imtest` are expected because of different
 rank-adjustment and redundancy-handling conventions.
 """
 function estat_imtest(model, df)
-    nm = string.(coefnames(model))
+    nm = string.(StatsBase.coefnames(model))
     X  = _design_matrix_from_df(nm, df)
-    β  = coef(model)
+    β  = StatsBase.coef(model)
 
     yname = try
         Symbol(string(FixedEffectModels.formula(model).lhs))
@@ -150,8 +150,8 @@ function estat_hettest(model, df;
                        vars::Union{Nothing, Vector{Symbol}} = nothing,
                        iid::Bool = false,
                        mtest::Bool = false)
-    nm = coefnames(model)
-    n  = Int(nobs(model))
+    nm = StatsBase.coefnames(model)
+    n  = Int(StatsBase.nobs(model))
 
     needed = Symbol[]
     for name in nm
@@ -166,7 +166,7 @@ function estat_hettest(model, df;
     end
     push!(needed, resp)
     unique!(needed)
-    dfc = dropmissing(df, needed)
+    dfc = DataFrames.dropmissing(df, needed)
 
     yhat = FixedEffectModels.predict(model, dfc)
     uhat = Float64.(dfc[!, resp]) .- yhat

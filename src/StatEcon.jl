@@ -261,7 +261,7 @@ export stata_regress, stata_regress_cluster,
 
 # Compile the hot paths at precompile time instead of on first use in a notebook.
 @setup_workload begin
-    df = DataFrame(y = randn(60), x = randn(60), z = randn(60),
+    df = DataFrames.DataFrame(y = randn(60), x = randn(60), z = randn(60),
                    g = repeat(1:6, inner = 10), t = repeat(0:1, 30))
     @compile_workload begin
         redirect_stdout(devnull) do

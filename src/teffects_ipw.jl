@@ -66,7 +66,7 @@ function teffects_ipw(df::AbstractDataFrame, treat::Symbol, covars::AbstractVect
     A[K+2, K+2]  = -sum((1 .- t) ./ (1 .- p)) / N
 
     B  = (S' * S) / N
-    Ai = inv(A)
+    Ai = LinearAlgebra.inv(A)
     V  = (Ai * B * Ai') / N                    # var(theta)
 
     L        = [zeros(K); 1.0; -1.0]           # ATE = mu1 - mu0
@@ -78,10 +78,10 @@ function teffects_ipw(df::AbstractDataFrame, treat::Symbol, covars::AbstractVect
     function row(label, est, se)
         z  = est / se
         lo = est - 1.959964se; hi = est + 1.959964se
-        @printf("%-14s | %10.5g %10.5g %7.2f %8.3f %11.5g %11.5g\n",
+        Printf.@printf("%-14s | %10.5g %10.5g %7.2f %8.3f %11.5g %11.5g\n",
                 label, est, se, z, _pval(z), lo, hi)
     end
-    @printf("%-14s | %10s %10s %7s %8s %11s %11s\n",
+    Printf.@printf("%-14s | %10s %10s %7s %8s %11s %11s\n",
             string(outcome), "Coef.", "Robust SE", "z", "P>|z|", "[95% conf.", "interval]")
     println("-"^14 * "+" * "-"^61)
     println("ATE")
@@ -89,7 +89,7 @@ function teffects_ipw(df::AbstractDataFrame, treat::Symbol, covars::AbstractVect
     println("POmean")
     row("  control (0)", mu0, se_mu0)
 
-    return DataFrame(Parameter = ["ATE", "POmean_0", "POmean_1"],
+    return DataFrames.DataFrame(Parameter = ["ATE", "POmean_0", "POmean_1"],
                      Estimate  = [ATE, mu0, mu1],
                      RobustSE  = [se_ate, se_mu0, se_mu1])
 end

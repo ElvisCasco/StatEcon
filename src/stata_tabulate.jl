@@ -100,16 +100,16 @@ function stata_tabulate(df::AbstractDataFrame, col::Symbol;
     for i in eachindex(valstrs)
         println(pad(valstrs[i], lw) * " | " *
                 pad(freqstrs[i], freqw) * "   " *
-                pad(@sprintf("%.2f", pcts[i]), pctw) * "   " *
-                pad(@sprintf("%.2f", cums[i]), cumw))
+                pad(Printf.@sprintf("%.2f", pcts[i]), pctw) * "   " *
+                pad(Printf.@sprintf("%.2f", cums[i]), cumw))
     end
     sep()
 
     # ---- total ---------------------------------------------------------
     println(pad("Total", lw) * " | " *
             pad(_comma(total), freqw) * "   " *
-            pad(@sprintf("%.2f", 100.0), pctw) * "   " *
+            pad(Printf.@sprintf("%.2f", 100.0), pctw) * "   " *
             pad("", cumw))
 
-    return DataFrame(Value = valstrs, Freq = freqs, Percent = pcts, Cum = cums)
+    return DataFrames.DataFrame(Value = valstrs, Freq = freqs, Percent = pcts, Cum = cums)
 end
