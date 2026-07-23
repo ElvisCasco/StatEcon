@@ -155,12 +155,11 @@ $\hat\rho = 0.04861$, $\hat\sigma = 0.66362875$ — identical to the published
 values. As Wooldridge notes, the selection term is completely insignificant
 ($z = 0.24$), so OLS on the selected sample is fine here.
 
-Two cosmetic differences: (i) the *selection*-block standard errors differ in the
-third significant digit (e.g. `nwifeinc` 0.0049392 here vs 0.0048398 in Stata).
-`StatEcon`'s probit variance is the expected-information (IRLS) matrix
-$(Z'WZ)^{-1}$ used by `GLM.jl`, whereas Stata's `probit` reports the
-observed-information inverse; the point estimates agree to six digits.
-(ii) The header `Wald chi2` is computed over the wage block only (3 d.f.);
+The *selection*-block standard errors also match Stata (e.g. `nwifeinc`
+0.0048398, identical to the published value): `stata_heckman_twostep` fits the
+stage-1 probit and reports its observed-information variance, which is what
+Stata's `probit` uses. One cosmetic difference remains:
+the header `Wald chi2` is computed over the wage block only (3 d.f.);
 old Stata reported `Wald chi2(6) = 180.10` for this model, which is the joint
 test including the Mills term under its own d.f. convention.
 
@@ -319,11 +318,9 @@ probit_17_7 = stata_probit(
 
 All ten coefficients match the published table to six significant digits, as do
 $N = 753$, LR $\chi^2(9) = 207.10$, log-likelihood $-411.3224$ and
-pseudo-$R^2 = 0.2011$. The standard errors are 1–3% larger than Stata's
-(`nwifeinc` 0.0050157 vs 0.0048787) because `StatEcon`'s probit variance is the
-expected-information matrix from `GLM.jl`'s IRLS, while Stata's `probit` reports
-the observed-information inverse. That is a genuine, documented difference in
-`vce` convention, not a fitting error — the log-likelihood is identical.
+pseudo-$R^2 = 0.2011$. The standard errors match as well (`nwifeinc` 0.0048787,
+identical to Stata): `stata_probit` reports the observed-information variance
+that Stata's `probit` uses.
 
 ## IV with the Mills ratio added (Procedure 17.2)
 
@@ -433,7 +430,6 @@ comparison
 ```
 
 Every reported coefficient agrees with Stata to at least four significant
-digits. The only systematic disagreements in this chapter are in *standard
-errors of probit-based blocks* (the selection equation of `heckman, twostep`
-and the standalone `probit` of Example 17.7), which stem from
-expected- vs observed-information variance estimators.
+digits, and the probit-based standard errors — the selection equation of
+`heckman, twostep` and the standalone `probit` of Example 17.7 — now reproduce
+Stata's observed-information (`vce(oim)`) values as well.
