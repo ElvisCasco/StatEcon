@@ -23,6 +23,14 @@ Prints Stata's standard block:
       Score chi2(L−K)          =  <stat>  (p = <p>)
 
 Returns `(; chi2, df, pvalue)`.
+
+!!! note "Limitation"
+    `endog` is a single `Symbol`, so this handles one endogenous regressor.
+    With several endogenous regressors the Sargan statistic is the same
+    `n·R²` from the auxiliary regression on the full instrument set, with
+    `df = L − K` for `K` endogenous regressors — see the by-hand `sargan()`
+    helper in `examples/Wooldridge_Panel/ch09` (Example 9.6) for the two-
+    endogenous case. Generalising `endog` to a vector would fold that in.
 """
 function stata_estat_overid_2sls(df; depvar::Symbol,
                                  exog_vars::AbstractVector{Symbol},

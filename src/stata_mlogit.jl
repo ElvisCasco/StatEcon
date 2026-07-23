@@ -271,6 +271,14 @@ on the remaining `(J-1) × length(vars)` restrictions.
 
 Returns `(; chi2, dof, p, R)` (R = restriction matrix in the layout
 of `vec(B)` from the fit).
+
+!!! note "Limitation"
+    Only the all-equations form (Stata `test <vars>`) is implemented — the
+    joint test that each named regressor is zero across every outcome
+    equation. The equation-specific restriction (`test [k]: <vars>`, one
+    outcome at a time) is not supported; build that restriction matrix by
+    hand from `res.B` / `res.V` — see Example 15.4 in
+    `examples/Wooldridge_Panel/ch15` for the pattern.
 """
 function stata_test_mlogit(res, vars)
     vs = vars isa Symbol ? [vars] : collect(vars)
