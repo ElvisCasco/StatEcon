@@ -23,7 +23,6 @@ jupyter: julia-1.12
 
 ```{julia}
 using StatEcon
-const DATA = let c = filter(d -> isdir(d) && (isfile(joinpath(d, "auto.dta")) || isdir(joinpath(d, "musr"))), ["../../data", "../data", "data"]); isempty(c) ? error("StatEcon example data not found; run this notebook from its own folder (examples/Cameron_Trivedi) or the repo root.") : first(c) end
 using DataFrames, ReadStatTables, CSV
 using Statistics, StatsBase, LinearAlgebra, Printf, Random
 using FixedEffectModels, StatsModels, GLM
@@ -191,7 +190,7 @@ describe dmdu med mdu lcoins ndisease female age lfam child id year
 # then `DataFrames.describe` prints the per-variable summary (`describe` in
 # StatEcon has no dedicated Stata printer; use `DataFrames.describe` /
 # `stata_summarize`).
-df18 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus18data.dta"))
+df18 = dataset("mus18data")
 for c in DataFrames.names(df18)
     if eltype(df18[!, c]) <: Union{Missing, Float32}
         df18[!, c] = convert.(Union{Missing, Float64}, df18[!, c])
@@ -1156,7 +1155,7 @@ A_named[:, [:row, :c1, :c2, :c3]]
 
 ```{julia}
 # Read in data, run a regression, then extract V from the model
-df_a = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus03data.dta"))
+df_a = dataset("mus03data")
 df_a = first(DataFrames.dropmissing(df_a, [:ltotexp, :totchr]), 100)
 DataFrames.describe(df_a[:, [:ltotexp, :totchr]])
 m_ax = FixedEffectModels.reg(df_a, GLM.@formula(ltotexp ~ totchr))
@@ -1452,7 +1451,7 @@ Mata idioms to native Julia.
 
 ```{julia}
 # Read in data
-df_b = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus03data.dta"))
+df_b = dataset("mus03data")
 df_b = first(DataFrames.dropmissing(df_b, [:ltotexp, :totchr]), 100)
 df_b.cons = ones(DataFrames.nrow(df_b))
 DataFrames.describe(df_b[:, [:ltotexp, :totchr, :cons]])

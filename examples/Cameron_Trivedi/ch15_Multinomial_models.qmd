@@ -23,7 +23,6 @@ jupyter: julia-1.12
 
 ```{julia}
 using StatEcon
-const DATA = let c = filter(d -> isdir(d) && (isfile(joinpath(d, "auto.dta")) || isdir(joinpath(d, "musr"))), ["../../data", "../data", "data"]); isempty(c) ? error("StatEcon example data not found; run this notebook from its own folder (examples/Cameron_Trivedi) or the repo root.") : first(c) end
 using DataFrames, ReadStatTables, CSV
 using Statistics, StatsBase, LinearAlgebra, Printf, Random
 using FixedEffectModels, StatsModels, GLM
@@ -108,7 +107,7 @@ alternatives (beach, pier, private, charter).
 * If panel data used then clustering is on id (person id)
 =#
 # Read in dataset and describe
-df15 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus15data.dta"))
+df15 = dataset("mus15data")
 DataFrames.describe(df15)
 ```
 
@@ -479,10 +478,11 @@ DataFrames.sort!(df15long, [:id])
 
 # Stata's `save … , replace` writes the long file to disk for later
 # scripts; in Julia `df15long` lives in memory and downstream chunks
-# read it directly. A CSV mirror is kept on disk for parity (the
-# textbook's downstream Stata sessions reload from .dta — Julia
-# sessions can `CSV.read("musr/mus15datalong.csv", DataFrame)` instead).
-CSV.write("$(DATA)/musr/mus15datalong.csv", df15long);
+# read it directly. A CSV mirror is written to the *working
+# directory* for parity (the textbook's downstream Stata sessions
+# reload from .dta — Julia sessions can use the bundled copy via
+# `dataset("mus15datalong.csv")` / `dataset("mus15datalong")`).
+CSV.write("mus15datalong.csv", df15long);
 ```
 
 ```{julia}
@@ -1082,7 +1082,7 @@ tabulate hlthstat
 # print the value-label legend via `stata_label_list` and the
 # frequency table via `stata_tabulate` (both chunk 1).
 df18_y2 = let
-    df = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus18data.dta"))
+    df = dataset("mus18data")
     DataFrames.filter(:year => v -> _rawval(v) == 2, df)
 end
 df18_y2.hlthpf = Int.(_rawval.(df18_y2.hlthp)) .+ Int.(_rawval.(df18_y2.hlthf))

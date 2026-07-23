@@ -23,7 +23,6 @@ jupyter: julia-1.12
 
 ```{julia}
 using StatEcon
-const DATA = let c = filter(d -> isdir(d) && (isfile(joinpath(d, "auto.dta")) || isdir(joinpath(d, "musr"))), ["../../data", "../data", "data"]); isempty(c) ? error("StatEcon example data not found; run this notebook from its own folder (examples/Cameron_Trivedi) or the repo root.") : first(c) end
 using DataFrames, ReadStatTables, CSV
 using Statistics, StatsBase, LinearAlgebra, Printf, Random
 using FixedEffectModels, StatsModels, GLM
@@ -119,7 +118,7 @@ summarize ambexp age female educ blhisp totchr ins
 
 # Load mus16data (Deb-Munkin-Trivedi ambulatory-expenditure panel) and
 # call `stata_summarize` on the seven variables Stata lists.
-df16 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus16data.dta"))
+df16 = dataset("mus16data")
 for c in DataFrames.names(df16)
     if eltype(df16[!, c]) <: Union{Missing, Float32}
         df16[!, c] = convert.(Union{Missing, Float64}, df16[!, c])

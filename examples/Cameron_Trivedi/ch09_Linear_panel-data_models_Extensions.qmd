@@ -23,7 +23,6 @@ jupyter: julia-1.12
 
 ```{julia}
 using StatEcon
-const DATA = let c = filter(d -> isdir(d) && (isfile(joinpath(d, "auto.dta")) || isdir(joinpath(d, "musr"))), ["../../data", "../data", "data"]); isempty(c) ? error("StatEcon example data not found; run this notebook from its own folder (examples/Cameron_Trivedi) or the repo root.") : first(c) end
 using DataFrames, ReadStatTables, CSV
 using Statistics, StatsBase, LinearAlgebra, Printf, Random
 using FixedEffectModels, StatsModels, GLM
@@ -149,7 +148,7 @@ xtivreg lwage exp exp2 (wks = ms), fe
 =#
 # use musr/mus08psidextract.dta, clear
 # xtivreg lwage exp exp2 (wks = ms), fe
-df9 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus08psidextract.dta"))
+df9 = dataset("mus08psidextract")
 for c in names(df9)
     eltype(df9[!, c]) <: Union{Float32, Missing} &&
         (df9[!, c] = convert.(Union{Float64, Missing}, df9[!, c]))
@@ -501,7 +500,7 @@ summarize pharvis lnhhexp illness commune
 =#
 # use musr/mus09vietnam_ex2.dta, clear
 # summarize pharvis lnhhexp illness commune
-df9v = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus09vietnam_ex2.dta"))
+df9v = dataset("mus09vietnam_ex2")
 stata_summarize(df9v, [:pharvis, :lnhhexp, :illness, :commune]);
 ```
 

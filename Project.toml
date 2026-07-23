@@ -5,6 +5,7 @@ authors = ["Elvis Teodoro Casco Alfaro <ecasco1@gmail.com>"]
 
 [deps]
 DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+DelimitedFiles = "8bb1440f-4735-579b-a4ab-409b98df4dab"
 Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
 FixedEffectModels = "9d5cd8c9-2029-5cab-9928-427838db53e3"
 ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
@@ -21,6 +22,7 @@ StatsModels = "3eaba693-59b7-5ba5-a881-562e759f1c8d"
 
 [compat]
 DataFrames = "1"
+DelimitedFiles = "1"
 Distributions = "0.25"
 FixedEffectModels = "1"
 ForwardDiff = "0.10, 1"

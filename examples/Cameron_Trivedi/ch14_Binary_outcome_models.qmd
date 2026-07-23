@@ -23,7 +23,6 @@ jupyter: julia-1.12
 
 ```{julia}
 using StatEcon
-const DATA = let c = filter(d -> isdir(d) && (isfile(joinpath(d, "auto.dta")) || isdir(joinpath(d, "musr"))), ["../../data", "../data", "data"]); isempty(c) ? error("StatEcon example data not found; run this notebook from its own folder (examples/Cameron_Trivedi) or the repo root.") : first(c) end
 using DataFrames, ReadStatTables, CSV
 using Statistics, StatsBase, LinearAlgebra, Printf, Random
 using FixedEffectModels, StatsModels, GLM
@@ -823,7 +822,7 @@ summarize ins retire $xlist $extralist
 # Load mus14data, drop the four interaction columns Stata recreates later,
 # add linc = log(hhincome), and run `stata_summarize` on the combined
 # `xlist + extralist` variable list.
-df14 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus14data.dta"))
+df14 = dataset("mus14data")
 for c in DataFrames.names(df14)
     if eltype(df14[!, c]) <: Union{Missing, Float32}
         df14[!, c] = convert.(Union{Missing, Float64}, df14[!, c])
@@ -1172,7 +1171,7 @@ CairoMakie.lines!(ax_mus14, hhinc_s, df14.pprobit[sort_idx]; label = "Probit")
 CairoMakie.lines!(ax_mus14, hhinc_s, df14.pols[sort_idx];    label = "OLS")
 CairoMakie.axislegend(ax_mus14; position = :rt)
 
-CairoMakie.save("$(DATA)/musr/mus14fig1.png", fig_mus14)
+CairoMakie.save("mus14fig1.png", fig_mus14)
 fig_mus14
 ```
 
@@ -1601,8 +1600,7 @@ df14g = DataFrames.combine(DataFrames.groupby(df14, :age),
 DataFrames.sort!(df14g, :age)
 df14g.logins = [(0 < p < 1) ? log(p / (1 - p)) : missing for p in df14g.av_ins]
 
-mkpath("$(DATA)/musr")
-CSV.write("$(DATA)/musr/mus14gdata.csv", df14g)
+CSV.write("mus14gdata.csv", df14g)
 Printf.@printf("Grouped data: %d age cells, columns = %s\n",
         DataFrames.nrow(df14g),
         join(string.(DataFrames.names(df14g)), ", "));

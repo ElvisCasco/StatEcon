@@ -29,7 +29,6 @@ jupyter: julia-1.12
 
 ```{julia}
 using StatEcon
-const DATA = let c = filter(d -> isdir(d) && (isfile(joinpath(d, "auto.dta")) || isdir(joinpath(d, "musr"))), ["../../data", "../data", "data"]); isempty(c) ? error("StatEcon example data not found; run this notebook from its own folder (examples/Cameron_Trivedi) or the repo root.") : first(c) end
 using DataFrames, ReadStatTables, CSV
 using Statistics, StatsBase, LinearAlgebra, Printf, Random
 using FixedEffectModels, StatsModels, GLM
@@ -67,7 +66,7 @@ function setup_mus10(df10=nothing;
                     vars=nothing, formula=nothing,
                     vce::Symbol=:robust, quiet::Bool=true)
     if df10 === nothing
-        df10 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus10data.dta"))
+        df10 = dataset("mus10data")
         for c in DataFrames.names(df10)
             col = df10[!, c]
             T   = eltype(col)
@@ -263,8 +262,8 @@ CairoMakie.lines!(ax, kd2.x[keep2], kd2.density[keep2], linewidth = 2.4,
 CairoMakie.axislegend(ax, position = :lt)
 
 # Export like: graph export musr/mus12fandchi5.eps, replace
-mkpath("musr")
-CairoMakie.save("musr/mus12fandchi5.eps", fig)
+# (written to the working directory — the packaged data folder is read-only)
+CairoMakie.save("mus12fandchi5.eps", fig)
 
 fig
 ```
@@ -832,12 +831,14 @@ regress y x, noheader
 =#
 # One sample from a small-N DGP: x ~ N(12, 2), y = 10 + 0.06·x + N(0, 0.3),
 # n = 25. Stata exports the realization to `12_6_2.csv` (matching the
-# textbook's MT64 sequence). If that file is present under `$(DATA)/musr` we
-# read it; otherwise we fall back to a Julia realization (Xoshiro256++ ≠ MT64,
-# so x/y differ from the book but the workflow is identical).
-csv_dgp = joinpath(DATA, "musr", "12_6_2.csv")
-if isfile(csv_dgp)
-    df_dgp = CSV.read(csv_dgp, DataFrames.DataFrame)
+# textbook's MT64 sequence). That file is NOT bundled with StatEcon; if a copy
+# happens to be present (working directory, or the bundled data folder) we read
+# it, otherwise we fall back to a Julia realization (Xoshiro256++ ≠ MT64, so
+# x/y differ from the book but the workflow is identical).
+csv_dgp_candidates = ["12_6_2.csv", joinpath(datadir(), "musr", "12_6_2.csv")]
+csv_dgp = something(findfirst(isfile, csv_dgp_candidates), 0)
+if csv_dgp != 0
+    df_dgp = CSV.read(csv_dgp_candidates[csv_dgp], DataFrames.DataFrame)
 else
     Random.seed!(10101)
     df_dgp = DataFrames.DataFrame(x = 12 .+ 2 .* randn(25))
@@ -905,7 +906,12 @@ Printf.@printf("Saved %d p-values to pvalues_12_6_2.csv\n", DataFrames.nrow(df_s
 use pvalues, clear
 summarize pvalues
 =#
-df_sim = CSV.read("pvalues_12_6_2.csv", DataFrames.DataFrame)
+# Read back the p-values written by the previous chunk (same plain filename in
+# the working directory). If that chunk was skipped, fall back to the in-memory
+# `pvalues` vector so this cell can never error the render.
+df_sim = isfile("pvalues_12_6_2.csv") ?
+         CSV.read("pvalues_12_6_2.csv", DataFrames.DataFrame) :
+         DataFrames.DataFrame(pvalues = pvalues)
 stata_summarize(df_sim, :pvalues)
 ```
 
@@ -999,8 +1005,8 @@ summarize
 # Power curve: H0: β_x = 2 against alternatives β_alt ∈ {1.6, 1.625, …, 2.4}
 # (34 values, 1000 reps each; n = 150, α = 0.05). Stata's `postfile … forvalues
 # … post … postclose` is just `(b2Ha, power)` rows; in Julia we collect those
-# into a DataFrame, write to `musr/simresults.csv`, and call `stata_summarize`.
-mkpath("musr")
+# into a DataFrame, write to `simresults.csv` (working directory), and call
+# `stata_summarize`.
 b2Ha_grid = collect(1.6:0.025:2.4)
 print("running 34 × 1000 reps... ")
 t0 = time()
@@ -1008,7 +1014,7 @@ power_grid = [stata_power(1000, 150, 2.00, b, 0.05) for b in b2Ha_grid]
 Printf.@printf("done in %.2fs\n", time() - t0)
 
 df_pow = DataFrames.DataFrame(b2Ha = b2Ha_grid, power = power_grid)
-CSV.write("musr/simresults.csv", df_pow)
+CSV.write("simresults.csv", df_pow)
 stata_summarize(df_pow, [:b2Ha, :power]);
 ```
 
@@ -1033,8 +1039,7 @@ CairoMakie.scatter!(ax_pow, df_pow.b2Ha, df_pow.power,
 CairoMakie.hlines!(ax_pow, [0.05]; linestyle = :dash, color = :gray,
                    linewidth = 1.2)
 
-mkpath("musr")
-CairoMakie.save("musr/mus12power.eps", fig_pow)
+CairoMakie.save("mus12power.eps", fig_pow)
 fig_pow
 ```
 

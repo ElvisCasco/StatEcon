@@ -29,7 +29,6 @@ jupyter: julia-1.12
 
 ```{julia}
 using StatEcon
-const DATA = let c = filter(d -> isdir(d) && (isfile(joinpath(d, "auto.dta")) || isdir(joinpath(d, "musr"))), ["../../data", "../data", "data"]); isempty(c) ? error("StatEcon example data not found; run this notebook from its own folder (examples/Cameron_Trivedi) or the repo root.") : first(c) end
 using DataFrames, ReadStatTables, CSV, Downloads
 using Statistics, StatsBase, LinearAlgebra, Printf, Random
 using GLM, FixedEffectModels, StatsModels
@@ -64,7 +63,7 @@ set linesize 82
 set scheme s1mono  /* Graphics scheme */
 =#
 # Load medical expenditure dataset
-df3 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus03data.dta"))
+df3 = dataset("mus03data")
 select(df3, [:totexp, :ltotexp, :posexp, :suppins, :phylim, :actlim,
              :totchr, :age, :female, :income]) |> DataFrames.describe
 ```
@@ -449,14 +448,14 @@ quietly esttab REG1 REG2 using musr/mus03table.tex, replace b(%10.4f) se scalars
 RegressionTables.regtable(
     REG1, REG2;
     render = RegressionTables.LatexTable(),
-    file = "$(DATA)/musr/mus03table.tex",
+    file = "mus03table.tex",
     keep = ["suppins", "age", "income", "educyr", "(Intercept)"],
     regression_statistics = [
         RegressionTables.Nobs,
         RegressionTables.R2,
         RegressionTables.FStat,
         RegressionTables.LogLikelihood])
-println("LaTeX table written to musr/mus03table.tex")
+println("LaTeX table written to mus03table.tex")
 ```
 
 ```{julia}
@@ -1125,7 +1124,7 @@ generate swght = totchr^2 + 0.5
 summarize swght
 =#
 # Construct artificial sampling weights
-df3 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus03data.dta"))
+df3 = dataset("mus03data")
 df3.swght = df3.totchr.^2 .+ 0.5
 Printf.@printf("swght: mean = %.4f, sd = %.4f\n",
         Statistics.mean(skipmissing(df3.swght)), Statistics.std(skipmissing(df3.swght)))

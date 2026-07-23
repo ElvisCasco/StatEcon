@@ -35,6 +35,38 @@ panel toolkit used throughout Cameron & Trivedi, *Microeconometrics Using Stata*
 
 Each command lives in its own `src/<command>.jl` file and prints Stata-format output.
 
+## Data
+
+The datasets used throughout Cameron & Trivedi ship with the package and are
+loaded **by name** — no paths, no folder layout to remember:
+
+```julia
+using StatEcon
+
+auto = dataset("auto")          # data/auto.dta      -> DataFrame
+df10 = dataset("mus10data")     # data/musr/mus10data.dta
+
+datasets()                      # every bundled file
+```
+
+The name may be a bare stem or a full file name; when a stem exists in several
+formats the `.dta` version wins, so ask for `dataset("mus14gdata.csv")` when you
+want the CSV. `.dta` files are read with `ReadStatTables`, `.csv`/`.txt` with the
+`DelimitedFiles` stdlib — `delim` and `header` are forwarded:
+
+```julia
+psid = dataset("mus02psid92m.txt"; delim = '^', header = [:er30001, :er30002, ...])
+file2 = dataset("mus202file2.csv"; header = [:name, :age, :female, :income])
+```
+
+For a file that needs custom parsing (e.g. fixed-width) or to write next to the
+data, ask for the path instead:
+
+```julia
+datapath("mus202file3.txt")     # absolute path to one bundled file
+datadir()                       # the bundled data directory
+```
+
 ## Examples
 
 `examples/Cameron_Trivedi/` reproduces **all 18 chapters** of Cameron & Trivedi,

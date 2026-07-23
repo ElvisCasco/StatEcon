@@ -23,7 +23,6 @@ jupyter: julia-1.12
 
 ```{julia}
 using StatEcon
-const DATA = let c = filter(d -> isdir(d) && (isfile(joinpath(d, "auto.dta")) || isdir(joinpath(d, "musr"))), ["../../data", "../data", "data"]); isempty(c) ? error("StatEcon example data not found; run this notebook from its own folder (examples/Cameron_Trivedi) or the repo root.") : first(c) end
 using DataFrames, ReadStatTables, CSV
 using Statistics, StatsBase, LinearAlgebra, Printf, Random
 using FixedEffectModels, StatsModels, GLM
@@ -62,7 +61,7 @@ alternative resampling schemes (`bootparametric_nb_stata`,
 # doctor-visits data, keeping docvis chronic age. We rebuild it from
 # mus10data so every cell is self-contained (no intermediate .dta needed).
 function _c13_bootdata()
-    d = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus10data.dta"))
+    d = dataset("mus10data")
     d = DataFrames.filter(r -> r.year02 == 1, d)[1:50, [:docvis, :chronic, :age]]
     for c in DataFrames.names(d)
         d[!, c] = Float64.(_rawval.(d[!, c]))
@@ -616,7 +615,10 @@ function bootstrap_tstar_stata(df, formula, var::Symbol;
     tstars = vec(tstar_mat)
 
     if save_csv !== nothing
-        mkpath(dirname(save_csv))
+        # `save_csv` is normally a plain filename in the working directory;
+        # only create a directory if one was actually given.
+        d = dirname(save_csv)
+        isempty(d) || mkpath(d)
         CSV.write(save_csv, DataFrames.DataFrame(tstar = tstars))
     end
     if !quiet
@@ -1233,7 +1235,7 @@ println("-"^78)
 # `stata_probit` gives the Stata probit table; we build `invmills` from the
 # probit linear index, restrict to y > 0, run the outcome regression, then
 # print the `ereturn display` block (β only, no SEs).
-df16 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus16data.dta"))
+df16 = dataset("mus16data")
 df16.y  = Float64.(df16.ambexp)
 df16.dy = Int.(df16.y .> 0)
 xs      = [:age, :female, :educ, :blhisp, :totchr, :ins]
@@ -1276,7 +1278,7 @@ println("-"^78)
 # Stata `heckman lny $xlist, select(dy = $xlist) twostep` — full Heckman
 # (1979) two-step with first-stage-corrected SEs, σ, ρ, λ block via
 # `heckman_twostep_stata`.
-df16 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus16data.dta"))
+df16 = dataset("mus16data")
 df16.y  = Float64.(df16.ambexp)
 df16.dy = Int.(df16.y .> 0)
 df16.lny = Vector{Union{Missing, Float64}}(missing, DataFrames.nrow(df16))
@@ -1304,7 +1306,7 @@ bootstrap _b, reps(400) seed(10101) nodots nowarn: hecktwostep
 # `bootstrap _b: hecktwostep` resamples observations from the FULL
 # pre-stage-1 dataset, runs the entire pipeline on each resample, and saves
 # the OLS β. We mirror that with `obs_bootstrap` wrapping a closure.
-df16 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus16data.dta"))
+df16 = dataset("mus16data")
 df16.y  = Float64.(df16.ambexp)
 df16.dy = Int.(df16.y .> 0)
 xs      = [:age, :female, :educ, :blhisp, :totchr, :ins]
@@ -1378,7 +1380,7 @@ end
 # (hi_empunion instrumented by ssiratio), then posts β̂_OLS − β̂_IV as the
 # Hausman endogeneity statistic. We compose `regress_stata` and
 # `stata_ivregress_2sls`, then print the difference in `ereturn display` style.
-df6 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus06data.dta"))
+df6 = dataset("mus06data")
 xs6 = [:totchr, :age, :female, :blhisp, :linc]
 
 # Stage 1 — OLS with vce(robust); hi_empunion first to match Stata's order.
@@ -1427,7 +1429,7 @@ bootstrap _b, reps(400) seed(10101) nodots nowarn: hausmantest
 # Bootstrap of the Hausman test β̂_OLS − β̂_IV. Each resample refits both OLS
 # and 2SLS, computes the difference vector, and stores it. `obs_bootstrap`
 # resamples; `bootstrap_b_table_stata` prints the Stata-format table.
-df6 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus06data.dta"))
+df6 = dataset("mus06data")
 df6c = DataFrames.dropmissing(df6,
     [:ldrugexp, :hi_empunion, :ssiratio, :totchr, :age, :female, :blhisp, :linc])
 
@@ -1503,9 +1505,9 @@ cv_boot = obs_bootstrap(df_bd; B = 400, seed = 10101, verbose = false) do d
 end
 Printf.@printf("done in %.2fs\n", time() - t0)
 
-# Persist the 400 replicates (Stata's `saving(musr/coeffofvar, replace)`).
-mkpath("musr")
-CSV.write("musr/coeffofvar.csv", DataFrames.DataFrame(coeffvar = vec(cv_boot)))
+# Persist the 400 replicates (Stata's `saving(musr/coeffofvar, replace)`)
+# to the working directory.
+CSV.write("coeffofvar.csv", DataFrames.DataFrame(coeffvar = vec(cv_boot)))
 
 bootstrap_b_table_stata(cv_obs, cv_boot, ["coeffvar"];
                         n_obs = n_bd, depvar = "",
@@ -1533,14 +1535,14 @@ bootstrap tstar=((_b[chronic]-`theta')/_se[chronic]), seed(10101)        ///
 # Percentile-t bootstrap for β_chronic via `bootstrap_tstar_stata`:
 #   1. Fit Poisson, vce(robust) → (θ, σ_θ)
 #   2. Bootstrap t* = (β̂*_chronic − θ)/SE*_chronic over B = 999 resamples
-#   3. Persist replicates to musr/percentilet.csv
+#   3. Persist replicates to percentilet.csv (working directory)
 #   4. Print the Stata `bootstrap … : poisson` table
 df_boot = _c13_bootdata()
 
 ptres = bootstrap_tstar_stata(df_boot, GLM.@formula(docvis ~ chronic), :chronic;
                               B = 999, seed = 10101, vce = :robust,
                               command = "poisson docvis chronic, vce(robust)",
-                              save_csv = "musr/percentilet.csv")
+                              save_csv = "percentilet.csv")
 β_orig  = ptres.β_orig; se_orig = ptres.se_orig; tstars = ptres.tstars
 ```
 
@@ -1620,7 +1622,7 @@ display "p-value = " r(N)/_N
 ptres2 = bootstrap_tstar_stata(df_boot, GLM.@formula(docvis ~ chronic), :chronic;
                                B = 999, seed = 10101, vce = :robust,
                                command = "poisson docvis chronic, vce(robust)",
-                               save_csv = "musr/percentilet2.csv", quiet = true)
+                               save_csv = "percentilet2.csv", quiet = true)
 percentilet_pvalue_stata(ptres2.tstars, ptres2.β_orig, ptres2.se_orig);
 ```
 

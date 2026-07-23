@@ -37,11 +37,11 @@ cluster-robust standard errors.
 
 ```{julia}
 using StatEcon
-const DATA = let c = filter(d -> isdir(d) && (isfile(joinpath(d, "auto.dta")) || isdir(joinpath(d, "musr"))), ["../../data", "../data", "data"]); isempty(c) ? error("StatEcon example data not found; run this notebook from its own folder (examples/Cameron_Trivedi) or the repo root.") : first(c) end
 using DataFrames, ReadStatTables, CSV
 using Statistics, StatsBase, LinearAlgebra, Printf, Random
 using FixedEffectModels, StatsModels
 using FixedEffectModels: Vcov
+using Loess
 using CairoMakie
 CairoMakie.activate!(type = "png")
 using Optim
@@ -81,7 +81,7 @@ The DGP is: `y = 1 + 1·x2 + 1·x3 + u` where `u = sqrt(exp(-1 + 0.2·x2))·e`, 
 =#
 # Generated data for heteroskedasticity example
 # Read from CSV exported by Stata (ensures identical data across both notebooks)
-df5 = CSV.read("$(DATA)/musr/5_3_1.csv", DataFrame)
+df5 = dataset("5_3_1.csv")
 for c in names(df5)
     df5[!, c] = Float64.(df5[!, c])
 end
@@ -351,7 +351,7 @@ use musr/mus05surdata.dta
 summarize ldrugexp ltotothr age age2 educyr actlim totchr medicaid private
 =#
 # Summary statistics for seemingly unrelated regressions example
-df_sur = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus05surdata.dta"))
+df_sur = dataset("mus05surdata")
 DataFrames.describe(df_sur[:, [:ldrugexp, :ltotothr, :age, :age2, :educyr, :actlim, :totchr, :medicaid, :private]])
 ```
 
@@ -680,7 +680,7 @@ describe sampl finalwgt strata psu
 summarize sampl finalwgt strata psu
 =#
 # NHANES II data
-df_nh = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus05nhanes2.dta"))
+df_nh = dataset("mus05nhanes2")
 df_nh = filter(r -> 21 <= r.age <= 65, df_nh)
 Printf.@printf("N = %d\n", DataFrames.nrow(df_nh))
 DataFrames.describe(df_nh[:, [:sampl, :finalwgt, :strata, :psu]])

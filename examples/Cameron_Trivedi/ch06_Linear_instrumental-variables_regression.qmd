@@ -23,7 +23,6 @@ jupyter: julia-1.12
 
 ```{julia}
 using StatEcon
-const DATA = let c = filter(d -> isdir(d) && (isfile(joinpath(d, "auto.dta")) || isdir(joinpath(d, "musr"))), ["../../data", "../data", "data"]); isempty(c) ? error("StatEcon example data not found; run this notebook from its own folder (examples/Cameron_Trivedi) or the repo root.") : first(c) end
 using DataFrames, ReadStatTables, CSV
 using Statistics, StatsBase, LinearAlgebra, Printf, Random
 using FixedEffectModels, StatsModels, GLM
@@ -65,7 +64,7 @@ global x2list totchr age female blhisp linc
 summarize ldrugexp hi_empunion $x2list
 =#
 # Read data
-df6 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus06data.dta"))
+df6 = dataset("mus06data")
 x2list = [:totchr, :age, :female, :blhisp, :linc]
 DataFrames.describe(df6[:, vcat([:ldrugexp, :hi_empunion], x2list)])
 ```

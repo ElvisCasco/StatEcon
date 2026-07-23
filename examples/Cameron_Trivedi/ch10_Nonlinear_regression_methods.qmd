@@ -23,7 +23,6 @@ jupyter: julia-1.12
 
 ```{julia}
 using StatEcon
-const DATA = let c = filter(d -> isdir(d) && (isfile(joinpath(d, "auto.dta")) || isdir(joinpath(d, "musr"))), ["../../data", "../data", "data"]); isempty(c) ? error("StatEcon example data not found; run this notebook from its own folder (examples/Cameron_Trivedi) or the repo root.") : first(c) end
 using DataFrames, ReadStatTables, CSV
 using Statistics, StatsBase, LinearAlgebra, Printf, Random
 using FixedEffectModels, StatsModels, GLM
@@ -57,7 +56,7 @@ function setup_mus10(df10=nothing;
                     vars=nothing, formula=nothing,
                     vce::Symbol=:robust, quiet::Bool=true)
     if df10 === nothing
-        df10 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus10data.dta"))
+        df10 = dataset("mus10data")
         for c in DataFrames.names(df10)
             col = df10[!, c]
             T   = eltype(col)
@@ -102,7 +101,7 @@ keep if year02==1
 describe docvis private chronic female income
 =#
 # Read MEPS doctor visits data and keep year 2002
-df10 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus10data.dta"))
+df10 = dataset("mus10data")
 for c in names(df10)
     if eltype(df10[!, c]) <: Union{Missing, Float32} || eltype(df10[!, c]) === Float32
         df10[!, c] = convert.(Union{Missing, Float64}, df10[!, c])
@@ -342,7 +341,7 @@ stata_summarize(DataFrames.DataFrame(resid = resid, resid2 = resid2))
 s = setup_mus10(df10)        # year02 fit (df10 is already filtered to year02)
 
 # Reload mus10data and subset to year01 to apply year02 coefficients OOS
-df10_full = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus10data.dta"))
+df10_full = dataset("mus10data")
 for c in names(df10_full)
     if eltype(df10_full[!, c]) <: Union{Missing, Float32} || eltype(df10_full[!, c]) === Float32
         df10_full[!, c] = convert.(Union{Missing, Float64}, df10_full[!, c])

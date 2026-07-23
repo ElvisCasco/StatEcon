@@ -75,4 +75,37 @@ df = DataFrame(
         @test 0.85 < area < 1.15
     end
 
+
+    @testset "bundled datasets" begin
+        names = datasets()
+        @test !isempty(names)
+        @test "auto.dta" in names
+        @test isdir(datadir())
+
+        # load by bare stem, by full filename, and check the shape
+        auto = dataset("auto")
+        @test auto isa DataFrame
+        @test size(auto) == (74, 12)
+        @test size(dataset("auto.dta")) == size(auto)
+
+        # a stem present as both .dta and .csv resolves to the .dta
+        @test endswith(datapath("mus14gdata"), ".dta")
+        @test endswith(datapath("mus14gdata.csv"), ".csv")
+
+        # delimited reading, with an explicit header
+        f1 = dataset("mus202file1.csv")
+        @test f1 isa DataFrame && nrow(f1) > 0
+        f2 = dataset("mus202file2.csv"; header = [:name, :age, :female, :income])
+        @test propertynames(f2) == [:name, :age, :female, :income]
+
+        # a caret-delimited text file
+        psid = dataset("mus02psid92m.txt"; delim = '^',
+                       header = [:a,:b,:c,:d,:e,:f,:g,:h,:i,:j,:k,:l])
+        @test size(psid, 2) == 12
+        @test nrow(psid) > 0
+
+        # unknown names fail loudly, with a hint
+        @test_throws ErrorException dataset("no_such_dataset_here")
+    end
+
 end

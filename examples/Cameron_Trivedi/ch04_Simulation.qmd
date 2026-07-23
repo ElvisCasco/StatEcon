@@ -124,6 +124,90 @@ end
 ```
 
 ```{julia}
+# Simulation helpers used throughout this chapter. Each `*reg`/`chi2*` routine
+# draws one sample, fits it, and returns the pieces a Monte Carlo loop needs
+# (estimate, standard error, t statistic, rejection flag, p-value).
+function onesample()
+    x = rand(30)
+    return Statistics.mean(x)
+end
+
+function mcintegration(numsims)
+    Random.seed!(10101)
+    y  = randn(numsims)
+    gy = exp.(.-exp.(y))
+    Printf.@printf("#sims = %8d   MC estimate of E[exp(-exp(x))] = %.6f\n",
+                   numsims, Statistics.mean(gy))
+end
+
+function simulateexample()
+    y = randn(9)
+    return Statistics.median(y)
+end
+
+const NUMOBS  = 150
+const NUMSIMS = 1000
+
+# OLS on y = 1 + 2x + (chi2(1) - 1); tests H0: beta2 = 2.
+function chi2data()
+    x  = rand(Chisq(1), NUMOBS)
+    y  = 1 .+ 2 .* x .+ (rand(Chisq(1), NUMOBS) .- 1)   # demeaned chi-squared error
+    df = DataFrames.DataFrame(y = y, x = x)
+    m  = FixedEffectModels.reg(df, @formula(y ~ x))
+    b  = StatsBase.coef(m); V = StatsBase.vcov(m); nm = StatsBase.coefnames(m)
+    i  = findfirst(==("x"), nm)
+    b2 = b[i]; se2 = sqrt(V[i, i])
+    t2 = (b2 - 2) / se2
+    t_crit = quantile(TDist(NUMOBS - 2), 0.975)
+    p2 = 2 * (1 - cdf(TDist(NUMOBS - 2), abs(t2)))
+    return (b2 = b2, se2 = se2, t2 = t2, r2 = abs(t2) > t_crit, p2 = p2)
+end
+
+# Same design, but tested against the false null beta2 = 2.1 (power example).
+function chi2datab()
+    x  = rand(Chisq(1), NUMOBS)
+    y  = 1 .+ 2 .* x .+ (rand(Chisq(1), NUMOBS) .- 1)
+    df = DataFrames.DataFrame(y = y, x = x)
+    m  = FixedEffectModels.reg(df, @formula(y ~ x))
+    b  = StatsBase.coef(m); V = StatsBase.vcov(m); nm = StatsBase.coefnames(m)
+    i  = findfirst(==("x"), nm)
+    b2 = b[i]; se2 = sqrt(V[i, i])
+    t  = (b2 - 2.1) / se2
+    p  = 2 * (1 - cdf(TDist(NUMOBS - 2), abs(t)))
+    return (b2 = b2, se2 = se2, r2 = p < 0.05)
+end
+
+# Endogenous regressor: x is correlated with the error, so OLS is inconsistent.
+function endogreg()
+    u  = randn(NUMOBS)
+    x  = 0.5 .* u .+ randn(NUMOBS)
+    y  = 10 .+ 2 .* x .+ u
+    df = DataFrames.DataFrame(y = y, x = x)
+    m  = FixedEffectModels.reg(df, @formula(y ~ x))
+    b  = StatsBase.coef(m); V = StatsBase.vcov(m); nm = StatsBase.coefnames(m)
+    i  = findfirst(==("x"), nm)
+    b2 = b[i]; se2 = sqrt(V[i, i])
+    t  = (b2 - 2) / se2
+    return (b2 = b2, se2 = se2, t2 = t,
+            r2 = abs(t) > quantile(TDist(NUMOBS - 2), 0.975))
+end
+
+# Well-specified benchmark: y = 10 + 5x + N(0,1).
+function randomreg()
+    x  = randn(NUMOBS)
+    y  = 10 .+ 5 .* x .+ randn(NUMOBS)
+    df = DataFrames.DataFrame(y = y, x = x)
+    m  = FixedEffectModels.reg(df, @formula(y ~ x))
+    b  = StatsBase.coef(m); V = StatsBase.vcov(m); nm = StatsBase.coefnames(m)
+    i  = findfirst(==("x"), nm)
+    b2 = b[i]; se2 = sqrt(V[i, i])
+    t  = (b2 - 5) / se2
+    return (b2 = b2, se2 = se2, t2 = t,
+            r2 = abs(t) > quantile(TDist(NUMOBS - 2), 0.975))
+end
+```
+
+```{julia}
 #=
 * Output not included in book
 ac x      // Autocorrelations with 95% confidence band

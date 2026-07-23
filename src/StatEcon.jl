@@ -86,8 +86,10 @@ import StatsBase
 using LinearAlgebra
 import Distributions
 using Random
+import DelimitedFiles
 using PrecompileTools
 
+include("datasets.jl")
 include("stata_tabulate.jl")
 include("stata_summarize.jl")
 include("kdensity.jl")
@@ -204,7 +206,8 @@ include("stata_xttobit_re.jl")
 include("stata_xtmelogit.jl")
 include("stata_estimates_table_se.jl")
 
-export stata_regress, stata_regress_cluster,
+export dataset, datasets, datapath, datadir,
+       stata_regress, stata_regress_cluster,
        stata_tabulate, stata_summarize, ereturn_list,
        psmatch2, teffects_ipw, kdensity,
        stata_ttest, stata_test, stata_margins,

@@ -30,7 +30,6 @@ jupyter: julia-1.12
 
 ```{julia}
 using StatEcon
-const DATA = let c = filter(d -> isdir(d) && (isfile(joinpath(d, "auto.dta")) || isdir(joinpath(d, "musr"))), ["../../data", "../data", "data"]); isempty(c) ? error("StatEcon example data not found; run this notebook from its own folder (examples/Cameron_Trivedi) or the repo root.") : first(c) end
 using DataFrames, ReadStatTables, CSV
 using Statistics, StatsBase, LinearAlgebra, Printf, Random
 using FixedEffectModels, StatsModels, GLM
@@ -94,7 +93,7 @@ drop if ltotexp == .
 summarize ltotexp suppins totchr age female white, separator(0)
 =#
 # Read log medical expenditures data
-df7 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus03data.dta"))
+df7 = dataset("mus03data")
 df7 = DataFrames.dropmissing(df7, :ltotexp)
 DataFrames.describe(df7[:, [:ltotexp, :suppins, :totchr, :age, :female, :white]])
 ```
@@ -406,7 +405,7 @@ export delimited y x2 x3 e u using "musr/7_4_1.csv", replace
 # Heteroskedastic DGP — load the dataset exported by Stata
 # (Stata seed 10101 differs from Julia's RNG, so reading the CSV ensures
 #  identical values across both notebooks.)
-df7g = CSV.read("$(DATA)/musr/7_4_1.csv", DataFrame)
+df7g = dataset("7_4_1.csv")
 for c in names(df7g)
     df7g[!, c] = Float64.(df7g[!, c])
 end
@@ -662,7 +661,7 @@ stata_test_sureg(sq_25_75, ["[q25]x3 = [q75]x3"]; df_F = sq_25_75.df_resid);
 use musr/mus07qrcnt.dta, clear
 summarize docvis private totchr age female white, separator(0)
 =#
-df7q = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus07qrcnt.dta"))
+df7q = dataset("mus07qrcnt")
 for c in names(df7q)
     if eltype(df7q[!, c]) <: Union{Missing, Float32} || eltype(df7q[!, c]) === Float32
         df7q[!, c] = convert.(Union{Missing, Float64}, df7q[!, c])
@@ -913,7 +912,7 @@ twoway connected b1 percentile || line upper percentile||line lower percentile, 
 graph save musr/bsqrcoef1.gph, replace
 =#
 # Save quantile-coefficient series for τ = 0.10, 0.20, ..., 0.90 and plot
-df7p = DataFrames.dropmissing(DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus03data.dta"))[:,
+df7p = DataFrames.dropmissing(dataset("mus03data")[:,
         [:ltotexp, :suppins, :age, :female, :white, :totchr]])
 yp = df7p.ltotexp
 Xp = hcat(ones(DataFrames.nrow(df7p)),

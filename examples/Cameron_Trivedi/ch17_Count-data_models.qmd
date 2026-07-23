@@ -23,7 +23,6 @@ jupyter: julia-1.12
 
 ```{julia}
 using StatEcon
-const DATA = let c = filter(d -> isdir(d) && (isfile(joinpath(d, "auto.dta")) || isdir(joinpath(d, "musr"))), ["../../data", "../data", "data"]); isempty(c) ? error("StatEcon example data not found; run this notebook from its own folder (examples/Cameron_Trivedi) or the repo root.") : first(c) end
 using DataFrames, ReadStatTables, CSV
 using Statistics, StatsBase, LinearAlgebra, Printf, Random
 using FixedEffectModels, StatsModels, GLM
@@ -648,10 +647,18 @@ export delimited xpois using "musr/xpois.csv", replace
 
 # Stata's `rpoisson` and Julia's `Distributions.Poisson` use
 # different RNG streams, so re-drawing in Julia under the same seed
-# would not reproduce Stata's sample. The Stata chunk persists its
-# draw to `musr/xpois.csv`; we read that file here so the sample
-# moments and frequency table match Stata exactly.
-df_pois = CSV.read("musr/xpois.csv", DataFrames.DataFrame)
+# would not reproduce Stata's sample. If Stata's exported draw is
+# present in the working directory (`xpois.csv`) we read it so the
+# sample moments and frequency table match Stata exactly; otherwise
+# we draw the same DGP in Julia under a fixed seed so the chapter
+# always renders.
+if isfile("xpois.csv")
+    df_pois = CSV.read("xpois.csv", DataFrames.DataFrame)
+else
+    Random.seed!(10101)
+    df_pois = DataFrames.DataFrame(
+        xpois = rand(Distributions.Poisson(1.0), 10_000))
+end
 xpois   = Int.(df_pois.xpois)
 
 # `summarize xpois`.
@@ -709,10 +716,19 @@ export delimited xnegbin using "musr/xnegbin.csv", replace
 # g_i ~ Gamma(1, 1). Marginal E[x] = 1, Var[x] = 1 + 1/k = 2 with
 # k = 1 (Stata's `rgamma(α, β)` is shape-scale parameterisation).
 #
-# Read Stata's realised draw from `musr/xnegbin.csv` rather than
-# re-drawing in Julia (the two RNG streams differ, so re-drawing
-# would not reproduce Stata's sample moments and tabulation).
-df_negbin = CSV.read("musr/xnegbin.csv", DataFrames.DataFrame)
+# Read Stata's realised draw from `xnegbin.csv` (working directory)
+# when it is present, rather than re-drawing in Julia (the two RNG
+# streams differ, so re-drawing would not reproduce Stata's sample
+# moments and tabulation). Otherwise fall back to the same
+# Poisson-gamma mixture drawn in Julia under a fixed seed.
+if isfile("xnegbin.csv")
+    df_negbin = CSV.read("xnegbin.csv", DataFrames.DataFrame)
+else
+    Random.seed!(10101)
+    _xg = rand(Distributions.Gamma(1.0, 1.0), 10_000)
+    df_negbin = DataFrames.DataFrame(
+        xnegbin = [rand(Distributions.Poisson(g)) for g in _xg])
+end
 xnegbin   = Int.(df_negbin.xnegbin)
 
 # `summarize xnegbin`.
@@ -777,7 +793,7 @@ summarize docvis $xlist
 # subsample, dependent variable `docvis` (# doctor visits, count).
 # Promote any Stata Float32 columns to Float64 so downstream MLE /
 # GLM helpers don't trip on a mixed-precision matrix.
-df17 = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus17data.dta"))
+df17 = dataset("mus17data")
 for c in DataFrames.names(df17)
     if eltype(df17[!, c]) <: Union{Missing, Float32}
         df17[!, c] = convert.(Union{Missing, Float64}, df17[!, c])
@@ -1320,9 +1336,25 @@ summarize xhurdle
 # Stata's two-stage hurdle DGP (rejection-sample ZT-Poisson(2),
 # then knock back to zero with probability π) uses Stata's RNG
 # stream; re-drawing in Julia would not reproduce the moments.
-# Read Stata's persisted realisation from `musr/xhurdle.csv` so
-# `stata_summarize` matches Stata exactly.
-df_hurdle = CSV.read("musr/xhurdle.csv", DataFrames.DataFrame)
+# Read Stata's persisted realisation from `xhurdle.csv` (working
+# directory) when present so `stata_summarize` matches Stata exactly;
+# otherwise reproduce the same DGP in Julia under a fixed seed.
+if isfile("xhurdle.csv")
+    df_hurdle = CSV.read("xhurdle.csv", DataFrames.DataFrame)
+else
+    Random.seed!(10101)
+    _pi0 = 1 - (1 - exp(-2)) / 2
+    _zt  = Vector{Int}(undef, 10_000)   # zero-truncated Poisson(2)
+    for i in eachindex(_zt)
+        v = 0
+        while v == 0
+            v = rand(Distributions.Poisson(2.0))
+        end
+        _zt[i] = v
+    end
+    _zt[rand(10_000) .< _pi0] .= 0
+    df_hurdle = DataFrames.DataFrame(xhurdle = _zt)
+end
 xhurdle   = Int.(df_hurdle.xhurdle)
 
 # `summarize xhurdle`.
@@ -1565,9 +1597,20 @@ summarize xpmix
 # NB(1,1) references) but with a heavier right tail. The mixture
 # assignment uses Stata's `runiform() > 0.9` draw, which Julia can't
 # reproduce, so we read Stata's realised xp1/xp2/xpmix from
-# `musr/xpmix.csv` (persisted by the Stata chunk) — both summaries
-# then match Stata exactly.
-df_mix = CSV.read("musr/xpmix.csv", DataFrames.DataFrame)
+# `xpmix.csv` in the working directory (persisted by the Stata chunk)
+# when it is available — both summaries then match Stata exactly.
+# Otherwise the same mixture is drawn in Julia under a fixed seed.
+if isfile("xpmix.csv")
+    df_mix = CSV.read("xpmix.csv", DataFrames.DataFrame)
+else
+    Random.seed!(10101)
+    _xp1 = rand(Distributions.Poisson(0.5), 10_000)
+    _xp2 = rand(Distributions.Poisson(5.5), 10_000)
+    _sel = rand(10_000) .> 0.9
+    df_mix = DataFrames.DataFrame(
+        xp1 = _xp1, xp2 = _xp2,
+        xpmix = ifelse.(_sel, _xp2, _xp1))
+end
 xp1   = Int.(df_mix.xp1)
 xp2   = Int.(df_mix.xp2)
 xpmix = Int.(df_mix.xpmix)
@@ -1913,7 +1956,7 @@ tabulate er
 # zero-inflated count (most people have zero ER visits). The
 # regressor set is `$xlist1` = age + actlim + totchr. Promote Stata
 # Float32 columns to Float64 for the downstream MLE helpers.
-df17z = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/musr/mus17data_z.dta"))
+df17z = dataset("mus17data_z")
 for c in DataFrames.names(df17z)
     if eltype(df17z[!, c]) <: Union{Missing, Float32}
         df17z[!, c] = convert.(Union{Missing, Float64}, df17z[!, c])

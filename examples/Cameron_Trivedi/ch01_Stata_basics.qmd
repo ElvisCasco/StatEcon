@@ -35,7 +35,6 @@ commands come from `StatEcon`; everything else is standard Julia stack.
 
 ```{julia}
 using StatEcon                # stata_summarize, stata_regress, ereturn_list, ...
-const DATA = let c = filter(d -> isdir(d) && (isfile(joinpath(d, "auto.dta")) || isdir(joinpath(d, "musr"))), ["../../data", "../data", "data"]); isempty(c) ? error("StatEcon example data not found; run this notebook from its own folder (examples/Cameron_Trivedi) or the repo root.") : first(c) end
 using DataFrames
 using ReadStatTables
 using FixedEffectModels
@@ -77,7 +76,7 @@ _rawval(x) = hasproperty(x, :value) ? x.value : x
 sysuse auto.dta
 summarize
 =#
-auto = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/auto.dta"))
+auto = dataset("auto")
 typeof(auto)
 ```
 
@@ -308,12 +307,12 @@ auto.dta
 summarize
 =#
 # In Julia, comments use #
-auto = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/auto.dta"))
+auto = dataset("auto")
 DataFrames.describe(auto)
 ```
 
 ```{julia}
-auto = DataFrames.DataFrame(ReadStatTables.readstat("$(DATA)/auto.dta"))
+auto = dataset("auto")
 stata_summarize(auto)
 ```
 
