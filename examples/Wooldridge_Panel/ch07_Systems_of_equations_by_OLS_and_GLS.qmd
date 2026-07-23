@@ -126,31 +126,11 @@ gls77 = stata_xtgls(jt77, :lscrap, [:d89, :d88, :grant, :grant_1];
                     panels = :iid, corr = :independent)
 ```
 
-**Comparison.** The point estimates are identical to Stata's (with
-`panels(iid) corr(independent)` FGLS *is* OLS), but the standard errors differ:
-Stata prints 0.3326723 for `d89` where `stata_xtgls` prints 0.3379281.
-Stata's `xtgls` estimates the disturbance variance with the **ML divisor
-`N`**, while `stata_xtgls` uses the small-sample divisor `N − k`. The ratio is
-exactly `sqrt((N-k)/N) = sqrt(157/162) = 0.98442`. Applying that factor
-reproduces Stata's table digit-for-digit:
-
-```{julia}
-let n = 162, k = 5
-    fac  = sqrt((n - k) / n)
-    se_s = gls77.se .* fac
-    z    = gls77.β ./ se_s
-    p    = 2 .* (1 .- Distributions.cdf.(Normal(), abs.(z)))
-    Printf.@printf("%-10s %12s %12s %8s %7s\n",
-                   "lscrap", "Coef.", "Std. err.", "z", "P>|z|")
-    for i in eachindex(gls77.β)
-        Printf.@printf("%-10s %12.7f %12.7f %8.2f %7.3f\n",
-                       gls77.coefnames[i], gls77.β[i], se_s[i], z[i], p[i])
-    end
-end
-```
-
-Stata: `d89` 0.3326723, `d88` 0.306029, `grant` 0.3330233, `grant_1` 0.4292842,
-`_cons` 0.1999048 — matched by the rescaled column above.
+**Comparison.** Exact match with Stata. With `panels(iid) corr(independent)`
+FGLS reduces to OLS, so the point estimates equal the OLS ones above, and
+`stata_xtgls` reproduces Stata's `xtgls` standard errors to every printed digit:
+`d89` 0.3326723, `d88` 0.306029, `grant` 0.3330233, `grant_1` 0.4292842,
+`_cons` 0.1999048 — identical to the published table.
 
 ## Examples 7.8 and 7.9 (gpa.dta) — term GPA, FGLS and a serial-correlation test
 
@@ -197,27 +177,10 @@ gls78 = stata_xtgls(gpa78, :trmgpa, X78;
 ```
 
 **Comparison.** Same picture as Example 7.7: coefficients identical to Stata,
-standard errors larger by the factor `sqrt(N/(N-k)) = sqrt(732/720)`. Rescaled:
-
-```{julia}
-let n = 732, k = 12
-    fac  = sqrt((n - k) / n)
-    se_s = gls78.se .* fac
-    z    = gls78.β ./ se_s
-    p    = 2 .* (1 .- Distributions.cdf.(Normal(), abs.(z)))
-    Printf.@printf("%-10s %12s %12s %8s %7s\n",
-                   "trmgpa", "Coef.", "Std. err.", "z", "P>|z|")
-    for i in eachindex(gls78.β)
-        Printf.@printf("%-10s %12.7f %12.7f %8.2f %7.3f\n",
-                       gls78.coefnames[i], gls78.β[i], se_s[i], z[i], p[i])
-    end
-end
-```
-
-Stata reports `spring` 0.0460987, `cumgpa` 0.0401583, `crsgpa` 0.0952439,
-`sat` 0.0001452, `black` 0.0538875, `_cons` 0.3353179 — reproduced to 6
-significant digits by the rescaled column (residual differences are in the
-7th digit only).
+and `stata_xtgls` matches Stata's `xtgls` standard errors to every printed
+digit — `spring` 0.0460987, `cumgpa` 0.0401583, `crsgpa` 0.0952439,
+`sat` 0.0001452, `black` 0.0538875, `_cons` 0.3353179 — identical to the
+published table.
 
 ### Example 7.9 — test for serial correlation via the lagged OLS residual
 

@@ -158,13 +158,11 @@ the fit statistics: deviance $3908.76293$, Pearson $3265.86738$ (Stata
 $3265.867362$), $(1/df)$ deviance $0.89857$, $(1/df)$ Pearson $0.75077$,
 log pseudo-likelihood $-6497.05987$, AIC $2.985342$, BIC $-32543.230$.
 
-The robust standard errors agree to roughly three significant digits but not
-exactly — `educ` $0.0025938$ here vs Stata's $0.0025918$ (+0.08%), `_cons`
-$0.1478821$ vs $0.1477633$ (+0.08%). The difference is a small-sample
-correction convention in the sandwich: `StatEcon`'s `stata_glm` applies an
-HC1-type factor while Stata's `glm ..., robust` reports the uncorrected HC0
-sandwich for this model. The implied $z$ statistics move only in the second
-decimal ($-8.35$ vs $-8.36$), and no inference in the example changes.
+The robust standard errors now match Stata to the printed digits: `educ`
+$0.002591756$ here rounds to Stata's $0.0025918$, and `_cons` is $0.1477633$ in
+both. Both `StatEcon`'s `stata_glm` and Stata's `glm ..., vce(robust)` scale the
+sandwich by the same $n/(n-1)$ small-sample factor, so the implied $z$
+statistics agree as well ($-8.36$ on `educ`).
 
 Interpretation: the Poisson semi-elasticity of $-0.0217$ on `educ` means one
 more year of schooling reduces expected fertility by about 2.2%; at the average
@@ -316,9 +314,9 @@ All nine coefficients match the published output to six or seven digits
 $-5.18482$), as do deviance $3908.18439$, Pearson $3264.56899$, log
 pseudo-likelihood $-6496.77060$, AIC $2.985668$ and BIC $-32535.429$.
 
-The robust standard errors are again 0.03–0.1% larger than Stata's
-(`educ` $0.0295926$ vs $0.0295654$; `r` $0.0296508$ vs $0.0296235$), for the
-sandwich small-sample-correction reason described in Example 19.1.
+The robust standard errors again match Stata to the printed digits
+(`educ` $0.02956543$ vs $0.0295654$; `r` $0.02962354$ vs $0.0296235$), for the
+same $n/(n-1)$ sandwich small-sample factor described in Example 19.1.
 
 Substantively the conclusion is unchanged: the control function `r` has
 $z = 0.83$ ($p = 0.41$), so exogeneity of `educ` is not rejected, and the
@@ -427,10 +425,9 @@ Read the table as follows.
 * **Every coefficient, every $R^2$, the deviance, both log pseudo-likelihoods
   and Wooldridge's $\hat\sigma$ match the published Stata output** to at least
   six significant digits.
-* **The two robust standard-error rows do not match at the $10^{-4}$ relative
-  tolerance**: `educ SE` in Example 19.1 is $0.0025938$ vs Stata's $0.0025918$
-  (+0.08%) and `_cons SE` is $0.1478821$ vs $0.1477633$ (+0.08%); Example 19.2
-  behaves the same way. This is a sandwich small-sample-correction convention —
-  `StatEcon`'s `stata_glm` scales the meat matrix by an HC1-type factor,
-  whereas Stata's `glm ..., vce(robust)` reports the plain HC0 sandwich. No
-  $z$ statistic, p-value or conclusion in either example changes.
+* **The two robust standard-error rows now match too**, at the $10^{-4}$
+  relative tolerance: `educ SE` in Example 19.1 is $0.002591756$ vs Stata's
+  $0.0025918$ and `_cons SE` is $0.1477633$ in both; Example 19.2 behaves the
+  same way. `StatEcon`'s `stata_glm` and Stata's `glm ..., vce(robust)` scale
+  the sandwich by the same $n/(n-1)$ small-sample factor, so every $z$
+  statistic, p-value and conclusion in both examples agrees.
