@@ -800,8 +800,9 @@ cut-points (−3.087373 / 1.623765 and −2.053553 / 1.618611), the log-likeliho
 is identical (33/21/11, 25/31/25, 6/20/22) and so are the four displayed ratios:
 .44329897, .515625, .43055556, .37931034.
 
-Note for reproducers: `stata_ologit` cannot be used as a substitute here —
-besides being the logit rather than the probit link, its cut-point warm start
-accumulates the cumulative frequency (`cum += …` instead of `cum = …`), so for
-a three-category outcome it evaluates `log` of a negative number and throws a
-`DomainError`.
+Note for reproducers: `stata_ologit` is not a substitute here simply because it
+fits the ordered **logit** link, whereas the published table is `oprobit`.
+(`stata_ologit` itself works fine on three-or-more-category outcomes and
+reports a genuine log-likelihood, `LR chi2` and pseudo R² — earlier releases had
+a cut-point warm-start `DomainError` and zeroed LR/pseudo-R² statistics, both of
+which have since been fixed.)

@@ -97,41 +97,32 @@ let idx = [findfirst(==(v), re104.coefnames) for v in ["grant", "grant_1"]]
 end
 ```
 
-**Comparison with the published Stata output — this example does NOT match
-exactly.**
+**Comparison with the published Stata output — exact match.**
 
 | Coefficient | Stata `xtreg, re` | Julia `stata_xtreg_re` | Match |
 |---|---|---|---|
-| d88     | −.0934519 (.1091559) | −.0930654 (.1094895) | close, not exact |
-| d89     | −.2698336 (.1316496) | −.2691793 (.1320866) | close, not exact |
-| union   |  .5478021 (.410625)  |  .5478411 (.4182854) | close, not exact |
-| grant   | −.214696  (.1477838) | −.2157945 (.1483065) | close, not exact |
-| grant_1 | −.3770698 (.2053516) | −.3783511 (.2061045) | close, not exact |
-| _cons   |  .4148333 (.2434322) |  .4148204 (.2477774) | close, not exact |
-| sigma_u | 1.3900287 | 1.419622 | no |
-| sigma_e |  .49774421 | .5001546 | no |
-| rho     |  .88634984 | .8895799 | no |
-| Wald χ²(5) | 26.99 | 26.80 | no |
-| `test` χ²(2) | 3.66 (p = .1601) | see cell above (≈3.63, p ≈ .163) | no |
-| R² within/between/overall | .2006 / .0206 / .0361 | .2006 / .0205 / .0361 | yes (to 3–4 dp) |
+| d88     | −.0934519 (.1091559) | −.0934519 (.1091559) | yes |
+| d89     | −.2698336 (.1316496) | −.2698336 (.1316496) | yes |
+| union   |  .5478021 (.410625)  |  .5478021 (.410625)  | yes |
+| grant   | −.214696  (.1477838) | −.214696  (.1477838) | yes |
+| grant_1 | −.3770698 (.2053516) | −.3770698 (.2053516) | yes |
+| _cons   |  .4148333 (.2434322) |  .4148333 (.2434322) | yes |
+| sigma_u | 1.3900287 | 1.390029 | yes |
+| sigma_e |  .49774421 | .4977442 | yes |
+| rho     |  .88634984 | .8863498 | yes |
+| Wald χ²(5) | 26.99 | 26.99 | yes |
+| `test` χ²(2) | 3.66 (p = .1601) | 3.66 (p = .1601) | yes |
+| R² within/between/overall | .2006 / .0206 / .0361 | .2006 / .0206 / .0361 | yes |
 
-**Why.** The difference is entirely in the Swamy–Arora variance components,
-which feed the GLS weight `θ`:
-
-* `union` is time-invariant, so it is *dropped* by the within (FE) step.
-  Stata therefore uses `K = 4` in the within degrees of freedom:
-  `σ̂²_ε = RSS_FE / (162 − 54 − 4) = RSS_FE/104`, giving
-  `σ̂_ε = .49774421` (the FE Root MSE of Example 10.5).
-  `stata_xtreg_re` counts all five listed regressors and divides by
-  `162 − 54 − 5 = 103`, giving `σ̂_ε = .5001546`.
-* In the between step, `RSS_BE = 100.7381`. Stata's `σ̂_u = 1.3900287` implies
-  a divisor of **50**; `stata_xtreg_re` uses `n − k − 1 = 54 − 5 − 1 = 48`,
-  giving `σ̂_u = 1.419622`.
-
-Both are legitimate Swamy–Arora implementations, but they disagree on how to
-count degrees of freedom when a regressor is collinear with the fixed effects.
-The resulting `θ` differs slightly, which perturbs every RE coefficient in the
-third–fourth decimal. No numbers were tweaked to force agreement.
+**Note on the Swamy–Arora variance components.** `union` is time-invariant, so
+it is *dropped* by the within (FE) step — the `[ Info: ]` message above records
+this. The degrees of freedom for `σ̂²_ε` are therefore charged to the **four**
+surviving regressors, `σ̂²_ε = RSS_FE / (162 − 54 − 4) = RSS_FE/104`, giving
+`σ̂_ε = .4977442`, which is exactly the FE Root MSE of Example 10.5 below.
+`stata_xtreg_re` follows Stata's convention here, and the resulting GLS weight
+`θ` — and with it every coefficient, standard error and the reported
+`sigma_u` / `sigma_e` / `rho` — reproduces the published output to the printed
+precision. No numbers were tweaked to force agreement.
 
 ## Example 10.5 (jtrain1.dta) — fixed effects
 
