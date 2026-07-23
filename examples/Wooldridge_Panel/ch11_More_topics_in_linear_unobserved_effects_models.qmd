@@ -1,0 +1,194 @@
+---
+title: "Wooldridge EACSPD -- Ch. 11: More topics in linear unobserved effects models (via StatEcon)"
+Authors:
+- Jeffrey M. Wooldridge
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+Stata examples reproduced from [UCLA OARC — EACSPD Chapter 11](https://stats.oarc.ucla.edu/stata/examples/eacspd/econometric-analysis-of-cross-section-and-panel-data-by-jeffrey-m-wooldridgechapter-11-more-topics-in-linear-unobserved-effects-models/).
+
+Textbook: Wooldridge, J. M., *Econometric Analysis of Cross Section and Panel Data*, MIT Press.
+
+# Julia setup
+
+```{julia}
+using StatEcon
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+
+# Artifacts this notebook produces go to `output/`.
+const OUT = "output"
+isdir(OUT) || mkpath(OUT)
+outpath(f) = joinpath(OUT, f)
+```
+
+# Data
+
+```{julia}
+cornwell = DataFrames.DataFrame(dataset("cornwell"))
+size(cornwell)
+```
+
+## Example 11.3 (cornwell.dta)
+
+Dynamic unobserved-effects model estimated in first differences, with the twice-
+and thrice-lagged level of `lcrmrte` used as instruments for the lagged
+first difference (Wooldridge, p. 305).
+
+```{julia}
+#=
+use cornwell, clear
+
+tsset county year
+       panel variable:  county, 1 to 197
+        time variable:  year, 81 to 87
+
+ivreg d.lcrmrte (d.l.lcrmrte = l2.lcrmrte l3.lcrmrte) if year ==87 | year==88
+
+Instrumental variables (2SLS) regression
+
+      Source |       SS       df       MS              Number of obs =      90
+-------------+------------------------------           F(  1,    88) =    0.18
+       Model | -1.08714648     1 -1.08714648           Prob > F      =  0.6704
+    Residual |  6.18074089    88  .070235692           R-squared     =       .
+-------------+------------------------------           Adj R-squared =       .
+       Total |  5.09359441    89  .057231398           Root MSE      =  .26502
+
+------------------------------------------------------------------------------
+D.lcrmrte    |      Coef.   Std. Err.      t    P>|t|     [95% Conf. Interval]
+-------------+----------------------------------------------------------------
+lcrmrte      |
+          LD |    .212428   .4973782     0.43   0.670    -.7760066    1.200863
+_cons        |   .0646336   .0404458     1.60   0.114    -.0157439     .145011
+------------------------------------------------------------------------------
+Instrumented:  LD.lcrmrte
+Instruments:   L2.lcrmrte L3.lcrmrte
+------------------------------------------------------------------------------
+
+reg d.l.lcrmrte l2.lcrmrte l3.lcrmrte if  year ==87 | year==88
+
+      Source |       SS       df       MS              Number of obs =      90
+-------------+------------------------------           F(  2,    87) =    3.95
+       Model |  .283912416     2  .141956208           Prob > F      =  0.0228
+    Residual |  3.12513763    87  .035921122           R-squared     =  0.0833
+-------------+------------------------------           Adj R-squared =  0.0622
+       Total |  3.40905005    89  .038303933           Root MSE      =  .18953
+
+------------------------------------------------------------------------------
+LD.lcrmrte   |      Coef.   Std. Err.      t    P>|t|     [95% Conf. Interval]
+-------------+----------------------------------------------------------------
+lcrmrte      |
+          L2 |  -.2616013   .0939729    -2.78   0.007    -.4483825     -.07482
+          L3 |   .2598239   .0948714     2.74   0.007     .0712568     .448391
+_cons        |   .0532431   .1287512     0.41   0.680    -.2026638      .30915
+------------------------------------------------------------------------------
+
+test l2.lcrmrte l3.lcrmrte
+
+ ( 1)  L2.lcrmrte = 0
+ ( 2)  L3.lcrmrte = 0
+
+       F(  2,    87) =    3.95
+            Prob > F =    0.0228
+=#
+```
+
+### Building the `tsset` time-series operators
+
+Stata's `tsset county year` makes `D.`, `L.`, `L2.`, `L3.` available. Julia has
+no operator sugar, so we build the lagged/differenced columns explicitly.
+The estimation sample `year == 87 | year == 88` is just `year == 87` (the panel
+ends in 87), so each of the 90 counties contributes exactly one observation:
+
+* `D.lcrmrte`    = `lcrmrte`(87) − `lcrmrte`(86)
+* `LD.lcrmrte`   = `lcrmrte`(86) − `lcrmrte`(85)
+* `L2.lcrmrte`   = `lcrmrte`(85)
+* `L3.lcrmrte`   = `lcrmrte`(84)
+
+```{julia}
+DataFrames.sort!(cornwell, [:county, :year])
+lc = Dict((r.county, r.year) => Float64(r.lcrmrte) for r in eachrow(cornwell))
+
+cw87 = DataFrames.DataFrame(county = Int[], D_lcrmrte = Float64[],
+                            LD_lcrmrte = Float64[],
+                            L2_lcrmrte = Float64[], L3_lcrmrte = Float64[])
+for c in sort(unique(cornwell.county))
+    all(haskey(lc, (c, y)) for y in 84:87) || continue
+    push!(cw87, (c,
+                 lc[(c, 87)] - lc[(c, 86)],
+                 lc[(c, 86)] - lc[(c, 85)],
+                 lc[(c, 85)],
+                 lc[(c, 84)]))
+end
+DataFrames.nrow(cw87)
+```
+
+90 observations, matching Stata's `Number of obs = 90`.
+
+### 2SLS (Stata `ivreg`)
+
+```{julia}
+iv = stata_ivregress_2sls(cw87, :D_lcrmrte,
+                          :LD_lcrmrte => [:L2_lcrmrte, :L3_lcrmrte];
+                          robust = false, first = false)
+```
+
+**Comparison with the published Stata output.** The point estimates and standard
+errors reproduce Stata exactly:
+
+| coefficient | Stata | Julia |
+|---|---|---|
+| `LD.lcrmrte` | .212428 (.4973782) | .2124280 (.4973782) |
+| `_cons` | .0646336 (.0404458) | .0646336 (.0404458) |
+
+Root MSE `.26502` also matches. The only display difference is the test
+metric: Stata's old `ivreg` reports a small-sample `F(1, 88) = 0.18 / p = 0.6704`
+with `t` ratios, while `stata_ivregress_2sls` follows the modern
+`ivregress 2sls` convention and reports `Wald chi2(1) = 0.18 / p = 0.6693` with
+`z` ratios. Same statistic, different reference distribution, hence the p-value
+in the third decimal. Stata's R-squared is reported as missing (`.`) because the
+model sum of squares is negative; `FixedEffectModels` prints the (negative)
+value −0.2134 instead.
+
+### First-stage regression (Stata `reg`)
+
+```{julia}
+first_stage = stata_regress(cw87; y = :LD_lcrmrte,
+                            x = [:L2_lcrmrte, :L3_lcrmrte])
+```
+
+**Comparison.** Exact match on every reported quantity: `L2 = -.2616013`
+(SE `.0939729`), `L3 = .2598239` (SE `.0948714`), `_cons = .0532431`
+(SE `.1287512`), `F(2, 87) = 3.95`, `Prob > F = 0.0228`, `R-squared = 0.0833`,
+`Root MSE = .18953`.
+
+### Joint significance of the instruments (Stata `test`)
+
+```{julia}
+stata_test(first_stage, ["L2_lcrmrte", "L3_lcrmrte"])
+```
+
+**Comparison.** `F(2, 87) = 3.95`, `Prob > F = 0.0228` — identical to the
+published Stata `test` output. With an F of only about 4 on two instruments,
+the instruments are weak, which is exactly the point the textbook makes about
+the very imprecise 2SLS estimate (SE ≈ 0.50 on a coefficient of 0.21).

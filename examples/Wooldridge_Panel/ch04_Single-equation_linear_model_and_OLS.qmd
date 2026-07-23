@@ -1,0 +1,333 @@
+---
+title: "Wooldridge EACSPD -- Ch. 4: The single-equation linear model and OLS (via StatEcon)"
+Authors:
+- Jeffrey M. Wooldridge
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+**Source.** Stata examples reproduced from
+[UCLA OARC — EACSPD Chapter 4](https://stats.oarc.ucla.edu/stata/examples/eacspd/econometric-analysis-of-cross-section-and-panel-data-by-jeffrey-m-wooldridgechapter-4-the-single-equation-linear-model-and-ols-estimation/).
+
+**Book.** Wooldridge, J. M., *Econometric Analysis of Cross Section and Panel Data*,
+MIT Press. Chapter 4: *The Single-Equation Linear Model and OLS Estimation*.
+
+# Julia setup
+
+```{julia}
+using StatEcon
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+
+# Artifacts this notebook produces go to `output/`.
+const OUT = "output"
+isdir(OUT) || mkpath(OUT)
+outpath(f) = joinpath(OUT, f)
+```
+
+The datasets are bundled with `StatEcon` and load by name.
+
+```{julia}
+mroz    = DataFrames.DataFrame(dataset("mroz"))      # 753 x 22
+nls80   = DataFrames.DataFrame(dataset("nls80"))     # 935 x 17
+jtrain1 = DataFrames.DataFrame(dataset("jtrain1"))   # 471 x 30
+size(mroz), size(nls80), size(jtrain1)
+```
+
+Stata's `predict r, res` after a `regress` — residuals aligned to the rows of
+the original data frame, `missing` wherever the fit dropped the observation.
+
+```{julia}
+predict_res(m, df, y) = df[!, y] .- FixedEffectModels.predict(m, df)
+```
+
+# Example 4.1 on page 59 (mroz.dta)
+
+## OLS wage equation
+
+```{julia}
+#=
+use mroz, clear
+
+reg lwage exper expersq educ age kidslt6 kidsge6
+=#
+ols41 = stata_regress(mroz; y = :lwage,
+                      x = [:exper, :expersq, :educ, :age, :kidslt6, :kidsge6])
+```
+
+Stata prints `N = 428`, `F(6, 421) = 13.19`, `R² = 0.1582`, `Root MSE = .66823`,
+and `educ = .1078319 (.0144021)`. The Julia fit reproduces every published
+coefficient, standard error, *t*, and confidence limit to the printed digits.
+
+## Joint test on the demographic variables
+
+```{julia}
+#=
+test  age kidslt6 kidsge6
+=#
+stata_test(ols41, ["age", "kidslt6", "kidsge6"])
+```
+
+Stata: `F(3, 421) = 0.24`, `Prob > F = 0.8705`. Julia: `F = 0.2370`,
+`p = 0.8705` — identical (Stata rounds 0.237 to 0.24).
+
+## Heteroskedasticity-robust standard errors
+
+```{julia}
+#=
+reg lwage exper expersq educ age kidslt6 kidsge6, robust
+=#
+ols41r = stata_regress(mroz; y = :lwage,
+                       x = [:exper, :expersq, :educ, :age, :kidslt6, :kidsge6],
+                       vce = :robust)
+```
+
+```{julia}
+#=
+di .316*(428/(428-6))^.5
+.31823852
+=#
+Printf.@printf("%.8f\n", 0.316 * (428 / (428 - 6))^0.5)
+```
+
+Stata's `, robust` applies the finite-sample factor `N/(N-k)`; `FixedEffectModels`
+does the same, so the robust SEs match exactly
+(`educ`: `.0136235`, `_cons`: `.3183346`). The UCLA note explains that the book
+reports the uncorrected version — `.316 * sqrt(428/422) = .31823852` recovers
+Stata's intercept SE, and the Julia arithmetic gives the same number.
+
+## LM test via the residual regression
+
+```{julia}
+#=
+reg lwage exper expersq educ
+
+predict res, res
+
+reg res exper expersq educ age kidslt6 kidsge6
+
+di 428*.0017
+.7276
+
+di chi2tail(3, .728)
+.86659913
+=#
+ols41s = stata_regress(mroz; y = :lwage, x = [:exper, :expersq, :educ])
+```
+
+```{julia}
+mroz.res = predict_res(ols41s, mroz, :lwage)   # missing where lwage is missing
+Printf.@printf("(%d missing values generated)\n", sum(ismissing, mroz.res))
+
+aux41 = stata_regress(mroz; y = :res,
+                      x = [:exper, :expersq, :educ, :age, :kidslt6, :kidsge6])
+```
+
+```{julia}
+LM41 = StatsBase.nobs(aux41) * StatsBase.r2(aux41)
+Printf.@printf("LM  = n*R2      = %.4f\n", LM41)
+Printf.@printf("p   = chi2tail(3, LM) = %.8f\n", 1 - cdf(Chisq(3), LM41))
+Printf.@printf("Stata's rounded version: 428*.0017 = %.4f, p = %.8f\n",
+               428 * 0.0017, 1 - cdf(Chisq(3), 0.728))
+```
+
+The short regression, the auxiliary regression and its `R² = 0.0017` all match the
+published output exactly. Stata's `di 428*.0017 = .7276` uses the four-decimal
+printed `R²`; the exact `n·R²` is 0.7275, and either way the χ²(3) p-value is
+about 0.867 — no evidence against the exclusion restrictions.
+
+# Example 4.1 (continued) on page 60
+
+The book's alternative LM statistic regresses a constant on the products of the
+short-regression residual with the residuals from regressing each excluded
+variable on the included ones.
+
+```{julia}
+#=
+reg lwage exper expersq educ
+
+predict u, res
+
+reg age exper expersq educ
+
+predict r1, res
+reg kidslt6 exper expersq educ
+
+predict r2, res
+reg kidsge6 exper expersq educ
+
+predict r3, res
+gen one = 1
+gen rage = u*r1
+gen rle6 = u*r2
+gen rge6 = u*r3
+
+reg one rage rle6 rge6, nocons
+
+di 428*0.0012
+.5136
+
+di chi2tail(3, .5136)
+.91589355
+=#
+mroz.u = predict_res(ols41s, mroz, :lwage)
+
+m_age = stata_regress(mroz; y = :age, x = [:exper, :expersq, :educ])
+mroz.r1 = predict_res(m_age, mroz, :age)
+```
+
+```{julia}
+m_k6 = stata_regress(mroz; y = :kidslt6, x = [:exper, :expersq, :educ])
+mroz.r2 = predict_res(m_k6, mroz, :kidslt6)
+```
+
+```{julia}
+m_kg6 = stata_regress(mroz; y = :kidsge6, x = [:exper, :expersq, :educ])
+mroz.r3 = predict_res(m_kg6, mroz, :kidsge6)
+```
+
+```{julia}
+mroz.one  = ones(DataFrames.nrow(mroz))
+mroz.rage = mroz.u .* mroz.r1
+mroz.rle6 = mroz.u .* mroz.r2
+mroz.rge6 = mroz.u .* mroz.r3
+
+nocons41 = stata_regress(mroz; y = :one, x = [:rage, :rle6, :rge6], nocons = true)
+```
+
+```{julia}
+LM41b = StatsBase.nobs(nocons41) * StatsBase.r2(nocons41)
+Printf.@printf("n*R2 (uncentered) = %.6f\n", LM41b)
+Printf.@printf("p                 = %.8f\n", 1 - cdf(Chisq(3), LM41b))
+Printf.@printf("Stata: 428*0.0012 = %.4f, chi2tail(3, .5136) = %.8f\n",
+               428 * 0.0012, 1 - cdf(Chisq(3), 0.5136))
+```
+
+All three auxiliary regressions (N = 753 each) reproduce the published tables
+exactly, and the no-constant regression gives
+`rage = -.0028426 (.0109138)`, `rle6 = -.0940857 (.1710924)`,
+`rge6 = -.0266196 (.059492)` with uncentered `R² = 0.0012` — the same as Stata.
+The LM statistic is 0.5215 (Stata's `428*0.0012 = .5136` uses the rounded `R²`),
+p ≈ 0.914.
+
+# Example 4.3 on page 63 (nls80.dta)
+
+```{julia}
+#=
+use nls80, clear
+
+reg lwage exper tenure married south urban black educ
+=#
+ols43a = stata_regress(nls80; y = :lwage,
+                       x = [:exper, :tenure, :married, :south, :urban, :black, :educ])
+```
+
+```{julia}
+#=
+reg lwage exper tenure married south urban black educ iq
+=#
+ols43b = stata_regress(nls80; y = :lwage,
+                       x = [:exper, :tenure, :married, :south, :urban, :black, :educ, :iq])
+```
+
+Both regressions match the published output digit for digit: without `iq`,
+`educ = .0654307 (.0062504)` and `R² = 0.2526`; adding `iq` lowers the return to
+schooling to `.0544106 (.0069285)` with `iq = .0035591 (.0009918)` and
+`R² = 0.2628`.
+
+# Example 4.4 on page 66 (jtrain1.dta)
+
+```{julia}
+#=
+gen scrap88 = (year==1988 & scrap~=.)
+reg lscrap grant if scrap88
+=#
+jtrain1.scrap88 = (jtrain1.year .== 1988) .& .!ismissing.(jtrain1.scrap)
+jt88 = jtrain1[jtrain1.scrap88, :]
+
+ols44a = stata_regress(jt88; y = :lscrap, x = [:grant])
+```
+
+```{julia}
+#=
+reg lscrap grant lscrap_1 if scrap88
+=#
+ols44b = stata_regress(jt88; y = :lscrap, x = [:grant, :lscrap_1])
+```
+
+Both fits reproduce the published tables exactly (N = 54). Without the lag,
+`grant = .0566004 (.4055519)`; conditioning on `lscrap_1` the grant effect turns
+negative, `-.2539697 (.1470311)`, with `lscrap_1 = .8311606 (.0444444)` and
+`R² = 0.8728`.
+
+# Example 4.5 on page 69 (nls80.dta)
+
+```{julia}
+#=
+use nls80, clear
+
+gen educ_iq = educ*iq
+reg lwage exper tenure married south urban black educ iq educ_iq
+=#
+nls80.educ_iq = nls80.educ .* nls80.iq
+
+ols45 = stata_regress(nls80; y = :lwage,
+                      x = [:exper, :tenure, :married, :south, :urban,
+                           :black, :educ, :iq, :educ_iq])
+```
+
+```{julia}
+#=
+test iq  educ_iq
+=#
+stata_test(ols45, ["iq", "educ_iq"])
+```
+
+The interacted model matches exactly (`educ_iq = .0003399 (.0003826)`,
+`R² = 0.2634`), and the joint test gives `F(2, 925) = 6.83`, `Prob > F = 0.0011`
+— identical to Stata.
+
+# Verification summary
+
+| Example | Quantity | Stata | Julia | Match |
+|---|---|---|---|---|
+| 4.1 | `educ` coef / SE | .1078319 / .0144021 | .1078319 / .0144021 | yes |
+| 4.1 | `exper` coef / SE | .039819 / .013393 | .039819 / .013393 | yes |
+| 4.1 | R² / Root MSE | 0.1582 / .66823 | 0.1582 / .66823 | yes |
+| 4.1 | `test age kidslt6 kidsge6` | F(3,421)=0.24, p=0.8705 | F=0.2370, p=0.8705 | yes |
+| 4.1 robust | `educ` SE | .0136235 | .0136235 | yes |
+| 4.1 robust | `_cons` SE | .3183346 | .3183346 | yes |
+| 4.1 LM | auxiliary R² | 0.0017 | 0.0017 | yes |
+| 4.1 (cont.) | `rage` coef / SE | -.0028426 / .0109138 | -.0028426 / .0109138 | yes |
+| 4.1 (cont.) | no-cons R² | 0.0012 | 0.0012 | yes |
+| 4.3 | `educ` (no iq) | .0654307 / .0062504 | .0654307 / .0062504 | yes |
+| 4.3 | `educ`, `iq` (with iq) | .0544106, .0035591 | .0544106, .0035591 | yes |
+| 4.4 | `grant` (no lag) | .0566004 / .4055519 | .0566004 / .4055519 | yes |
+| 4.4 | `grant`, `lscrap_1` | -.2539697, .8311606 | -.2539697, .8311606 | yes |
+| 4.5 | `educ_iq` coef / SE | .0003399 / .0003826 | .0003399 / .0003826 | yes |
+| 4.5 | `test iq educ_iq` | F(2,925)=6.83, p=0.0011 | F=6.8318, p=0.0011 | yes |
+
+Every estimation on the UCLA Chapter 4 page reproduces exactly. The only
+cosmetic differences are that `stata_test` prints the *F* statistic to four
+decimals where Stata prints two, and that Stata's `di 428*.0017` /
+`di 428*0.0012` computations of the LM statistic use the four-decimal rounded
+`R²` values rather than the exact ones.

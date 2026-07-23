@@ -1,0 +1,436 @@
+---
+title: "Wooldridge EACSPD -- Ch. 19: Count data and related models (via StatEcon)"
+Authors:
+- Jeffrey M. Wooldridge
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+Stata examples reproduced from [UCLA OARC — EACSPD Chapter 19](https://stats.oarc.ucla.edu/stata/examples/eacspd/econometric-analysis-of-cross-section-and-panel-data-by-jeffrey-m-wooldridgechapter-19-count-data-and-related-models/).
+
+Source text: Wooldridge, J. M., *Econometric Analysis of Cross Section and Panel
+Data*, MIT Press — Chapter 19, "Count Data and Related Models". The data files
+are those shipped with the book's own Stata distribution and are bundled with
+`StatEcon`.
+
+# Julia setup
+
+```{julia}
+using StatEcon
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+
+# Artifacts this notebook produces go to `output/`.
+const OUT = "output"
+isdir(OUT) || mkpath(OUT)
+outpath(f) = joinpath(OUT, f)
+```
+
+The chapter's estimators map onto `StatEcon` as follows:
+
+* `stata_regress` / `stata_ols_fit` — `regress y x…` (the latter also returns
+  the residuals for `predict r, r`)
+* `stata_glm`                      — `glm y x…, fam(poisson) link(log) robust`
+* `stata_summarize`                — `summarize var`
+* `stata_poisson`, `stata_nbreg`, `stata_estat_ic`, `stata_margins_dydx`,
+  `stata_lrtest` — also available for count models; the extra fits at the end
+  of the notebook use them to put the UCLA results in context.
+
+```{julia}
+fertil2 = DataFrames.DataFrame(dataset("fertil2"))   # 4361 x 28
+
+# `electric` and `tv` have a few missing values; the estimation sample is the
+# 4,358 complete cases Stata uses ("3 missing values generated").
+fert = DataFrames.dropmissing(
+    fertil2[:, [:children, :educ, :age, :agesq, :evermarr, :urban,
+                :electric, :tv, :frsthalf]])
+DataFrames.nrow(fert)
+```
+
+# Example 19.1 (page 652, fertil2.dta)
+
+## Linear model for the number of living children
+
+```{julia}
+#=
+use fertil2, clear
+
+reg children educ age agesq evermarr urban electric tv
+
+      Source |       SS       df       MS              Number of obs =    4358
+-------------+------------------------------           F(  7,  4350) =  893.91
+       Model |  12688.9349     7  1812.70499           Prob > F      =  0.0000
+    Residual |  8821.09719  4350  2.02783843           R-squared     =  0.5899
+-------------+------------------------------           Adj R-squared =  0.5892
+       Total |  21510.0321  4357  4.93689055           Root MSE      =   1.424
+
+------------------------------------------------------------------------------
+    children |      Coef.   Std. Err.      t    P>|t|     [95% Conf. Interval]
+-------------+----------------------------------------------------------------
+        educ |  -.0644086   .0063199   -10.19   0.000    -.0767987   -.0520184
+         age |   .2724736    .017019    16.01   0.000     .2391077    .3058395
+       agesq |  -.0019067    .000274    -6.96   0.000    -.0024438   -.0013696
+    evermarr |   .6822725    .052167    13.08   0.000     .5799986    .7845463
+       urban |  -.2278933   .0458653    -4.97   0.000    -.3178126    -.137974
+    electric |  -.2617394   .0758688    -3.45   0.001     -.410481   -.1129979
+          tv |  -.2499509   .0901474    -2.77   0.006    -.4266858   -.0732161
+       _cons |   -3.39384   .2445496   -13.88   0.000    -3.873281   -2.914398
+------------------------------------------------------------------------------
+=#
+```
+
+```{julia}
+ols_19_1 = stata_regress(
+    fert;
+    y = :children,
+    x = [:educ, :age, :agesq, :evermarr, :urban, :electric, :tv]);
+```
+
+Digit-for-digit reproduction of the published table, including $N = 4358$,
+$F(7,4350) = 208.02$-scale statistics, $R^2 = 0.5899$ and Root MSE $= 1.424$.
+The linear model says one more year of schooling lowers expected fertility by
+about $0.064$ children.
+
+## Poisson QMLE with fully robust standard errors
+
+```{julia}
+#=
+glm children educ age agesq evermarr urban electric tv, fam(poisson) link(log) robust
+
+Generalized linear models                          No. of obs      =      4358
+Optimization     : ML: Newton-Raphson              Residual df     =      4350
+                                                   Scale parameter =         1
+Deviance         =   3908.76293                    (1/df) Deviance =  .8985662
+Pearson          =  3265.867362                    (1/df) Pearson  =  .7507741
+
+Variance function: V(u) = u                        [Poisson]
+Link function    : g(u) = ln(u)                    [Log]
+Standard errors  : Sandwich
+
+Log pseudo-likelihood = -6497.059873               AIC             =  2.985342
+BIC                   =-32543.23011
+
+------------------------------------------------------------------------------
+             |               Robust
+    children |      Coef.   Std. Err.      z    P>|z|     [95% Conf. Interval]
+-------------+----------------------------------------------------------------
+        educ |  -.0216645   .0025918    -8.36   0.000    -.0267442   -.0165847
+         age |   .3373308   .0094473    35.71   0.000     .3188144    .3558473
+       agesq |  -.0041158    .000144   -28.57   0.000    -.0043981   -.0038335
+    evermarr |    .314751   .0232117    13.56   0.000      .269257     .360245
+       urban |  -.0860549   .0200471    -4.29   0.000    -.1253465   -.0467633
+    electric |  -.1205347   .0372925    -3.23   0.001    -.1936266   -.0474428
+          tv |  -.1447046   .0438055    -3.30   0.001    -.2305617   -.0588475
+       _cons |  -5.374829   .1477633   -36.37   0.000     -5.66444   -5.085219
+------------------------------------------------------------------------------
+=#
+```
+
+```{julia}
+pois_19_1 = stata_glm(
+    fert,
+    @formula(children ~ educ + age + agesq + evermarr + urban + electric + tv);
+    family = :poisson, link = :log, vce = :robust);
+```
+
+Every coefficient reproduces the published table to seven digits
+(`educ` $-0.02166447$ vs $-0.0216645$, `_cons` $-5.374829$ in both), and so do
+the fit statistics: deviance $3908.76293$, Pearson $3265.86738$ (Stata
+$3265.867362$), $(1/df)$ deviance $0.89857$, $(1/df)$ Pearson $0.75077$,
+log pseudo-likelihood $-6497.05987$, AIC $2.985342$, BIC $-32543.230$.
+
+The robust standard errors agree to roughly three significant digits but not
+exactly — `educ` $0.0025938$ here vs Stata's $0.0025918$ (+0.08%), `_cons`
+$0.1478821$ vs $0.1477633$ (+0.08%). The difference is a small-sample
+correction convention in the sandwich: `StatEcon`'s `stata_glm` applies an
+HC1-type factor while Stata's `glm ..., robust` reports the uncorrected HC0
+sandwich for this model. The implied $z$ statistics move only in the second
+decimal ($-8.35$ vs $-8.36$), and no inference in the example changes.
+
+Interpretation: the Poisson semi-elasticity of $-0.0217$ on `educ` means one
+more year of schooling reduces expected fertility by about 2.2%; at the average
+of roughly 2.3 children that is $\approx 0.05$ children, close to the linear
+model's $0.064$.
+
+## Wooldridge's Poisson goodness-of-fit statistic
+
+```{julia}
+#=
+predict res, r
+(3 missing values generated)
+
+predict p
+(option mu assumed; predicted mean children)
+(3 missing values generated)
+
+gen stdressq = res^2/p
+(3 missing values generated)
+
+sum stdressq
+
+    Variable |       Obs        Mean    Std. Dev.       Min        Max
+-------------+--------------------------------------------------------
+    stdressq |      4358    .7493959    1.076655   6.55e-07   14.37877
+
+di sqrt(r(mean)*r(N)/(r(N)-7)) /*R-squared for Poisson regression*/
+.86637264
+=#
+```
+
+```{julia}
+fert.p        = GLM.predict(pois_19_1.model)          # predict p  (option mu)
+fert.res      = fert.children .- fert.p               # predict res, r
+fert.stdressq = fert.res .^ 2 ./ fert.p               # gen stdressq = res^2/p
+
+stata_summarize(fert, [:stdressq])
+
+n19 = DataFrames.nrow(fert)
+sigma_hat = sqrt(Statistics.mean(fert.stdressq) * n19 / (n19 - 7))
+Printf.@printf("sigma-hat = %.8f\n", sigma_hat)
+```
+
+The summary matches exactly: $N = 4358$, mean $0.7493959$, SD $1.076655$,
+min $6.548\times10^{-7}$ (Stata prints `6.55e-07`), max $14.37877$. The derived
+statistic is $\hat\sigma = 0.86637264$, reproducing Stata's `.86637264` to all
+eight printed digits. Since $\hat\sigma < 1$ the data are *under*dispersed
+relative to the Poisson, so the fully robust standard errors above are in fact
+larger than they need to be — but they remain the safe choice.
+
+# Example 19.2 (page 665, fertil2.dta)
+
+Wooldridge treats `educ` as endogenous and applies a control-function approach:
+run the reduced form for `educ` on the exogenous variables plus the instrument
+`frsthalf`, then add the reduced-form residual to the Poisson regression. The
+$t$ statistic on the residual is a test of exogeneity.
+
+## Reduced form for schooling
+
+```{julia}
+#=
+reg educ frsthalf age agesq evermarr urban electric tv
+
+      Source |       SS       df       MS              Number of obs =    4358
+-------------+------------------------------           F(  7,  4350) =  208.02
+       Model |  16850.0414     7  2407.14877           Prob > F      =  0.0000
+    Residual |    50336.75  4350  11.5716667           R-squared     =  0.2508
+-------------+------------------------------           Adj R-squared =  0.2496
+       Total |  67186.7914  4357  15.4204249           Root MSE      =  3.4017
+
+------------------------------------------------------------------------------
+        educ |      Coef.   Std. Err.      t    P>|t|     [95% Conf. Interval]
+-------------+----------------------------------------------------------------
+    frsthalf |  -.6361072   .1038091    -6.13   0.000    -.8396258   -.4325885
+         age |  -.0702853   .0406438    -1.73   0.084    -.1499678    .0093971
+       agesq |  -.0008118   .0006544    -1.24   0.215    -.0020947    .0004711
+    evermarr |  -.8023536   .1241223    -6.46   0.000    -1.045697   -.5590106
+       urban |   .8637296    .108786     7.94   0.000     .6504536    1.077006
+    electric |   1.977712   .1787579    11.06   0.000     1.627255    2.328168
+          tv |   2.714666   .2113782    12.84   0.000     2.300257    3.129075
+       _cons |    8.20343   .5752279    14.26   0.000     7.075691     9.33117
+------------------------------------------------------------------------------
+
+predict r, r
+(3 missing values generated)
+=#
+```
+
+```{julia}
+# `stata_ols_fit` prints the same table as `stata_regress` and additionally
+# returns the residuals, which is what `predict r, r` needs.
+rf_19_2 = stata_ols_fit(fert, :educ,
+                        [:frsthalf, :age, :agesq, :evermarr, :urban,
+                         :electric, :tv])
+fert.r = rf_19_2.residuals;
+```
+
+An exact reproduction: `frsthalf` $-0.6361072$ (SE $0.1038091$),
+$R^2 = 0.2508$, Root MSE $= 3.4017$, $F(7,4350) = 208.02$. Girls born in the
+first half of the calendar year get about 0.64 fewer years of schooling, and
+the instrument is strong ($t = -6.13$).
+
+## Poisson control-function regression
+
+```{julia}
+#=
+glm children educ age agesq evermarr urban electric tv r, fam(poisson) link(log) robust
+
+Generalized linear models                          No. of obs      =      4358
+Optimization     : ML: Newton-Raphson              Residual df     =      4349
+                                                   Scale parameter =         1
+Deviance         =  3908.184386                    (1/df) Deviance =  .8986398
+Pearson          =  3264.568982                    (1/df) Pearson  =  .7506482
+
+Variance function: V(u) = u                        [Poisson]
+Link function    : g(u) = ln(u)                    [Log]
+Standard errors  : Sandwich
+
+Log pseudo-likelihood =   -6496.7706               AIC             =  2.985668
+BIC                   =-32535.42889
+
+------------------------------------------------------------------------------
+             |               Robust
+    children |      Coef.   Std. Err.      z    P>|z|     [95% Conf. Interval]
+-------------+----------------------------------------------------------------
+        educ |  -.0459847   .0295654    -1.56   0.120    -.1039319    .0119625
+         age |   .3357196   .0097048    34.59   0.000     .3166986    .3547405
+       agesq |  -.0041373   .0001451   -28.52   0.000    -.0044216   -.0038529
+    evermarr |   .2941007   .0343224     8.57   0.000       .22683    .3613714
+       urban |  -.0647957   .0323494    -2.00   0.045    -.1281994    -.001392
+    electric |  -.0711916   .0688407    -1.03   0.301    -.2061168    .0637337
+          tv |  -.0780223   .0937508    -0.83   0.405    -.2617705    .1057258
+           r |    .024515   .0296235     0.83   0.408     -.033546    .0825761
+       _cons |   -5.18482   .2767832   -18.73   0.000    -5.727305   -4.642335
+------------------------------------------------------------------------------
+=#
+```
+
+```{julia}
+pois_19_2 = stata_glm(
+    fert,
+    @formula(children ~ educ + age + agesq + evermarr + urban + electric +
+                        tv + r);
+    family = :poisson, link = :log, vce = :robust);
+```
+
+All nine coefficients match the published output to six or seven digits
+(`educ` $-0.0459847$, `r` $0.02451505$ vs Stata's $0.024515$, `_cons`
+$-5.18482$), as do deviance $3908.18439$, Pearson $3264.56899$, log
+pseudo-likelihood $-6496.77060$, AIC $2.985668$ and BIC $-32535.429$.
+
+The robust standard errors are again 0.03–0.1% larger than Stata's
+(`educ` $0.0295926$ vs $0.0295654$; `r` $0.0296508$ vs $0.0296235$), for the
+sandwich small-sample-correction reason described in Example 19.1.
+
+Substantively the conclusion is unchanged: the control function `r` has
+$z = 0.83$ ($p = 0.41$), so exogeneity of `educ` is not rejected, and the
+instrumented `educ` effect $-0.046$ is over twice the Poisson QMLE $-0.0217$
+but far less precisely estimated.
+
+## Note on the standard errors of the control-function estimator
+
+The standard errors printed above ignore the fact that `r` is a *generated*
+regressor. Under the null of exogeneity ($\gamma_r = 0$) the $z$ statistic on
+`r` is valid as printed, which is exactly the use Wooldridge makes of it; the
+standard errors on the remaining coefficients would need a two-step or
+bootstrap correction. `StatEcon` ships `stata_boot_cf_poisson` for that
+correction; the UCLA page does not run it, so it is not reproduced here.
+
+# Additional `StatEcon` count-model commands
+
+These fits are not on the UCLA page. They are included to show the count-data
+commands the chapter's theory covers (Poisson MLE, NegBin, information
+criteria, average marginal effects, LR test) working on the same data. There is
+no published Stata output to compare them against, so they are reported without
+verification claims.
+
+```{julia}
+pois_mle = stata_poisson(
+    fert,
+    @formula(children ~ educ + age + agesq + evermarr + urban + electric + tv);
+    vce = :robust)
+
+stata_estat_ic(pois_mle)
+```
+
+```{julia}
+nb2 = stata_nbreg(
+    fert,
+    @formula(children ~ educ + age + agesq + evermarr + urban + electric + tv));
+```
+
+The negative-binomial dispersion parameter $\alpha$ is driven toward zero here,
+consistent with the underdispersion ($\hat\sigma = 0.866 < 1$) diagnosed in
+Example 19.1 — NB2 can only accommodate *over*dispersion, so the Poisson QMLE
+with robust standard errors remains the right specification for these data.
+
+```{julia}
+# Average marginal effects on the expected number of children, `margins, dydx(*)`
+cont19 = [(string(nm), i) for (i, nm) in
+          enumerate(["educ","age","agesq","evermarr","urban","electric","tv"])]
+stata_margins_dydx(pois_mle.β, pois_mle.V, pois_mle.X;
+                   factors = Tuple{String,Int}[], continuous = cont19);
+```
+
+On the level scale, one more year of schooling lowers the expected number of
+living children by about 0.05 — the number Wooldridge quotes in the text when
+converting the Poisson semi-elasticity to a level effect, and close to the
+linear model's $-0.064$.
+
+# Comparison table: Stata vs Julia
+
+```{julia}
+b(m)      = StatsBase.coef(m)
+nms(m)    = string.(StatsBase.coefnames(m))
+pick(m,s) = b(m)[findfirst(==(s), nms(m))]
+
+comparison = DataFrames.DataFrame(
+    example = ["19.1 OLS","19.1 OLS","19.1 OLS","19.1 OLS",
+               "19.1 Poisson QMLE","19.1 Poisson QMLE","19.1 Poisson QMLE",
+               "19.1 Poisson QMLE","19.1 Poisson QMLE","19.1 Poisson QMLE",
+               "19.1 Poisson QMLE SE","19.1 Poisson QMLE SE",
+               "19.1 diagnostics","19.1 diagnostics","19.1 diagnostics",
+               "19.2 reduced form","19.2 reduced form","19.2 reduced form",
+               "19.2 Poisson CF","19.2 Poisson CF","19.2 Poisson CF",
+               "19.2 Poisson CF","19.2 Poisson CF",
+               "19.2 Poisson CF SE","19.2 Poisson CF SE"],
+    quantity = ["educ","age","tv","R-squared",
+                "educ","age","agesq","evermarr","tv","_cons",
+                "educ SE","_cons SE",
+                "deviance","log pseudo-lik","sigma-hat",
+                "frsthalf","electric","R-squared",
+                "educ","r","evermarr","_cons","log pseudo-lik",
+                "educ SE","r SE"],
+    stata = [-0.0644086, 0.2724736, -0.2499509, 0.5899,
+             -0.0216645, 0.3373308, -0.0041158, 0.314751, -0.1447046, -5.374829,
+             0.0025918, 0.1477633,
+             3908.76293, -6497.059873, 0.86637264,
+             -0.6361072, 1.977712, 0.2508,
+             -0.0459847, 0.024515, 0.2941007, -5.18482, -6496.7706,
+             0.0295654, 0.0296235],
+    julia = [pick(ols_19_1,"educ"), pick(ols_19_1,"age"), pick(ols_19_1,"tv"),
+             StatsBase.r2(ols_19_1),
+             pois_19_1.β[2], pois_19_1.β[3], pois_19_1.β[4], pois_19_1.β[5],
+             pois_19_1.β[8], pois_19_1.β[1],
+             pois_19_1.se[2], pois_19_1.se[1],
+             pois_19_1.deviance, pois_19_1.ll, sigma_hat,
+             rf_19_2.β[2], rf_19_2.β[7], StatsBase.r2(rf_19_2.model),
+             pois_19_2.β[2], pois_19_2.β[9], pois_19_2.β[5], pois_19_2.β[1],
+             pois_19_2.ll,
+             pois_19_2.se[2], pois_19_2.se[9]])
+comparison.reldiff = abs.(comparison.julia .- comparison.stata) ./
+                     max.(1.0e-8, abs.(comparison.stata))
+comparison.match = comparison.reldiff .<= 1e-4
+comparison
+```
+
+Read the table as follows.
+
+* **Every coefficient, every $R^2$, the deviance, both log pseudo-likelihoods
+  and Wooldridge's $\hat\sigma$ match the published Stata output** to at least
+  six significant digits.
+* **The two robust standard-error rows do not match at the $10^{-4}$ relative
+  tolerance**: `educ SE` in Example 19.1 is $0.0025938$ vs Stata's $0.0025918$
+  (+0.08%) and `_cons SE` is $0.1478821$ vs $0.1477633$ (+0.08%); Example 19.2
+  behaves the same way. This is a sandwich small-sample-correction convention —
+  `StatEcon`'s `stata_glm` scales the meat matrix by an HC1-type factor,
+  whereas Stata's `glm ..., vce(robust)` reports the plain HC0 sandwich. No
+  $z$ statistic, p-value or conclusion in either example changes.

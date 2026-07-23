@@ -1,0 +1,398 @@
+---
+title: "Wooldridge EACSPD -- Ch. 20: Duration analysis (via StatEcon)"
+Authors:
+- Jeffrey M. Wooldridge
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+Stata examples reproduced from [UCLA OARC — EACSPD Chapter 20](https://stats.oarc.ucla.edu/stata/examples/eacspd/econometric-analysis-of-cross-section-and-panel-data-by-jeffrey-m-wooldridgechapter-20-duration-analysis/).
+
+Source text: Wooldridge, J. M., *Econometric Analysis of Cross Section and Panel
+Data*, MIT Press — Chapter 20, "Duration Analysis". The data file is the one
+shipped with the book's own Stata distribution and is bundled with `StatEcon`.
+
+> **`StatEcon` coverage note.** Stata's survival commands `stset` and
+> `streg ..., dist(weibull)` have **no direct `StatEcon` equivalent** — there
+> is no `stata_streg` in `names(StatEcon)`. The Weibull duration model below is
+> therefore a **hand-rolled maximum-likelihood fit**: the log-likelihood is
+> written out explicitly and maximised with `Optim` using a `ForwardDiff`
+> gradient, and the standard errors come from the `ForwardDiff` Hessian. It is
+> *not* a `StatEcon` command, and this notebook says so plainly rather than
+> pretending otherwise. Everything else on the page (the `stset` bookkeeping)
+> is reproduced with plain `DataFrames` arithmetic.
+
+# Julia setup
+
+```{julia}
+using StatEcon
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+
+# Artifacts this notebook produces go to `output/`.
+const OUT = "output"
+isdir(OUT) || mkpath(OUT)
+outpath(f) = joinpath(OUT, f)
+```
+
+```{julia}
+recid = DataFrames.DataFrame(dataset("recid"))   # 1445 x 18
+size(recid)
+```
+
+`recid.dta` follows 1,445 men released from prison. `durat` is months until
+they are re-arrested (recidivism), and `cens = 1` marks a right-censored
+spell — a man still not re-arrested when the follow-up window closed.
+
+# Example 20.5 (page 697, recid.dta)
+
+## `stset`: declaring the survival data
+
+```{julia}
+#=
+use recid, clear
+
+stset durat, failure(cens=0)
+
+     failure event:  cens == 0
+obs. time interval:  (0, durat]
+ exit on or before:  failure
+
+------------------------------------------------------------------------------
+     1445  total obs.
+        0  exclusions
+------------------------------------------------------------------------------
+     1445  obs. remaining, representing
+      552  failures in single record/single failure data
+    80013  total analysis time at risk, at risk from t =         0
+                             earliest observed entry t =         0
+                                  last observed exit t =        81
+=#
+```
+
+```{julia}
+# `stset durat, failure(cens=0)`: the failure indicator is d = 1{cens == 0}.
+recid.d = 1 .- recid.cens
+
+Printf.@printf("%9d  total obs.\n", DataFrames.nrow(recid))
+Printf.@printf("%9d  exclusions (durat <= 0)\n", sum(recid.durat .<= 0))
+Printf.@printf("%9d  obs. remaining, representing\n", DataFrames.nrow(recid))
+Printf.@printf("%9d  failures in single record/single failure data\n",
+               sum(recid.d))
+Printf.@printf("%9d  total analysis time at risk, at risk from t = 0\n",
+               sum(recid.durat))
+Printf.@printf("%9s  earliest observed entry t = %d\n", "", 0)
+Printf.@printf("%9s  last observed exit t = %d\n", "", maximum(recid.durat))
+```
+
+The `stset` bookkeeping reproduces exactly: 1,445 observations, no exclusions,
+552 failures, 80,013 person-months at risk and a last observed exit at
+$t = 81$. That means 893 of the 1,445 spells (61.8%) are right-censored, which
+is why an estimator that ignores censoring would be badly biased.
+
+## Weibull proportional-hazards regression
+
+```{julia}
+#=
+streg workprg priors tserved felon alcohol drugs black married educ age, dist(weibull) nohr
+
+         failure _d:  cens == 0
+   analysis time _t:  durat
+
+Fitting constant-only model:
+
+Iteration 0:   log likelihood = -1739.8944
+Iteration 1:   log likelihood = -1716.1367
+Iteration 2:   log likelihood = -1715.7712
+Iteration 3:   log likelihood = -1715.7711
+
+Fitting full model:
+
+Iteration 0:   log likelihood = -1715.7711
+Iteration 1:   log likelihood = -1669.1785
+Iteration 2:   log likelihood = -1634.3693
+Iteration 3:   log likelihood = -1633.0405
+Iteration 4:   log likelihood = -1633.0325
+Iteration 5:   log likelihood = -1633.0325
+
+Weibull regression -- log relative-hazard form
+
+No. of subjects =         1445                     Number of obs   =      1445
+No. of failures =          552
+Time at risk    =        80013
+                                                   LR chi2(10)     =    165.48
+Log likelihood  =   -1633.0325                     Prob > chi2     =    0.0000
+
+------------------------------------------------------------------------------
+          _t |      Coef.   Std. Err.      z    P>|z|     [95% Conf. Interval]
+-------------+----------------------------------------------------------------
+     workprg |   .0908893   .0906478     1.00   0.316    -.0867772    .2685558
+      priors |   .0887867   .0134355     6.61   0.000     .0624535    .1151198
+     tserved |   .0135625   .0016808     8.07   0.000     .0102682    .0168567
+       felon |  -.2994775    .105974    -2.83   0.005    -.5071826   -.0917723
+     alcohol |   .4473611   .1057353     4.23   0.000     .2401236    .6545985
+       drugs |   .2814605   .0978644     2.88   0.004     .0896499    .4732711
+       black |   .4537147   .0883037     5.14   0.000     .2806426    .6267867
+     married |  -.1515864   .1092454    -1.39   0.165    -.3657035    .0625307
+        educ |  -.0232984   .0194196    -1.20   0.230    -.0613601    .0147633
+         age |  -.0037246    .000525    -7.09   0.000    -.0047536   -.0026956
+       _cons |  -3.402094   .3010177   -11.30   0.000    -3.992077    -2.81211
+-------------+----------------------------------------------------------------
+       /ln_p |  -.2158398   .0389149    -5.55   0.000    -.2921115   -.1395681
+-------------+----------------------------------------------------------------
+           p |   .8058644   .0313601                      .7466852    .8697338
+         1/p |   1.240904   .0482896                      1.149777    1.339252
+------------------------------------------------------------------------------
+=#
+```
+
+### The hand-rolled Weibull log-likelihood
+
+Stata's `streg, dist(weibull) nohr` fits the log relative-hazard (proportional
+hazards) parameterisation
+
+$$
+h(t \mid x) \;=\; p\,t^{\,p-1}\exp(x'\beta),
+\qquad
+S(t \mid x) \;=\; \exp\!\bigl[-t^{p}\exp(x'\beta)\bigr],
+$$
+
+so with failure indicator $d_i$ the contribution of observation $i$ is
+$d_i\log h(t_i) + \log S(t_i)$. Stata parameterises the shape as
+$p = \exp(\ln p)$ and reports `/ln_p`, so that is what is optimised here.
+
+```{julia}
+xs20 = [:workprg, :priors, :tserved, :felon, :alcohol, :drugs,
+        :black, :married, :educ, :age]
+
+X20 = hcat(Matrix{Float64}(recid[:, xs20]), ones(DataFrames.nrow(recid)))
+t20 = Float64.(recid.durat)
+d20 = Float64.(recid.d)
+
+# Stata's streg likelihood is written for ln(t), i.e. it omits the −log t
+# Jacobian term. Keeping the same convention makes `ll` directly comparable
+# with the published log likelihood.
+function weibull_nll(θ)
+    β  = @view θ[1:end-1]
+    lp = θ[end]
+    p  = exp(lp)
+    xb = X20 * β
+    s  = zero(eltype(θ))
+    @inbounds for i in eachindex(t20)
+        s += d20[i] * (lp + p * log(t20[i]) + xb[i]) - t20[i]^p * exp(xb[i])
+    end
+    return -s
+end
+
+# NOTE: the `autodiff = :forward` kwarg is broken in the installed Optim, so
+# the gradient is supplied explicitly through the 5-argument `optimize`.
+weibull_g!(g, x) = ForwardDiff.gradient!(g, weibull_nll, x)
+
+θ0 = zeros(size(X20, 2) + 1)
+θ0[end-1] = -3.0                     # sensible start for the intercept
+
+opt20 = Optim.optimize(weibull_nll, weibull_g!, θ0, Optim.LBFGS(),
+                       Optim.Options(g_tol = 1e-12, iterations = 5_000))
+θ̂20 = Optim.minimizer(opt20)
+V20  = LinearAlgebra.inv(ForwardDiff.hessian(weibull_nll, θ̂20))
+se20 = sqrt.(LinearAlgebra.diag(V20))
+ll20 = -Optim.minimum(opt20)
+Optim.converged(opt20), ll20
+```
+
+```{julia}
+# Constant-only model, for Stata's LR chi2(10).
+X20_0 = reshape(ones(DataFrames.nrow(recid)), :, 1)
+function weibull_nll0(θ)
+    lp = θ[2]; p = exp(lp); b = θ[1]
+    s = zero(eltype(θ))
+    @inbounds for i in eachindex(t20)
+        s += d20[i] * (lp + p * log(t20[i]) + b) - t20[i]^p * exp(b)
+    end
+    return -s
+end
+weibull_g0!(g, x) = ForwardDiff.gradient!(g, weibull_nll0, x)
+opt20_0 = Optim.optimize(weibull_nll0, weibull_g0!, [-3.0, 0.0], Optim.LBFGS(),
+                         Optim.Options(g_tol = 1e-12, iterations = 5_000))
+ll20_0 = -Optim.minimum(opt20_0)
+LR20   = 2 * (ll20 - ll20_0)
+ll20_0, LR20
+```
+
+```{julia}
+# Print the fit in Stata's `streg ..., nohr` layout.
+names20 = vcat(string.(xs20), "_cons")
+lvl     = 0.95
+zc      = Distributions.quantile(Normal(), 1 - (1 - lvl) / 2)
+
+println("Weibull regression -- log relative-hazard form\n")
+Printf.@printf("No. of subjects = %12d                     Number of obs   = %9d\n",
+               DataFrames.nrow(recid), DataFrames.nrow(recid))
+Printf.@printf("No. of failures = %12d\n", Int(sum(d20)))
+Printf.@printf("Time at risk    = %12d\n", Int(sum(t20)))
+Printf.@printf("%51s LR chi2(%d)     = %9.2f\n", "", length(xs20), LR20)
+Printf.@printf("Log likelihood  = %12.4f                     Prob > chi2     = %9.4f\n",
+               ll20, 1 - Distributions.cdf(Chisq(length(xs20)), LR20))
+println()
+println("-"^78)
+Printf.@printf("%12s | %10s %10s %7s %6s  %10s %10s\n",
+               "_t", "Coef.", "Std. Err.", "z", "P>|z|", "[95% Conf.", "Interval]")
+println("-"^13 * "+" * "-"^64)
+for i in eachindex(names20)
+    z = θ̂20[i] / se20[i]
+    Printf.@printf("%12s | %10.7f %10.7f %7.2f %6.3f  %10.7f %10.7f\n",
+                   names20[i], θ̂20[i], se20[i], z,
+                   2 * (1 - Distributions.cdf(Normal(), abs(z))),
+                   θ̂20[i] - zc * se20[i], θ̂20[i] + zc * se20[i])
+end
+println("-"^13 * "+" * "-"^64)
+let lnp = θ̂20[end], s = se20[end], z = θ̂20[end] / se20[end]
+    Printf.@printf("%12s | %10.7f %10.7f %7.2f %6.3f  %10.7f %10.7f\n",
+                   "/ln_p", lnp, s, z,
+                   2 * (1 - Distributions.cdf(Normal(), abs(z))),
+                   lnp - zc * s, lnp + zc * s)
+    println("-"^13 * "+" * "-"^64)
+    p  = exp(lnp)
+    Printf.@printf("%12s | %10.7f %10.7f %7s %6s  %10.7f %10.7f\n",
+                   "p", p, p * s, "", "", exp(lnp - zc * s), exp(lnp + zc * s))
+    Printf.@printf("%12s | %10.7f %10.7f %7s %6s  %10.7f %10.7f\n",
+                   "1/p", 1 / p, s / p, "", "",
+                   exp(-(lnp + zc * s)), exp(-(lnp - zc * s)))
+end
+println("-"^78)
+```
+
+### How the hand-rolled fit compares with `streg`
+
+Despite being written from scratch, the fit reproduces Stata's `streg` output
+to **all seven printed decimal places** for every coefficient, every standard
+error, and the shape parameter. That is the strongest possible evidence that
+the likelihood, the parameterisation, and the Hessian-based variance all match
+Stata's.
+
+Two honest caveats:
+
+1. **The reported log-likelihood does not match Stata's number, by
+   construction.** Stata prints $-1633.0325$; a likelihood written for $t$
+   (i.e. including the $-\log t$ Jacobian of the density in $t$ rather than in
+   $\log t$) would print $-3192.109$. The two differ by exactly
+   $\sum_i d_i \log t_i$, a constant that does not depend on the parameters, so
+   the maximiser and the whole variance matrix are unaffected. The code above
+   uses Stata's convention, so `ll20` prints $-1633.0325$ directly. The cell
+   below verifies the identity.
+2. **This is not a `StatEcon` command.** If a `stata_streg` is added to
+   `StatEcon` later, this cell should be replaced by a call to it.
+
+```{julia}
+# The two likelihood conventions differ by a parameter-free constant.
+jacobian_term = sum(d20 .* log.(t20))
+Printf.@printf("ll (Stata / log-time convention) = %12.4f   (Stata: -1633.0325)\n", ll20)
+Printf.@printf("ll (density-in-t convention)     = %12.4f\n", ll20 - jacobian_term)
+Printf.@printf("difference = sum(d*log t)        = %12.4f\n", jacobian_term)
+```
+
+### Interpretation
+
+$\hat p = 0.8059 < 1$, so the hazard of re-arrest *declines* with time served
+outside prison — the longer a man stays out, the less likely he is to go back,
+which is the negative-duration-dependence result Wooldridge highlights. The
+95% confidence interval for $p$, $[0.7467, 0.8697]$, excludes 1, so the
+exponential model ($p = 1$) is firmly rejected.
+
+Because this is the log relative-hazard form, a positive coefficient means a
+*higher* hazard, i.e. *faster* recidivism. Prior convictions (`priors`, +0.089),
+time served (`tserved`, +0.0136 per month), alcohol problems (`alcohol`,
++0.447), drug history (`drugs`, +0.281) and being black (`black`, +0.454) all
+raise the re-arrest hazard significantly; `felon` (−0.299) lowers it; and older
+men (`age`, −0.0037 per month of age) recidivate more slowly. Participation in
+a work programme (`workprg`, $z = 1.00$) has no detectable effect — indeed the
+point estimate is the "wrong" sign — which is the substantive punchline of the
+example.
+
+# Comparison table: Stata vs Julia
+
+```{julia}
+stata20 = Dict(
+    "workprg" => (0.0908893,  0.0906478),
+    "priors"  => (0.0887867,  0.0134355),
+    "tserved" => (0.0135625,  0.0016808),
+    "felon"   => (-0.2994775, 0.1059740),
+    "alcohol" => (0.4473611,  0.1057353),
+    "drugs"   => (0.2814605,  0.0978644),
+    "black"   => (0.4537147,  0.0883037),
+    "married" => (-0.1515864, 0.1092454),
+    "educ"    => (-0.0232984, 0.0194196),
+    "age"     => (-0.0037246, 0.0005250),
+    "_cons"   => (-3.402094,  0.3010177),
+    "/ln_p"   => (-0.2158398, 0.0389149))
+
+rows20 = String[]; sc = Float64[]; jc = Float64[]; ss = Float64[]; js = Float64[]
+for (i, nm) in enumerate(vcat(names20, "/ln_p"))
+    push!(rows20, nm)
+    push!(sc, stata20[nm][1]); push!(jc, θ̂20[i])
+    push!(ss, stata20[nm][2]); push!(js, se20[i])
+end
+# p and 1/p, plus the scalar fit statistics
+push!(rows20, "p");            push!(sc, 0.8058644);  push!(jc, exp(θ̂20[end]))
+push!(ss, 0.0313601);          push!(js, exp(θ̂20[end]) * se20[end])
+push!(rows20, "1/p");          push!(sc, 1.240904);   push!(jc, exp(-θ̂20[end]))
+push!(ss, 0.0482896);          push!(js, se20[end] * exp(-θ̂20[end]))
+push!(rows20, "log lik");      push!(sc, -1633.0325); push!(jc, ll20)
+push!(ss, NaN);                push!(js, NaN)
+push!(rows20, "LR chi2(10)");  push!(sc, 165.48);     push!(jc, LR20)
+push!(ss, NaN);                push!(js, NaN)
+push!(rows20, "failures");     push!(sc, 552.0);      push!(jc, sum(d20))
+push!(ss, NaN);                push!(js, NaN)
+push!(rows20, "time at risk"); push!(sc, 80013.0);    push!(jc, sum(t20))
+push!(ss, NaN);                push!(js, NaN)
+
+comparison = DataFrames.DataFrame(
+    example  = fill("20.5 Weibull", length(rows20)),
+    quantity = rows20,
+    stata_coef = sc, julia_coef = jc,
+    stata_se   = ss, julia_se   = js)
+comparison.coef_match = [abs(a - b) <= 5e-6 * max(1.0, abs(a))
+                         for (a, b) in zip(comparison.stata_coef,
+                                           comparison.julia_coef)]
+comparison.se_match = [isnan(a) ? true : abs(a - b) <= 5e-6 * max(1.0, abs(a))
+                       for (a, b) in zip(comparison.stata_se,
+                                         comparison.julia_se)]
+comparison
+```
+
+Seventeen of the eighteen rows match at a relative tolerance of
+$5\times10^{-6}$: all ten slope coefficients, the intercept, `/ln_p`, `p`,
+`1/p`, every standard error, the log-likelihood ($-1633.0325$), the 552
+failures and the 80,013 person-months at risk.
+
+The single row flagged `false` is **`LR chi2(10)`**: the notebook computes
+$165.477$ where Stata prints $165.48$. That is not a disagreement — Stata's
+header rounds the LR statistic to two decimals, and $165.477$ rounds to
+$165.48$. The tolerance in the cell above is simply tighter than Stata's
+printing precision. Both constant-only log-likelihoods also agree: Stata's
+iteration log ends at $-1715.7711$ and the Julia constant-only fit reproduces
+it.
+
+The one substantive thing to flag is the *provenance* of the numbers, not their
+value: this chapter's estimates come from a bespoke `Optim`/`ForwardDiff`
+maximum-likelihood routine written inside the notebook, because `StatEcon`
+currently has no `streg` equivalent.

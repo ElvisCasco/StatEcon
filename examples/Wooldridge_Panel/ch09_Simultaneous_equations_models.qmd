@@ -1,0 +1,288 @@
+---
+title: "Wooldridge EACSPD -- Ch. 9: Simultaneous equations models (via StatEcon)"
+Authors:
+- Jeffrey M. Wooldridge
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+Stata examples reproduced from [UCLA OARC — EACSPD Chapter 9](https://stats.oarc.ucla.edu/stata/examples/eacspd/econometric-analysis-of-cross-section-and-panel-data-by-jeffrey-m-wooldridgechapter-9-simultaneous-equations-models/).
+
+Source text: Wooldridge, J. M., *Econometric Analysis of Cross Section and Panel Data*, 2nd ed., MIT Press.
+
+# Julia setup
+
+```{julia}
+using StatEcon
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+
+# Artifacts this notebook produces go to `output/`.
+const OUT = "output"
+isdir(OUT) || mkpath(OUT)
+outpath(f) = joinpath(OUT, f)
+```
+
+```{julia}
+mroz = dataset("mroz")     # 753 x 22
+size(mroz)
+```
+
+The chapter estimates a labor-supply / wage-offer system on the working
+subsample (`lwage` observed), i.e. 428 of the 753 women.
+
+```{julia}
+mz = DataFrames.dropmissing(mroz,
+        [:lwage, :hours, :educ, :age, :kidslt6, :kidsge6,
+         :nwifeinc, :exper, :expersq])
+DataFrames.nrow(mz)
+```
+
+### A note on `ivreg2` standard errors
+
+The UCLA page uses the user-written `ivreg2`. With no `small` option `ivreg2`
+reports **large-sample** (divisor `N`) standard errors and `z` statistics,
+whereas StatEcon's `stata_ivregress_2sls` (built on `FixedEffectModels`) uses
+the small-sample divisor `N − K`. Coefficients are unaffected; standard errors
+differ by exactly `sqrt((N-K)/N)`. The helper below rescales a fitted 2SLS
+model to the `ivreg2` convention so the published numbers can be checked
+digit-for-digit.
+
+```{julia}
+function ivreg2_table(m; dep::AbstractString = "y")
+    β  = StatsBase.coef(m)
+    n  = Int(StatsBase.nobs(m))
+    k  = length(β)
+    se = sqrt.(LinearAlgebra.diag(StatsBase.vcov(m))) .* sqrt((n - k) / n)
+    z  = β ./ se
+    p  = 2 .* (1 .- Distributions.cdf.(Normal(), abs.(z)))
+    nm = replace.(string.(StatsBase.coefnames(m)), "(Intercept)" => "_cons")
+    Printf.@printf("%-10s %13s %12s %8s %8s\n", dep, "Coef.", "Std. Err.", "z", "P>|z|")
+    println(repeat("-", 55))
+    for i in eachindex(β)
+        Printf.@printf("%-10s %13.6g %12.6g %8.2f %8.3f\n", nm[i], β[i], se[i], z[i], p[i])
+    end
+    return (; β, se, z, p, names = nm)
+end
+```
+
+`ivreg2` also prints a **Sargan** overidentification statistic. StatEcon ships
+`stata_estat_overid_2sls` for the single-endogenous-regressor case; Example 9.6
+has two endogenous regressors, so the small helper below computes the same
+`n·R²` statistic for the general case.
+
+```{julia}
+function sargan(df, y, endog, exog, ivs)
+    n  = DataFrames.nrow(df)
+    Z  = hcat(ones(n), [Float64.(df[!, v]) for v in vcat(exog, ivs)]...)
+    Xe = hcat([Float64.(df[!, v]) for v in endog]...)
+    X  = hcat(ones(n), Z * (Z \ Xe), [Float64.(df[!, v]) for v in exog]...)
+    Xr = hcat(ones(n), [Float64.(df[!, v]) for v in vcat(endog, exog)]...)
+    yv = Float64.(df[!, y])
+    u  = yv .- Xr * (X \ yv)
+    r  = u .- Z * (Z \ u)
+    R2 = 1 - sum(abs2, r) / sum(abs2, u)
+    chi2 = n * R2
+    dfree = length(ivs) - length(endog)
+    pv = 1 - Distributions.cdf(Chisq(dfree), chi2)
+    Printf.@printf("Sargan statistic (overidentification test of all instruments): %8.3f\n", chi2)
+    Printf.@printf("                                        Chi-sq(%d) P-val = %9.5f\n", dfree, pv)
+    return (; chi2, df = dfree, p = pv)
+end
+```
+
+## Example 9.5 (mroz.dta) — labor supply and the wage offer
+
+Original Stata code:
+
+```{julia}
+#=
+use mroz, clear
+reg hours lwage educ age kidslt6 kidsge6 nwifeinc
+ivreg2 hours educ age kidslt6 kidsge6 nwifeinc (lwage= exper expersq)
+reg hours educ age kidslt6 kidsge6 nwifeinc exper expersq if lwage~=.
+test age kidslt6 kidsge6 nwifeinc
+ivreg2 lwage educ exper expersq (hours=educ age kidslt6 kidsge6 nwifeinc)
+reg lwage educ age kidslt6 kidsge6 nwifeinc exper expersq
+test age kidslt6 kidsge6 nwifeinc
+=#
+```
+
+### (1) OLS hours equation
+
+```{julia}
+ols_hours = stata_regress(mz; y = :hours,
+                          x = [:lwage, :educ, :age, :kidslt6, :kidsge6, :nwifeinc])
+```
+
+**Comparison.** Exact match with Stata: N = 428, F(6, 421) = 5.04,
+R² = 0.0670, Root MSE = 755.16; `lwage` −17.40781 (54.21544),
+`kidslt6` −342.5048 (100.0059), `kidsge6` −115.0205 (30.82925),
+`_cons` 2114.697 (340.1307).
+
+### (2) 2SLS hours equation, `lwage` instrumented by `exper`, `expersq`
+
+```{julia}
+iv_hours = stata_ivregress_2sls(mz, :hours,
+              [:lwage] => [:exper, :expersq],
+              [:educ, :age, :kidslt6, :kidsge6, :nwifeinc];
+              robust = false, first = false)
+```
+
+Rescaled to the `ivreg2` (large-sample) convention:
+
+```{julia}
+ivreg2_table(iv_hours.iv; dep = "hours")
+sargan(mz, :hours, [:lwage], [:educ, :age, :kidslt6, :kidsge6, :nwifeinc],
+       [:exper, :expersq])
+```
+
+**Comparison.** Coefficients match Stata exactly: `lwage` 1544.819,
+`educ` −177.449, `age` −10.78409, `kidslt6` −210.8339, `kidsge6` −47.55708,
+`nwifeinc` −9.249121, `_cons` 2432.198. The rescaled standard errors reproduce
+`ivreg2`'s 476.7913, 57.66517, 9.498705, 175.4811, 56.45049, 6.427897,
+589.2929. The Sargan statistic 0.858 with Chi-sq(1) p = 0.35425 matches the
+published value exactly. (The unscaled `stata_ivregress_2sls` table prints
+480.74, 58.14, … — the same numbers divided by `sqrt(421/428)`.)
+
+### (3) Reduced form for `hours`, and the test of the excluded instruments
+
+```{julia}
+rf_hours = stata_regress(mz; y = :hours,
+             x = [:educ, :age, :kidslt6, :kidsge6, :nwifeinc, :exper, :expersq])
+```
+
+```{julia}
+stata_test(rf_hours, ["age", "kidslt6", "kidsge6", "nwifeinc"])
+```
+
+**Comparison.** Exact match: N = 428, F(7, 420) = 9.79, R² = 0.1403,
+Root MSE = 725.73, `exper` 47.00509 (14.55649), `expersq` −0.5136442
+(0.4373576). The joint test gives F(4, 420) = 4.80, Prob > F = 0.0009 —
+identical to Stata.
+
+### (4) 2SLS wage equation, `hours` instrumented
+
+`ivreg2 lwage educ exper expersq (hours=educ age kidslt6 kidsge6 nwifeinc)`
+lists `educ` both as an included exogenous regressor and as an instrument;
+Stata reports *"Collinearities detected among instruments: 1 instrument(s)
+dropped"*. The effective excluded instruments are `age kidslt6 kidsge6
+nwifeinc`, which is what the Julia call specifies.
+
+```{julia}
+iv_wage = stata_ivregress_2sls(mz, :lwage,
+             [:hours] => [:age, :kidslt6, :kidsge6, :nwifeinc],
+             [:educ, :exper, :expersq];
+             robust = false, first = false)
+```
+
+```{julia}
+ivreg2_table(iv_wage.iv; dep = "lwage")
+sargan(mz, :lwage, [:hours], [:educ, :exper, :expersq],
+       [:age, :kidslt6, :kidsge6, :nwifeinc])
+```
+
+**Comparison.** Coefficients match exactly: `hours` 0.0001608, `educ` 0.1111175,
+`exper` 0.032646, `expersq` −0.0006765, `_cons` −0.69279. The rescaled standard
+errors reproduce `ivreg2`'s 0.0002141, 0.0152421, 0.0179552, 0.00044, 0.3048041.
+Sargan 2.941, Chi-sq(3) p = 0.40084 — exactly the published values.
+
+### (5) OLS wage equation and the second exclusion test
+
+```{julia}
+ols_wage = stata_regress(mz; y = :lwage,
+             x = [:educ, :age, :kidslt6, :kidsge6, :nwifeinc, :exper, :expersq])
+```
+
+```{julia}
+stata_test(ols_wage, ["age", "kidslt6", "kidsge6", "nwifeinc"])
+```
+
+**Comparison.** Exact match: N = 428, F(7, 420) = 11.78, R² = 0.1641,
+Root MSE = 0.66669; `educ` 0.0998844 (0.0150975), `exper` 0.0407097
+(0.0133723), `_cons` −0.3579972 (0.3182963). Joint test F(4, 420) = 0.91,
+Prob > F = 0.4555 — identical to Stata.
+
+### Extra IV diagnostics (not on the UCLA page)
+
+```{julia}
+estat_firststage(mz, :hours, [:lwage], [:exper, :expersq],
+                 [:educ, :age, :kidslt6, :kidsge6, :nwifeinc])
+```
+
+```{julia}
+estat_endogenous(mz, :hours, [:lwage], [:exper, :expersq],
+                 [:educ, :age, :kidslt6, :kidsge6, :nwifeinc]; robust = false)
+```
+
+## Example 9.6 (mroz.dta) — a nonlinear-in-endogenous-variable hours equation
+
+Original Stata code:
+
+```{julia}
+#=
+gen lwagesq = lwage^2
+gen agesq=age^2
+gen educsq = educ^2
+gen nwifeincsq = nwifeinc^2
+ivreg2 hours educ age kidslt6 kidsge6 nwifeinc (lwage lwagesq = exper expersq agesq educsq nwifeincsq)
+=#
+```
+
+```{julia}
+mz.lwagesq    = mz.lwage .^ 2
+mz.agesq      = Float64.(mz.age) .^ 2
+mz.educsq     = Float64.(mz.educ) .^ 2
+mz.nwifeincsq = Float64.(mz.nwifeinc) .^ 2
+
+iv96 = stata_ivregress_2sls(mz, :hours,
+          [:lwage, :lwagesq] => [:exper, :expersq, :agesq, :educsq, :nwifeincsq],
+          [:educ, :age, :kidslt6, :kidsge6, :nwifeinc];
+          robust = false, first = false)
+```
+
+```{julia}
+ivreg2_table(iv96.iv; dep = "hours")
+sargan(mz, :hours, [:lwage, :lwagesq],
+       [:educ, :age, :kidslt6, :kidsge6, :nwifeinc],
+       [:exper, :expersq, :agesq, :educsq, :nwifeincsq])
+```
+
+**Comparison.** All eight coefficients match Stata to every printed digit:
+`lwage` 1873.62, `lwagesq` −437.2911, `educ` −87.8511, `age` −9.142303,
+`kidslt6` −185.0554, `kidsge6` −58.18949, `nwifeinc` −7.233422,
+`_cons` 1657.926. The rescaled standard errors reproduce `ivreg2`'s 630.0193,
+346.7893, 65.76994, 8.492916, 160.757, 49.63412, 5.751229, 769.9772. Sargan
+2.612 with Chi-sq(3) p = 0.45537 — exactly as published.
+
+## Systems view: `reg3` (3SLS)
+
+The UCLA page estimates the two structural equations one at a time. StatEcon's
+`stata_reg3` fits them jointly by three-stage least squares; the results below
+are *not* on the UCLA page and are included only to show the system command.
+
+```{julia}
+reg3_sys = stata_reg3(mz,
+             :hours => [:lwage, :educ, :age, :kidslt6, :kidsge6, :nwifeinc],
+             :lwage => [:hours, :educ, :exper, :expersq])
+nothing
+```

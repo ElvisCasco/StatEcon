@@ -1,0 +1,279 @@
+---
+title: "Wooldridge EACSPD -- Ch. 10: Basic linear unobserved effects panel data models (via StatEcon)"
+Authors:
+- Jeffrey M. Wooldridge
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+Stata examples reproduced from [UCLA OARC — EACSPD Chapter 10](https://stats.oarc.ucla.edu/stata/examples/eacspd/econometric-analysis-of-cross-section-and-panel-data-by-jeffrey-m-wooldridgechapter-10-basic-linear-unobserved-effects-panel-data-models/).
+
+Source text: Wooldridge, J. M., *Econometric Analysis of Cross Section and Panel Data*, 2nd ed., MIT Press.
+
+# Julia setup
+
+```{julia}
+using StatEcon
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+
+# Artifacts this notebook produces go to `output/`.
+const OUT = "output"
+isdir(OUT) || mkpath(OUT)
+outpath(f) = joinpath(OUT, f)
+```
+
+```{julia}
+jtrain1 = dataset("jtrain1")     # 471 x 30
+size(jtrain1)
+```
+
+All three examples use the estimation sample on which `lscrap` is observed:
+54 firms observed in 1987, 1988 and 1989 (162 observations, balanced).
+
+```{julia}
+jt = DataFrames.dropmissing(jtrain1,
+        [:lscrap, :d88, :d89, :union, :grant, :grant_1, :fcode, :year])
+DataFrames.sort!(jt, [:fcode, :year])
+DataFrames.nrow(jt)
+```
+
+```{julia}
+stata_xtdescribe(jt, :fcode, :year)
+```
+
+```{julia}
+stata_xtsum(jt, [:lscrap, :grant, :grant_1, :union], :fcode)
+```
+
+## Example 10.4 (jtrain1.dta) — random effects
+
+Original Stata code:
+
+```{julia}
+#=
+use jtrain1, clear
+xtreg lscrap d88 d89 union grant grant_1, i(fcode)
+test grant grant_1
+=#
+```
+
+```{julia}
+re104 = stata_xtreg_re(jt, :lscrap, [:d88, :d89, :union, :grant, :grant_1], :fcode)
+stata_xtreg_re_print(re104)
+```
+
+Wald test of `grant = grant_1 = 0` (Stata's `test` after `xtreg, re` reports a
+χ²):
+
+```{julia}
+let idx = [findfirst(==(v), re104.coefnames) for v in ["grant", "grant_1"]]
+    b = re104.β[idx]
+    V = re104.V[idx, idx]
+    w = b' * (V \ b)
+    p = 1 - Distributions.cdf(Chisq(2), w)
+    Printf.@printf(" ( 1)  grant = 0\n ( 2)  grant_1 = 0\n\n")
+    Printf.@printf("           chi2(  2) = %7.2f\n", w)
+    Printf.@printf("         Prob > chi2 = %7.4f\n", p)
+end
+```
+
+**Comparison with the published Stata output — this example does NOT match
+exactly.**
+
+| Coefficient | Stata `xtreg, re` | Julia `stata_xtreg_re` | Match |
+|---|---|---|---|
+| d88     | −.0934519 (.1091559) | −.0930654 (.1094895) | close, not exact |
+| d89     | −.2698336 (.1316496) | −.2691793 (.1320866) | close, not exact |
+| union   |  .5478021 (.410625)  |  .5478411 (.4182854) | close, not exact |
+| grant   | −.214696  (.1477838) | −.2157945 (.1483065) | close, not exact |
+| grant_1 | −.3770698 (.2053516) | −.3783511 (.2061045) | close, not exact |
+| _cons   |  .4148333 (.2434322) |  .4148204 (.2477774) | close, not exact |
+| sigma_u | 1.3900287 | 1.419622 | no |
+| sigma_e |  .49774421 | .5001546 | no |
+| rho     |  .88634984 | .8895799 | no |
+| Wald χ²(5) | 26.99 | 26.80 | no |
+| `test` χ²(2) | 3.66 (p = .1601) | see cell above (≈3.63, p ≈ .163) | no |
+| R² within/between/overall | .2006 / .0206 / .0361 | .2006 / .0205 / .0361 | yes (to 3–4 dp) |
+
+**Why.** The difference is entirely in the Swamy–Arora variance components,
+which feed the GLS weight `θ`:
+
+* `union` is time-invariant, so it is *dropped* by the within (FE) step.
+  Stata therefore uses `K = 4` in the within degrees of freedom:
+  `σ̂²_ε = RSS_FE / (162 − 54 − 4) = RSS_FE/104`, giving
+  `σ̂_ε = .49774421` (the FE Root MSE of Example 10.5).
+  `stata_xtreg_re` counts all five listed regressors and divides by
+  `162 − 54 − 5 = 103`, giving `σ̂_ε = .5001546`.
+* In the between step, `RSS_BE = 100.7381`. Stata's `σ̂_u = 1.3900287` implies
+  a divisor of **50**; `stata_xtreg_re` uses `n − k − 1 = 54 − 5 − 1 = 48`,
+  giving `σ̂_u = 1.419622`.
+
+Both are legitimate Swamy–Arora implementations, but they disagree on how to
+count degrees of freedom when a regressor is collinear with the fixed effects.
+The resulting `θ` differs slightly, which perturbs every RE coefficient in the
+third–fourth decimal. No numbers were tweaked to force agreement.
+
+## Example 10.5 (jtrain1.dta) — fixed effects
+
+Original Stata code:
+
+```{julia}
+#=
+xtreg lscrap d88 d89 union grant grant_1, i(fcode) fe
+test grant grant_1
+=#
+```
+
+```{julia}
+fe105 = stata_regress(jt; y = :lscrap,
+                      x = [:d88, :d89, :union, :grant, :grant_1],
+                      absorb = :fcode)
+```
+
+```{julia}
+stata_test(fe105, ["grant", "grant_1"])
+```
+
+**Comparison.** Exact match with Stata. `union` is reported as `(dropped)` by
+Stata and as a zero/undefined row here — the same collinearity with the firm
+effects. N = 162, 54 groups, F(4, 104) = 6.54, Prob > F = 0.0001,
+R² within = 0.2010, Root MSE (= `sigma_e`) = 0.49774.
+
+| Coefficient | Stata | Julia | Match |
+|---|---|---|---|
+| d88     | −.0802157 (.1094751) | −.0802157 (.1094751) | yes |
+| d89     | −.2472028 (.1332183) | −.2472028 (.1332183) | yes |
+| union   | (dropped) | dropped (collinear) | yes |
+| grant   | −.2523149 (.150629)  | −.2523149 (.150629)  | yes |
+| grant_1 | −.4215895 (.2102)    | −.4215895 (.2102)    | yes |
+| F(2,104) test | 2.23 (p = .1127) | 2.23 (p = .1127) | yes |
+
+The same regression through `stata_areg` (Stata's `areg ..., absorb(fcode)`),
+which additionally reports an intercept:
+
+```{julia}
+areg105 = stata_areg(jt, :lscrap, [:d88, :d89, :grant, :grant_1]; absorb = :fcode)
+nothing
+```
+
+Note that `areg`'s `_cons` standard error (0.0553) is **not** the same as
+`xtreg, fe`'s (0.0677344): the two commands use different degrees-of-freedom
+conventions for the intercept (`areg` treats the absorbed indicators as
+estimated parameters). The slope coefficients and their standard errors are
+identical.
+
+`stata_hausman` compares the FE and RE fits (not shown on the UCLA page):
+
+```{julia}
+stata_hausman(fe105, re104)
+```
+
+## Example 10.6 (jtrain1.dta) — first differences
+
+Original Stata code:
+
+```{julia}
+#=
+use jtrain1, clear
+tsset fcode year
+reg d.lscrap d89 d.grant d.grant_1
+test d.grant d.grant_1
+predict u, res
+reg u l.u
+=#
+```
+
+Stata's `d.` operator needs an explicit lag in Julia. A self-join on
+`(fcode, year − 1)` reproduces `tsset fcode year` exactly, including the
+correct handling of gaps.
+
+```{julia}
+base = DataFrames.DataFrame(
+    fcode   = Int.(jtrain1.fcode),
+    year    = Int.(jtrain1.year),
+    d89     = Float64.(jtrain1.d89),
+    lscrap  = [ismissing(x) ? missing : Float64(x) for x in jtrain1.lscrap],
+    grant   = Float64.(jtrain1.grant),
+    grant_1 = Float64.(jtrain1.grant_1))
+
+lagged = DataFrames.select(base, :fcode,
+             :year    => (y -> y .+ 1) => :year,
+             :lscrap  => :L_lscrap,
+             :grant   => :L_grant,
+             :grant_1 => :L_grant_1)
+
+fd = DataFrames.leftjoin(base, lagged, on = [:fcode, :year])
+fd.D_lscrap  = fd.lscrap  .- fd.L_lscrap
+fd.D_grant   = fd.grant   .- fd.L_grant
+fd.D_grant_1 = fd.grant_1 .- fd.L_grant_1
+
+fd = DataFrames.dropmissing(fd, [:D_lscrap, :D_grant, :D_grant_1, :d89])
+DataFrames.sort!(fd, [:fcode, :year])
+DataFrames.nrow(fd)
+```
+
+```{julia}
+fd106 = stata_regress(fd; y = :D_lscrap, x = [:d89, :D_grant, :D_grant_1],
+                      yname = "D.lscrap",
+                      xnames = ["D_grant" => "D.grant",
+                                "D_grant_1" => "D.grant_1"])
+```
+
+```{julia}
+stata_test(fd106, ["D_grant", "D_grant_1"])
+```
+
+**Comparison.** Exact match with Stata: N = 108, F(3, 104) = 1.31,
+Prob > F = 0.2739, R² = 0.0365, Root MSE = 0.57672.
+
+| Coefficient | Stata | Julia | Match |
+|---|---|---|---|
+| d89       | −.0962081 (.1254469) | −.0962081 (.1254469) | yes |
+| D.grant   | −.222781  (.1307423) | −.222781  (.1307423) | yes |
+| D.grant_1 | −.3512459 (.2350848) | −.3512459 (.2350849) | yes (last digit) |
+| _cons     | −.0906072 (.0909695) | −.0906072 (.0909695) | yes |
+| F(2,104) test | 1.53 (p = .2215) | 1.53 (p = .2215) | yes |
+
+### Serial-correlation check on the first-differenced residuals
+
+```{julia}
+fd.u = StatsBase.residuals(fd106, fd)
+
+lagu = DataFrames.select(fd, :fcode,
+           :year => (y -> y .+ 1) => :year, :u => :L_u)
+fdu  = DataFrames.dropmissing(DataFrames.leftjoin(fd, lagu, on = [:fcode, :year]),
+                              [:u, :L_u])
+DataFrames.nrow(fdu)
+```
+
+```{julia}
+ar106 = stata_regress(fdu; y = :u, x = [:L_u],
+                      xnames = ["L_u" => "L.u"])
+```
+
+**Comparison.** Exact match: N = 54, F(1, 52) = 3.10, Prob > F = 0.0844,
+R² = 0.0562, Root MSE = 0.56009, `L.u` = 0.2369063 (SE 0.1346333), t = 1.76,
+p = 0.084, and `_cons` numerically zero (Stata prints 3.30e−10, SE 0.0762188).
+Since the AR(1) coefficient on the differenced errors is not close to −0.5,
+the idiosyncratic errors in levels are not well described as a random walk;
+Wooldridge uses this to argue in favor of the fixed-effects estimator here.

@@ -1,0 +1,201 @@
+---
+title: "Wooldridge EACSPD -- Ch. 5: Instrumental variables estimation of single-equation linear models (via StatEcon)"
+Authors:
+- Jeffrey M. Wooldridge
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+**Source.** Stata examples reproduced from
+[UCLA OARC — EACSPD Chapter 5](https://stats.oarc.ucla.edu/stata/examples/eacspd/econometric-analysis-of-cross-section-and-panel-data-by-jeffrey-m-wooldridgechapter-5-instrumental-variables-estimation-of-single-equation-linear-models/).
+
+**Book.** Wooldridge, J. M., *Econometric Analysis of Cross Section and Panel Data*,
+MIT Press. Chapter 5: *Instrumental Variables Estimation of Single-Equation Linear Models*.
+
+# Julia setup
+
+```{julia}
+using StatEcon
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+
+# Artifacts this notebook produces go to `output/`.
+const OUT = "output"
+isdir(OUT) || mkpath(OUT)
+outpath(f) = joinpath(OUT, f)
+```
+
+```{julia}
+mroz  = DataFrames.DataFrame(dataset("mroz"))    # 753 x 22
+nls80 = DataFrames.DataFrame(dataset("nls80"))   # 935 x 17
+size(mroz), size(nls80)
+```
+
+::: {.callout-note}
+`stata_ivregress_2sls` follows Stata's modern `ivregress 2sls` display
+convention: it reports a Wald χ² and *z* statistics (normal-based confidence
+intervals). The UCLA page uses the older `ivreg` command, which reports an
+*F* statistic and *t* statistics (t-based confidence intervals). Coefficients
+and standard errors are identical; only the reference distribution used for the
+p-values and confidence limits differs.
+:::
+
+# Example 5.3 on page 96 (mroz.dta)
+
+## First stage: schooling on the family-background instruments
+
+```{julia}
+#=
+use mroz, clear
+
+reg educ exper expersq motheduc fatheduc huseduc if lwage ~=.
+=#
+mroz_w = mroz[.!ismissing.(mroz.lwage), :]     # the "if lwage ~=." sample, N = 428
+
+fs53 = stata_regress(mroz_w; y = :educ,
+                     x = [:exper, :expersq, :motheduc, :fatheduc, :huseduc])
+```
+
+```{julia}
+#=
+test motheduc fatheduc huseduc
+=#
+stata_test(fs53, ["motheduc", "fatheduc", "huseduc"])
+```
+
+The first stage matches exactly (`huseduc = .3752548 (.0296347)`,
+`R² = 0.4286`), and the joint instrument test gives `F(3, 422) = 104.29`,
+`Prob > F = 0.0000` — identical to Stata. The instruments are strong.
+
+## 2SLS wage equation
+
+```{julia}
+#=
+ivreg lwage exper expersq (educ=fatheduc huseduc motheduc )
+=#
+iv53 = stata_ivregress_2sls(mroz, :lwage,
+    :educ => [:fatheduc, :huseduc, :motheduc], [:exper, :expersq];
+    robust = false, first = false)
+```
+
+## OLS for comparison
+
+```{julia}
+#=
+reg lwage exper expersq educ
+=#
+ols53 = stata_regress(mroz; y = :lwage, x = [:exper, :expersq, :educ])
+```
+
+2SLS reproduces the published numbers exactly:
+`educ = .0803918 (.021774)`, `exper = .0430973 (.0132649)`,
+`expersq = -.0008628 (.0003962)`, `_cons = -.1868572 (.2853959)`,
+with `R² = 0.1495` and `Root MSE = .6693`. The IV return to schooling
+(.0804) is well below the OLS estimate (.1075) — the OLS regression above also
+matches Stata exactly. The only display difference is the *z*/χ² framing noted
+above (`Wald chi2(3) = 34.57` versus Stata's `F(3, 424) = 11.52`; note
+`34.57/3 = 11.52`).
+
+# Example 5.4 on page 99 (mroz.dta)
+
+Here the two children variables are added as exogenous regressors *and* kept in
+the instrument list, so the model remains overidentified by the three education
+instruments.
+
+```{julia}
+#=
+ivreg lwage exper expersq kidslt6 kidsge6 (educ=fatheduc huseduc motheduc kidslt6 kidsge6)
+=#
+iv54 = stata_ivregress_2sls(mroz, :lwage,
+    :educ => [:fatheduc, :huseduc, :motheduc, :kidslt6, :kidsge6],
+    [:exper, :expersq, :kidslt6, :kidsge6];
+    robust = false, first = false)
+```
+
+```{julia}
+#=
+test kidslt6 kidsge6
+=#
+stata_test(iv54.iv, ["kidslt6", "kidsge6"])
+```
+
+Every coefficient and standard error matches the published table:
+`educ = .0798678 (.0223575)`, `kidslt6 = -.0313332 (.0861049)`,
+`kidsge6 = -.0182224 (.0271427)`, `R² = 0.1505`, `Root MSE = .67051`.
+The exclusion test gives `F(2, 422) = 0.31`, `Prob > F = 0.7368` — identical to
+Stata (Julia's unrounded value is 0.3057).
+
+# Example 5.5 on page 106 (nls80.dta)
+
+`iq` is treated as an error-ridden proxy for ability and instrumented by a second
+proxy, `kww`.
+
+```{julia}
+#=
+use nls80, clear
+
+ivreg lwage  exper tenure married south urban black educ (iq = kww )
+=#
+iv55 = stata_ivregress_2sls(nls80, :lwage, :iq => :kww,
+    [:exper, :tenure, :married, :south, :urban, :black, :educ];
+    robust = false, first = false)
+```
+
+Exact reproduction: `iq = .0130473 (.0049341)`, `educ = .0250321 (.0166068)`,
+`black = -.0225612 (.0739597)`, `_cons = 4.592453 (.3257807)`,
+`R² = 0.1900`, `Root MSE = .38067`. Instrumenting `iq` by `kww` roughly
+quadruples the ability coefficient relative to OLS and drives the schooling
+coefficient down to an insignificant .025, exactly as reported.
+
+# Verification summary
+
+| Example | Quantity | Stata | Julia | Match |
+|---|---|---|---|---|
+| 5.3 first stage | `motheduc` | .1141532 / .0307835 | .1141532 / .0307835 | yes |
+| 5.3 first stage | `fatheduc` | .1060801 / .0295153 | .1060801 / .0295153 | yes |
+| 5.3 first stage | `huseduc` | .3752548 / .0296347 | .3752548 / .0296347 | yes |
+| 5.3 first stage | R² | 0.4286 | 0.4286 | yes |
+| 5.3 first stage | `test` on 3 IVs | F(3,422)=104.29 | F=104.2942 | yes |
+| 5.3 2SLS | `educ` | .0803918 / .021774 | .0803918 / .0217740 | yes |
+| 5.3 2SLS | `exper` | .0430973 / .0132649 | .0430973 / .0132649 | yes |
+| 5.3 2SLS | `expersq` | -.0008628 / .0003962 | -.0008628 / .0003962 | yes |
+| 5.3 2SLS | `_cons` | -.1868572 / .2853959 | -.1868572 / .2853959 | yes |
+| 5.3 2SLS | R² / Root MSE | 0.1495 / .6693 | 0.1495 / .6693 | yes |
+| 5.3 OLS | `educ` | .1074896 / .0141465 | .1074896 / .0141465 | yes |
+| 5.4 2SLS | `educ` | .0798678 / .0223575 | .0798678 / .0223575 | yes |
+| 5.4 2SLS | `kidslt6` | -.0313332 / .0861049 | -.0313332 / .0861049 | yes |
+| 5.4 2SLS | `kidsge6` | -.0182224 / .0271427 | -.0182224 / .0271427 | yes |
+| 5.4 | `test kidslt6 kidsge6` | F(2,422)=0.31, p=0.7368 | F=0.3057, p=0.7368 | yes |
+| 5.5 2SLS | `iq` | .0130473 / .0049341 | .0130473 / .0049341 | yes |
+| 5.5 2SLS | `educ` | .0250321 / .0166068 | .0250321 / .0166068 | yes |
+| 5.5 2SLS | `black` | -.0225612 / .0739597 | -.0225612 / .0739597 | yes |
+| 5.5 2SLS | `_cons` | 4.592453 / .3257807 | 4.5924533 / .3257807 | yes |
+| 5.5 2SLS | R² / Root MSE | 0.1900 / .38067 | 0.1900 / .3807 | yes |
+
+All point estimates and standard errors on the UCLA Chapter 5 page reproduce
+exactly. The single systematic presentational difference: Stata's legacy `ivreg`
+reports `t` statistics with `F(k, N-K)`, whereas `stata_ivregress_2sls` follows
+`ivregress 2sls` and reports `z` statistics with `Wald chi2(k)`
+(`chi2 = k * F`). Confidence intervals therefore use normal rather than
+*t* critical values, which shifts the reported limits in the fourth decimal
+(e.g. 5.3 `educ` CI: Stata `[.0375934, .1231901]` vs Julia
+`[.0377156, .1230680]`). The standard errors themselves are identical.

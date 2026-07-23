@@ -1,0 +1,572 @@
+---
+title: "Wooldridge EACSPD -- Ch. 18: Estimating average treatment effects (via StatEcon)"
+Authors:
+- Jeffrey M. Wooldridge
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+Stata examples reproduced from [UCLA OARC — EACSPD Chapter 18](https://stats.oarc.ucla.edu/stata/examples/eacspd/econometric-analysis-of-cross-section-and-panel-data-by-jeffrey-m-wooldridgechapter-18-estimating-average-treatment-effects/).
+
+Source text: Wooldridge, J. M., *Econometric Analysis of Cross Section and Panel
+Data*, MIT Press — Chapter 18, "Estimating Average Treatment Effects". The data
+files are those shipped with the book's own Stata distribution and are bundled
+with `StatEcon`.
+
+# Julia setup
+
+```{julia}
+using StatEcon
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+
+# Artifacts this notebook produces go to `output/`.
+const OUT = "output"
+isdir(OUT) || mkpath(OUT)
+outpath(f) = joinpath(OUT, f)
+```
+
+The chapter's estimators map onto `StatEcon` as follows:
+
+* `stata_regress`         — `regress y x…`
+* `stata_probit`          — `probit d z…` (+ `predict p, p` via `GLM.predict`)
+* `stata_summarize`       — `summarize var`
+* `stata_ivregress_2sls`  — `ivreg y (x1 = z…) x2… [, robust]`
+
+`StatEcon` also ships `psmatch2` (propensity-score matching) and
+`teffects_ipw` (inverse-probability weighting). The UCLA page for this chapter
+does **not** use them — it works entirely through regression on the propensity
+score and IV — so they are not exercised here; the notebook stays faithful to
+the published code.
+
+```{julia}
+jtrain2 = DataFrames.DataFrame(dataset("jtrain2"))   # 445 x 19
+fertil2 = DataFrames.DataFrame(dataset("fertil2"))   # 4361 x 28
+size(jtrain2), size(fertil2)
+```
+
+# Example 18.2 (page 619, jtrain2.dta)
+
+## Propensity score for job-training assignment
+
+```{julia}
+#=
+use jtrain2, clear
+
+probit train re74 re75 age agesq nodegree married black hisp, nolog
+
+Probit estimates                                  Number of obs   =        445
+                                                  LR chi2(8)      =      16.07
+                                                  Prob > chi2     =     0.0415
+Log likelihood = -294.06748                       Pseudo R2       =     0.0266
+
+------------------------------------------------------------------------------
+       train |      Coef.   Std. Err.      z    P>|z|     [95% Conf. Interval]
+-------------+----------------------------------------------------------------
+        re74 |  -.0189577   .0159392    -1.19   0.234    -.0501979    .0122825
+        re75 |   .0371871   .0271086     1.37   0.170    -.0159447     .090319
+         age |  -.0005467   .0534045    -0.01   0.992    -.1052176    .1041242
+       agesq |   .0000719   .0008734     0.08   0.934    -.0016399    .0017837
+    nodegree |    -.44195   .1515457    -2.92   0.004    -.7389742   -.1449258
+     married |    .091519   .1726192     0.53   0.596    -.2468083    .4298464
+       black |  -.1446253   .2271609    -0.64   0.524    -.5898524    .3006019
+        hisp |  -.5004545   .3079227    -1.63   0.104    -1.103972    .1030629
+       _cons |   .2284561   .8154273     0.28   0.779    -1.369752    1.826664
+------------------------------------------------------------------------------
+=#
+```
+
+```{julia}
+pscore_18_2 = stata_probit(
+    jtrain2,
+    @formula(train ~ re74 + re75 + age + agesq + nodegree + married +
+                     black + hisp));
+```
+
+All nine coefficients match the published table to six digits, as do
+$N = 445$, LR $\chi^2(8) = 16.07$, log-likelihood $-294.0675$ and
+pseudo-$R^2 = 0.0266$. Standard errors differ in the third significant digit
+because `StatEcon`'s probit variance is the expected-information (IRLS) matrix
+from `GLM.jl`, whereas Stata's `probit` reports the observed-information
+inverse. Because the NSW data are from a randomised experiment, the covariates
+should be — and essentially are — unrelated to assignment.
+
+## Regression on the propensity score
+
+```{julia}
+#=
+predict propensity, p
+reg re78 train propensity
+
+      Source |       SS       df       MS              Number of obs =     445
+-------------+------------------------------           F(  2,   442) =    5.00
+       Model |  432.165422     2  216.082711           Prob > F      =  0.0071
+    Residual |  19093.4912   442  43.1979439           R-squared     =  0.0221
+-------------+------------------------------           Adj R-squared =  0.0177
+       Total |  19525.6566   444  43.9767041           Root MSE      =  6.5725
+
+------------------------------------------------------------------------------
+        re78 |      Coef.   Std. Err.      t    P>|t|     [95% Conf. Interval]
+-------------+----------------------------------------------------------------
+       train |   1.625741   .6436153     2.53   0.012      .360815    2.890668
+  propensity |    4.74316   3.398343     1.40   0.163    -1.935758    11.42208
+       _cons |    2.65396   1.421591     1.87   0.063    -.1399571    5.447877
+------------------------------------------------------------------------------
+=#
+```
+
+```{julia}
+jtrain2.propensity = GLM.predict(pscore_18_2.model)   # predict propensity, p
+reg_pscore = stata_regress(jtrain2; y = :re78, x = [:train, :propensity]);
+```
+
+`train` $= 1.6257445$ vs Stata's $1.625741$, SE $0.6436153$ in both;
+`propensity` $4.7430552$ (Stata $4.74316$) with SE $3.3983295$ (Stata
+$3.398343$); `_cons` $2.654003$ (Stata $2.65396$). $R^2 = 0.0221$ and Root MSE
+$= 6.5725$ agree. The tiny fifth-digit drift on the propensity-score
+coefficients is inherited from the probit fit (Newton–Raphson vs IRLS
+convergence tolerances), not from the regression step.
+
+## Regression on the covariates directly
+
+```{julia}
+#=
+reg re78 train re74 re75 age agesq nodegree married black hisp
+
+      Source |       SS       df       MS              Number of obs =     445
+-------------+------------------------------           F(  9,   435) =    2.49
+       Model |  955.909613     9  106.212179           Prob > F      =  0.0088
+    Residual |   18569.747   435  42.6890736           R-squared     =  0.0490
+-------------+------------------------------           Adj R-squared =  0.0293
+       Total |  19525.6566   444  43.9767041           Root MSE      =  6.5337
+
+------------------------------------------------------------------------------
+        re78 |      Coef.   Std. Err.      t    P>|t|     [95% Conf. Interval]
+-------------+----------------------------------------------------------------
+       train |   1.625166   .6399454     2.54   0.011     .3673965    2.882935
+        re74 |   .0730643   .0775264     0.94   0.346    -.0793087    .2254373
+        re75 |   .0651047   .1357642     0.48   0.632    -.2017307    .3319401
+         age |   .2006381    .272712     0.74   0.462    -.3353589    .7366351
+       agesq |  -.0025326   .0044565    -0.57   0.570    -.0112916    .0062264
+    nodegree |  -1.099426   .7914955    -1.39   0.166    -2.655057    .4562048
+     married |  -.1052808   .8930025    -0.12   0.906    -1.860417    1.649855
+       black |  -2.115677   1.172482    -1.80   0.072     -4.42011     .188757
+        hisp |  -.0095228   1.551503    -0.01   0.995    -3.058898    3.039852
+       _cons |   3.691303   4.180235     0.88   0.378    -4.524666    11.90727
+------------------------------------------------------------------------------
+=#
+```
+
+```{julia}
+reg_covs = stata_regress(
+    jtrain2;
+    y = :re78,
+    x = [:train, :re74, :re75, :age, :agesq, :nodegree, :married,
+         :black, :hisp]);
+```
+
+An exact reproduction: `train` $=1.625166$ (SE $0.6399454$), $R^2 = 0.0490$,
+Root MSE $= 6.5337$, $F(9,435) = 2.49$. Controlling for the covariates directly
+and controlling for the single-index propensity score give virtually the same
+ATE estimate — the hallmark of a randomised experiment.
+
+## Simple difference in means
+
+```{julia}
+#=
+reg re78 train /*simple comparison*/
+
+      Source |       SS       df       MS              Number of obs =     445
+-------------+------------------------------           F(  1,   443) =    8.04
+       Model |  348.013451     1  348.013451           Prob > F      =  0.0048
+    Residual |  19177.6432   443  43.2903909           R-squared     =  0.0178
+-------------+------------------------------           Adj R-squared =  0.0156
+       Total |  19525.6566   444  43.9767041           Root MSE      =  6.5795
+
+------------------------------------------------------------------------------
+        re78 |      Coef.   Std. Err.      t    P>|t|     [95% Conf. Interval]
+-------------+----------------------------------------------------------------
+       train |   1.794343   .6328536     2.84   0.005     .5505749    3.038111
+       _cons |   4.554802    .408046    11.16   0.000     3.752856    5.356749
+------------------------------------------------------------------------------
+=#
+```
+
+```{julia}
+reg_simple = stata_regress(jtrain2; y = :re78, x = [:train]);
+```
+
+Exact match: the raw difference in means is $1.794343$ (SE $0.6328536$),
+somewhat larger than the covariate-adjusted $1.625$.
+
+## Propensity score summary and the interacted regression
+
+```{julia}
+#=
+sum propensity
+
+    Variable |       Obs        Mean    Std. Dev.       Min        Max
+-------------+--------------------------------------------------------
+  propensity |       445    .4155321    .0934459   .1638736   .6738951
+
+gen wp = train*(propensity-r(mean))
+reg re78 train propensity wp /*adding the interaction term*/
+
+      Source |       SS       df       MS              Number of obs =     445
+-------------+------------------------------           F(  3,   441) =    4.61
+       Model |  593.815328     3  197.938443           Prob > F      =  0.0034
+    Residual |  18931.8413   441  42.9293453           R-squared     =  0.0304
+-------------+------------------------------           Adj R-squared =  0.0238
+       Total |  19525.6566   444  43.9767041           Root MSE      =   6.552
+
+------------------------------------------------------------------------------
+        re78 |      Coef.   Std. Err.      t    P>|t|     [95% Conf. Interval]
+-------------+----------------------------------------------------------------
+       train |   1.554095   .6426726     2.42   0.016     .2910138    2.817177
+  propensity |  -.9943707   4.496586    -0.22   0.825    -9.831772     7.84303
+          wp |   13.26973   6.838352     1.94   0.053    -.1700793    26.70954
+       _cons |   4.953301   1.847272     2.68   0.008      1.32275    8.583851
+------------------------------------------------------------------------------
+=#
+```
+
+```{julia}
+stata_summarize(jtrain2, [:propensity])
+
+jtrain2.wp = jtrain2.train .* (jtrain2.propensity .-
+                               Statistics.mean(jtrain2.propensity))
+reg_inter = stata_regress(jtrain2; y = :re78, x = [:train, :propensity, :wp]);
+```
+
+Summary statistics match: mean $0.4155319$ (Stata $0.4155321$), SD $0.0934463$
+(Stata $0.0934459$), min $0.1638668$ (Stata $0.1638736$), max $0.6739013$
+(Stata $0.6738951$) — the sixth-digit drift again comes from the probit
+optimiser. In the interacted regression the ATE (`train`) is $1.5540979$ vs
+Stata's $1.554095$, `propensity` $-0.9944404$ (Stata $-0.9943707$), `wp`
+$13.2696839$ (Stata $13.26973$), `_cons` $4.9533285$ (Stata $4.953301$), with
+$R^2 = 0.0304$ and Root MSE $= 6.552$. Because `wp` is centred at the sample
+mean of the propensity score, the `train` coefficient is the estimated ATE.
+
+# Example 18.3 (page 624, fertil2.dta)
+
+Here the "treatment" is `educ7` (at least seven years of schooling) and the
+outcome is `children`. `frsthalf` — born in the first half of the year — is the
+instrument.
+
+```{julia}
+# `electric` and `tv` carry a handful of missing values; the estimation sample
+# is the 4,358 complete cases Stata uses.
+fert = DataFrames.dropmissing(
+    fertil2[:, [:children, :educ7, :educ, :age, :agesq, :evermarr, :urban,
+                :electric, :tv, :frsthalf]])
+DataFrames.nrow(fert)
+```
+
+## OLS
+
+```{julia}
+#=
+use fertil2, clear
+
+reg children educ7 age agesq evermarr urban electric tv
+
+      Source |       SS       df       MS              Number of obs =    4358
+-------------+------------------------------           F(  7,  4350) =  880.03
+       Model |  12607.4006     7  1801.05723           Prob > F      =  0.0000
+    Residual |  8902.63153  4350  2.04658196           R-squared     =  0.5861
+-------------+------------------------------           Adj R-squared =  0.5855
+       Total |  21510.0321  4357  4.93689055           Root MSE      =  1.4306
+
+------------------------------------------------------------------------------
+    children |      Coef.   Std. Err.      t    P>|t|     [95% Conf. Interval]
+-------------+----------------------------------------------------------------
+       educ7 |  -.3935524   .0495534    -7.94   0.000    -.4907024   -.2964025
+         age |   .2719307   .0171033    15.90   0.000     .2383996    .3054618
+       agesq |   -.001896   .0002752    -6.89   0.000    -.0024356   -.0013564
+    evermarr |   .6947417   .0523984    13.26   0.000     .5920142    .7974691
+       urban |  -.2437082   .0460252    -5.30   0.000     -.333941   -.1534753
+    electric |   -.336644   .0754557    -4.46   0.000    -.4845756   -.1887124
+          tv |  -.3259749   .0897716    -3.63   0.000     -.501973   -.1499767
+       _cons |  -3.526605   .2451026   -14.39   0.000    -4.007131   -3.046079
+------------------------------------------------------------------------------
+=#
+```
+
+```{julia}
+ols_18_3 = stata_regress(
+    fert;
+    y = :children,
+    x = [:educ7, :age, :agesq, :evermarr, :urban, :electric, :tv]);
+```
+
+Digit-for-digit reproduction of the published table, including
+$N = 4358$, $F(7,4350) = 880.03$, $R^2 = 0.5861$ and Root MSE $= 1.4306$.
+
+## IV using the raw instrument
+
+```{julia}
+#=
+ivreg children (educ7 =frsthalf ) age agesq evermarr urban electric tv
+
+Instrumental variables (2SLS) regression
+
+      Source |       SS       df       MS              Number of obs =    4358
+-------------+------------------------------           F(  7,  4350) =  829.33
+       Model |  12154.5373     7  1736.36247           Prob > F      =  0.0000
+    Residual |  9355.49483  4350  2.15068847           R-squared     =  0.5651
+-------------+------------------------------           Adj R-squared =  0.5644
+       Total |  21510.0321  4357  4.93689055           Root MSE      =  1.4665
+
+------------------------------------------------------------------------------
+    children |      Coef.   Std. Err.      t    P>|t|     [95% Conf. Interval]
+-------------+----------------------------------------------------------------
+       educ7 |   -1.13068   .6192352    -1.83   0.068    -2.344696    .0833367
+         age |   .2627018     .01916    13.71   0.000     .2251385    .3002651
+       agesq |  -.0019787   .0002905    -6.81   0.000    -.0025483   -.0014091
+    evermarr |   .6167576   .0845468     7.29   0.000     .4510028    .7825123
+       urban |  -.1672413   .0795281    -2.10   0.036    -.3231569   -.0113257
+    electric |  -.2343255   .1154192    -2.03   0.042     -.460606   -.0080451
+          tv |  -.1371643   .1829146    -0.75   0.453    -.4957701    .2214415
+       _cons |   -2.83005   .6350035    -4.46   0.000     -4.07498    -1.58512
+------------------------------------------------------------------------------
+Instrumented:  educ7
+Instruments:   age agesq evermarr urban electric tv frsthalf
+------------------------------------------------------------------------------
+=#
+```
+
+```{julia}
+iv_raw = stata_ivregress_2sls(
+    fert, :children, :educ7 => :frsthalf,
+    [:age, :agesq, :evermarr, :urban, :electric, :tv];
+    robust = false, first = false);
+```
+
+Exact match on every coefficient and standard error (`educ7` $-1.1306797$
+against Stata's $-1.13068$, SE $0.6192352$), plus $R^2 = 0.5651$ and Root MSE
+$= 1.4665$. Instrumenting the treatment dummy nearly triples the estimated
+effect of schooling on fertility, but it is only marginally significant. The
+only display difference is that `stata_ivregress_2sls` reports large-sample
+$z$/Wald statistics where the old `ivreg` reported $t$/$F$.
+
+## Procedure 18.1: the fitted probability as the instrument
+
+```{julia}
+#=
+probit educ7 frsthalf age agesq evermarr urban electric tv, nolog
+
+Probit estimates                                  Number of obs   =       4358
+                                                  LR chi2(7)      =    1130.84
+                                                  Prob > chi2     =     0.0000
+Log likelihood =  -2428.384                       Pseudo R2       =     0.1889
+
+------------------------------------------------------------------------------
+       educ7 |      Coef.   Std. Err.      z    P>|z|     [95% Conf. Interval]
+-------------+----------------------------------------------------------------
+    frsthalf |  -.2206627   .0418563    -5.27   0.000    -.3026995   -.1386259
+         age |  -.0150337   .0174845    -0.86   0.390    -.0493027    .0192354
+       agesq |  -.0007325   .0002897    -2.53   0.011    -.0013003   -.0001647
+    evermarr |  -.2972879   .0486734    -6.11   0.000     -.392686   -.2018898
+       urban |   .2998122   .0432321     6.93   0.000     .2150789    .3845456
+    electric |   .4246668   .0751255     5.65   0.000     .2774235      .57191
+          tv |   .9281707   .0977462     9.50   0.000     .7365915     1.11975
+       _cons |    1.13537   .2440057     4.65   0.000     .6571273    1.613612
+------------------------------------------------------------------------------
+
+predict propensity, p /*procedure 18.1*/
+(3 missing values generated)
+=#
+```
+
+```{julia}
+pscore_18_3 = stata_probit(
+    fert,
+    @formula(educ7 ~ frsthalf + age + agesq + evermarr + urban + electric + tv))
+
+fert.propensity = GLM.predict(pscore_18_3.model);
+```
+
+Coefficients match to five–six digits (`frsthalf` $-0.220663$ vs $-0.2206627$,
+`tv` $0.9281441$ vs $0.9281707$), and $N = 4358$, LR $\chi^2(7) = 1130.84$,
+log-likelihood $-2428.384$, pseudo-$R^2 = 0.1889$ are identical. Once again the
+standard errors are the expected-information versions and differ from Stata's
+observed-information ones by 0.1–2%.
+
+## IV using the propensity score
+
+```{julia}
+#=
+ivreg children (educ7= propensity)  age agesq evermarr urban electric tv
+
+Instrumental variables (2SLS) regression
+
+      Source |       SS       df       MS              Number of obs =    4358
+-------------+------------------------------           F(  7,  4350) =  710.92
+       Model |  10524.2446     7  1503.46351           Prob > F      =  0.0000
+    Residual |  10985.7876  4350  2.52546841           R-squared     =  0.4893
+-------------+------------------------------           Adj R-squared =  0.4884
+       Total |  21510.0321  4357  4.93689055           Root MSE      =  1.5892
+
+------------------------------------------------------------------------------
+    children |      Coef.   Std. Err.      t    P>|t|     [95% Conf. Interval]
+-------------+----------------------------------------------------------------
+       educ7 |  -1.974509    .331779    -5.95   0.000    -2.624964   -1.324053
+         age |    .252137   .0194358    12.97   0.000     .2140329     .290241
+       agesq |  -.0020734   .0003079    -6.73   0.000    -.0026772   -.0014697
+    evermarr |    .527485   .0677212     7.79   0.000     .3947169    .6602531
+       urban |  -.0797056   .0613673    -1.30   0.194    -.2000168    .0406056
+    electric |  -.1171961   .0953328    -1.23   0.219    -.3040969    .0697047
+          tv |   .0789773   .1302613     0.61   0.544    -.1764013    .3343558
+       _cons |  -2.032667   .4119708    -4.93   0.000    -2.840339   -1.224994
+------------------------------------------------------------------------------
+Instrumented:  educ7
+Instruments:   age agesq evermarr urban electric tv propensity
+------------------------------------------------------------------------------
+=#
+```
+
+```{julia}
+iv_ps = stata_ivregress_2sls(
+    fert, :children, :educ7 => :propensity,
+    [:age, :agesq, :evermarr, :urban, :electric, :tv];
+    robust = false, first = false);
+```
+
+`educ7` $=-1.9745012$ against Stata's $-1.974509$, SE $0.3317810$ vs
+$0.331779$; every other coefficient and standard error matches to six digits,
+as do $R^2 = 0.4893$ and Root MSE $= 1.5892$. Using the fitted probability as
+the single instrument (Procedure 18.1) roughly halves the standard error
+relative to using `frsthalf` directly.
+
+## The same IV with robust standard errors
+
+```{julia}
+#=
+ivreg children (educ7= propensity)  age agesq evermarr urban electric tv, robust
+
+IV (2SLS) regression with robust standard errors       Number of obs =    4358
+                                                       F(  7,  4350) =  678.11
+                                                       Prob > F      =  0.0000
+                                                       R-squared     =  0.4893
+                                                       Root MSE      =  1.5892
+
+------------------------------------------------------------------------------
+             |               Robust
+    children |      Coef.   Std. Err.      t    P>|t|     [95% Conf. Interval]
+-------------+----------------------------------------------------------------
+       educ7 |  -1.974509   .3135566    -6.30   0.000    -2.589239   -1.359778
+         age |    .252137   .0210049    12.00   0.000     .2109566    .2933173
+       agesq |  -.0020734   .0003816    -5.43   0.000    -.0028215   -.0013254
+    evermarr |    .527485   .0695789     7.58   0.000      .391075     .663895
+       urban |  -.0797056   .0605259    -1.32   0.188    -.1983672     .038956
+    electric |  -.1171961   .0891859    -1.31   0.189    -.2920458    .0576536
+          tv |   .0789773   .1084846     0.73   0.467    -.1337078    .2916623
+       _cons |  -2.032667   .3642986    -5.58   0.000    -2.746877   -1.318456
+------------------------------------------------------------------------------
+Instrumented:  educ7
+Instruments:   age agesq evermarr urban electric tv propensity
+------------------------------------------------------------------------------
+=#
+```
+
+```{julia}
+iv_ps_rob = stata_ivregress_2sls(
+    fert, :children, :educ7 => :propensity,
+    [:age, :agesq, :evermarr, :urban, :electric, :tv];
+    robust = true, first = false);
+```
+
+The robust standard errors reproduce Stata to six digits as well
+(`educ7` $0.3135591$ vs $0.3135566$; `age` $0.0210049$ in both; `_cons`
+$0.3642998$ vs $0.3642986$). Note that these standard errors — like Stata's —
+do *not* correct for the fact that `propensity` is a generated instrument;
+Wooldridge points out that no correction is needed here because the propensity
+score enters only as an instrument.
+
+# Comparison table: Stata vs Julia
+
+```{julia}
+b(m)      = StatsBase.coef(m)
+nms(m)    = string.(StatsBase.coefnames(m))
+pick(m,s) = b(m)[findfirst(==(s), nms(m))]
+se(m,s)   = sqrt(LinearAlgebra.diag(StatsBase.vcov(m))[findfirst(==(s), nms(m))])
+
+comparison = DataFrames.DataFrame(
+    example = ["18.2 probit","18.2 probit","18.2 probit",
+               "18.2 reg on p","18.2 reg on p","18.2 reg on p",
+               "18.2 reg on x","18.2 reg on x",
+               "18.2 simple","18.2 simple",
+               "18.2 sum p","18.2 sum p",
+               "18.2 interacted","18.2 interacted","18.2 interacted",
+               "18.3 OLS","18.3 OLS","18.3 OLS",
+               "18.3 IV frsthalf","18.3 IV frsthalf","18.3 IV frsthalf",
+               "18.3 probit","18.3 probit",
+               "18.3 IV pscore","18.3 IV pscore","18.3 IV pscore",
+               "18.3 IV pscore robust","18.3 IV pscore robust"],
+    quantity = ["nodegree","hisp","log-lik",
+                "train","train SE","propensity",
+                "train","train SE",
+                "train","_cons",
+                "mean p","sd p",
+                "train","wp","_cons",
+                "educ7","evermarr","R-squared",
+                "educ7","educ7 SE","_cons",
+                "frsthalf","log-lik",
+                "educ7","educ7 SE","tv",
+                "educ7 SE","age SE"],
+    stata = [-0.44195, -0.5004545, -294.06748,
+             1.625741, 0.6436153, 4.74316,
+             1.625166, 0.6399454,
+             1.794343, 4.554802,
+             0.4155321, 0.0934459,
+             1.554095, 13.26973, 4.953301,
+             -0.3935524, 0.6947417, 0.5861,
+             -1.13068, 0.6192352, -2.83005,
+             -0.2206627, -2428.384,
+             -1.974509, 0.331779, 0.0789773,
+             0.3135566, 0.0210049],
+    julia = [pscore_18_2.β[5], pscore_18_2.β[8], pscore_18_2.ll,
+             pick(reg_pscore,"train"), se(reg_pscore,"train"),
+             pick(reg_pscore,"propensity"),
+             pick(reg_covs,"train"), se(reg_covs,"train"),
+             pick(reg_simple,"train"), pick(reg_simple,"(Intercept)"),
+             Statistics.mean(jtrain2.propensity),
+             Statistics.std(jtrain2.propensity),
+             pick(reg_inter,"train"), pick(reg_inter,"wp"),
+             pick(reg_inter,"(Intercept)"),
+             pick(ols_18_3,"educ7"), pick(ols_18_3,"evermarr"),
+             StatsBase.r2(ols_18_3),
+             pick(iv_raw.iv,"educ7"), se(iv_raw.iv,"educ7"),
+             pick(iv_raw.iv,"(Intercept)"),
+             pscore_18_3.β[1], pscore_18_3.ll,
+             pick(iv_ps.iv,"educ7"), se(iv_ps.iv,"educ7"), pick(iv_ps.iv,"tv"),
+             se(iv_ps_rob.iv,"educ7"), se(iv_ps_rob.iv,"age")])
+comparison.match = [abs(s - j) <= 1e-3 * max(1.0e-3, abs(s)) for (s, j) in
+                    zip(comparison.stata, comparison.julia)]
+comparison
+```
+
+Every point estimate agrees with the published Stata output to at least four
+significant digits, and every OLS/2SLS standard error (classical and robust)
+agrees to at least five. The single systematic difference in this chapter is in
+the **probit standard errors**, where `StatEcon`/`GLM.jl` report the
+expected-information variance and Stata reports the observed-information one.

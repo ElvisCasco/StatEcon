@@ -1,0 +1,439 @@
+---
+title: "Wooldridge EACSPD -- Ch. 17: Sample selection, attrition, and stratified sampling (via StatEcon)"
+Authors:
+- Jeffrey M. Wooldridge
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+Stata examples reproduced from [UCLA OARC — EACSPD Chapter 17](https://stats.oarc.ucla.edu/stata/examples/eacspd/econometric-analysis-of-cross-section-and-panel-data-by-jeffrey-m-wooldridgechapter-17-sample-selection-attrition-and-stratified-sampling/).
+
+Source text: Wooldridge, J. M., *Econometric Analysis of Cross Section and Panel
+Data*, MIT Press — Chapter 17, "Sample Selection, Attrition, and Stratified
+Sampling". The data files are those shipped with the book's own Stata
+distribution and are bundled with `StatEcon`, so the numbers below are directly
+comparable with the published Stata output.
+
+# Julia setup
+
+```{julia}
+using StatEcon
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+
+# Artifacts this notebook produces go to `output/`.
+const OUT = "output"
+isdir(OUT) || mkpath(OUT)
+outpath(f) = joinpath(OUT, f)
+```
+
+The chapter's estimators map onto `StatEcon` as follows:
+
+* `stata_regress`            — `regress y x…`
+* `stata_probit`             — `probit d z…`
+* `stata_heckman_twostep`    — `heckman y x…, select(d = z…) twostep`
+* `stata_heckman`            — `heckman y x…, select(d = z…)` (FIML, shown for
+  comparison; the UCLA page only runs the two-step version)
+* `stata_ivregress_2sls`     — `ivreg y (x1 = z…) x2…`
+
+```{julia}
+mroz = DataFrames.DataFrame(dataset("mroz"))   # 753 x 22
+size(mroz)
+```
+
+# Example 17.6 (page 565, mroz.dta)
+
+## OLS on the selected sample
+
+```{julia}
+#=
+use mroz, clear
+
+reg lwage educ exper expersq
+
+      Source |       SS       df       MS              Number of obs =     428
+-------------+------------------------------           F(  3,   424) =   26.29
+       Model |  35.0222967     3  11.6740989           Prob > F      =  0.0000
+    Residual |  188.305144   424  .444115906           R-squared     =  0.1568
+-------------+------------------------------           Adj R-squared =  0.1509
+       Total |  223.327441   427  .523015084           Root MSE      =  .66642
+
+------------------------------------------------------------------------------
+       lwage |      Coef.   Std. Err.      t    P>|t|     [95% Conf. Interval]
+-------------+----------------------------------------------------------------
+        educ |   .1074896   .0141465     7.60   0.000     .0796837    .1352956
+       exper |   .0415665   .0131752     3.15   0.002     .0156697    .0674633
+     expersq |  -.0008112   .0003932    -2.06   0.040    -.0015841   -.0000382
+       _cons |  -.5220406   .1986321    -2.63   0.009    -.9124667   -.1316144
+------------------------------------------------------------------------------
+=#
+```
+
+```{julia}
+ols_17_6 = stata_regress(mroz; y = :lwage, x = [:educ, :exper, :expersq]);
+```
+
+`lwage` is missing for the 325 women out of the labour force, so `stata_regress`
+estimates on the same 428 selected observations Stata uses. Every coefficient,
+standard error, $t$, $R^2 = 0.1568$ and Root MSE $=0.66642$ reproduce the
+published table exactly.
+
+## Heckman two-step, short wage equation
+
+```{julia}
+#=
+heckman lwage educ exper expersq, select(inlf=nwifeinc educ exper expersq age kidslt6 kidsge6) twostep
+
+Heckman selection model -- two-step estimates   Number of obs      =       753
+(regression model with sample selection)        Censored obs       =       325
+                                                Uncensored obs     =       428
+
+                                                Wald chi2(6)       =    180.10
+                                                Prob > chi2        =    0.0000
+
+------------------------------------------------------------------------------
+             |      Coef.   Std. Err.      z    P>|z|     [95% Conf. Interval]
+-------------+----------------------------------------------------------------
+lwage        |
+        educ |   .1090655    .015523     7.03   0.000     .0786411      .13949
+       exper |   .0438873   .0162611     2.70   0.007     .0120163    .0757584
+     expersq |  -.0008591   .0004389    -1.96   0.050    -.0017194    1.15e-06
+       _cons |  -.5781032   .3050062    -1.90   0.058    -1.175904     .019698
+-------------+----------------------------------------------------------------
+inlf         |
+    nwifeinc |  -.0120237   .0048398    -2.48   0.013    -.0215096   -.0025378
+        educ |   .1309047   .0252542     5.18   0.000     .0814074     .180402
+       exper |   .1233476   .0187164     6.59   0.000     .0866641    .1600311
+     expersq |  -.0018871      .0006    -3.15   0.002     -.003063   -.0007111
+         age |  -.0528527   .0084772    -6.23   0.000    -.0694678   -.0362376
+     kidslt6 |  -.8683285   .1185223    -7.33   0.000    -1.100628    -.636029
+     kidsge6 |    .036005   .0434768     0.83   0.408     -.049208    .1212179
+       _cons |   .2700768    .508593     0.53   0.595    -.7267473    1.266901
+-------------+----------------------------------------------------------------
+mills        |
+      lambda |   .0322619   .1336246     0.24   0.809    -.2296376    .2941613
+-------------+----------------------------------------------------------------
+         rho |    0.04861
+       sigma |  .66362875
+      lambda |  .03226186   .1336246
+------------------------------------------------------------------------------
+=#
+```
+
+```{julia}
+heck1 = stata_heckman_twostep(
+    mroz,
+    @formula(lwage ~ educ + exper + expersq),
+    @formula(inlf  ~ nwifeinc + educ + exper + expersq + age + kidslt6 + kidsge6);
+    depvar_y = "lwage", depvar_d = "inlf");
+```
+
+The wage block reproduces Stata to seven digits: `educ` 0.1090655 (SE 0.015523),
+`exper` 0.0438873 (0.0162611), `expersq` −0.0008591 (0.0004389),
+`_cons` −0.5781023 vs Stata's −0.5781032. The inverse-Mills coefficient is
+0.0322614 (Stata 0.0322619) with SE 0.1336255 (Stata 0.1336246), and
+$\hat\rho = 0.04861$, $\hat\sigma = 0.66362875$ — identical to the published
+values. As Wooldridge notes, the selection term is completely insignificant
+($z = 0.24$), so OLS on the selected sample is fine here.
+
+Two cosmetic differences: (i) the *selection*-block standard errors differ in the
+third significant digit (e.g. `nwifeinc` 0.0049392 here vs 0.0048398 in Stata).
+`StatEcon`'s probit variance is the expected-information (IRLS) matrix
+$(Z'WZ)^{-1}$ used by `GLM.jl`, whereas Stata's `probit` reports the
+observed-information inverse; the point estimates agree to six digits.
+(ii) The header `Wald chi2` is computed over the wage block only (3 d.f.);
+old Stata reported `Wald chi2(6) = 180.10` for this model, which is the joint
+test including the Mills term under its own d.f. convention.
+
+## Heckman two-step, wage equation with all selection regressors
+
+```{julia}
+#=
+heckman lwage educ exper expersq nwifeinc age kidslt6 kidsge6, select(inlf=nwifeinc educ exper ///
+	expersq age kidslt6 kidsge6) twostep mills(lambda)
+
+Heckman selection model -- two-step estimates   Number of obs      =       753
+(regression model with sample selection)        Censored obs       =       325
+                                                Uncensored obs     =       428
+
+                                                Wald chi2(14)      =    231.73
+                                                Prob > chi2        =    0.0000
+
+------------------------------------------------------------------------------
+             |      Coef.   Std. Err.      z    P>|z|     [95% Conf. Interval]
+-------------+----------------------------------------------------------------
+lwage        |
+        educ |   .1187171   .0340507     3.49   0.000      .051979    .1854553
+       exper |   .0598358    .033673     1.78   0.076    -.0061621    .1258336
+     expersq |  -.0010523   .0006381    -1.65   0.099     -.002303    .0001984
+    nwifeinc |   .0038434   .0044919     0.86   0.392    -.0049607    .0126474
+         age |   -.011158   .0134792    -0.83   0.408    -.0375767    .0152606
+     kidslt6 |  -.1880451   .2308275    -0.81   0.415    -.6404586    .2643685
+     kidsge6 |  -.0122255   .0296063    -0.41   0.680    -.0702527    .0458018
+       _cons |  -.5602852   .4587672    -1.22   0.222    -1.459452    .3388819
+-------------+----------------------------------------------------------------
+inlf         |
+    nwifeinc |  -.0120237   .0048398    -2.48   0.013    -.0215096   -.0025378
+        educ |   .1309047   .0252542     5.18   0.000     .0814074     .180402
+       exper |   .1233476   .0187164     6.59   0.000     .0866641    .1600311
+     expersq |  -.0018871      .0006    -3.15   0.002     -.003063   -.0007111
+         age |  -.0528527   .0084772    -6.23   0.000    -.0694678   -.0362376
+     kidslt6 |  -.8683285   .1185223    -7.33   0.000    -1.100628    -.636029
+     kidsge6 |    .036005   .0434768     0.83   0.408     -.049208    .1212179
+       _cons |   .2700768    .508593     0.53   0.595    -.7267473    1.266901
+-------------+----------------------------------------------------------------
+mills        |
+      lambda |   .2884635   .4635617     0.62   0.534    -.6201008    1.197028
+-------------+----------------------------------------------------------------
+         rho |    0.41830
+       sigma |  .68961378
+      lambda |  .28846351   .4635617
+------------------------------------------------------------------------------
+=#
+```
+
+```{julia}
+heck2 = stata_heckman_twostep(
+    mroz,
+    @formula(lwage ~ educ + exper + expersq + nwifeinc + age + kidslt6 + kidsge6),
+    @formula(inlf  ~ nwifeinc + educ + exper + expersq + age + kidslt6 + kidsge6);
+    depvar_y = "lwage", depvar_d = "inlf");
+```
+
+Once every selection regressor is also put in the wage equation, identification
+rests purely on the nonlinearity of $\lambda(\cdot)$. All eight wage
+coefficients match the published table to six digits (`educ` 0.1187169 vs
+0.1187171, SE 0.0340507 in both), the Mills coefficient is 0.2884618
+(Stata 0.2884635) with SE 0.4635713 (Stata 0.4635617), and
+$\hat\rho = 0.41829$ / $\hat\sigma = 0.6896135$ against Stata's 0.41830 /
+0.68961378. Standard errors have roughly tripled, which is the point of the
+example.
+
+## Why: the Mills ratio is nearly a linear function of the regressors
+
+```{julia}
+#=
+reg lambda nwifeinc educ exper expersq age kidslt6 kidsge6 if inlf
+
+      Source |       SS       df       MS              Number of obs =     428
+-------------+------------------------------           F(  7,   420) = 1519.49
+       Model |  51.4583785     7  7.35119693           Prob > F      =  0.0000
+    Residual |   2.0319395   420  .004837951           R-squared     =  0.9620
+-------------+------------------------------           Adj R-squared =  0.9614
+       Total |   53.490318   427  .125270066           Root MSE      =  .06956
+
+------------------------------------------------------------------------------
+      lambda |      Coef.   Std. Err.      t    P>|t|     [95% Conf. Interval]
+-------------+----------------------------------------------------------------
+    nwifeinc |   .0064163   .0003463    18.53   0.000     .0057355     .007097
+        educ |  -.0652865   .0015751   -41.45   0.000    -.0683826   -.0621904
+       exper |  -.0663031   .0013951   -47.53   0.000    -.0690454   -.0635608
+     expersq |   .0010572   .0000419    25.22   0.000     .0009748    .0011396
+         age |   .0264769   .0005649    46.87   0.000     .0253666    .0275873
+     kidslt6 |    .458195   .0092439    49.57   0.000     .4400248    .4763651
+     kidsge6 |  -.0187996   .0029099    -6.46   0.000    -.0245193   -.0130799
+       _cons |   .7012603   .0332077    21.12   0.000     .6359863    .7665342
+------------------------------------------------------------------------------
+=#
+```
+
+```{julia}
+# `mills(lambda)` saves the inverse Mills ratio from the first-stage probit.
+probit_sel = stata_probit(
+    mroz,
+    @formula(inlf ~ nwifeinc + educ + exper + expersq + age + kidslt6 + kidsge6);
+    quiet = true)
+
+xb_sel       = probit_sel.X_glm * probit_sel.β_glm
+mroz.lambda  = Distributions.pdf.(Normal(), xb_sel) ./
+               Distributions.cdf.(Normal(), xb_sel)
+
+aux = stata_regress(mroz[mroz.inlf .== 1, :];
+                    y = :lambda,
+                    x = [:nwifeinc, :educ, :exper, :expersq,
+                         :age, :kidslt6, :kidsge6]);
+```
+
+$R^2 = 0.9620$, Root MSE $= 0.069555$ (Stata `.06956`), $F(7,420) = 1519.50$
+(Stata 1519.49) — the inverse Mills ratio is 96% explained by a *linear*
+function of the selection regressors on the selected subsample, which is why
+the second Heckit above is so imprecise. Every slope matches to six digits.
+
+# Example 17.7 (page 568, mroz.dta)
+
+## Selection probit with exclusion restrictions
+
+```{julia}
+#=
+use mroz, clear
+
+probit inlf nwifeinc motheduc fatheduc huseduc exper expersq age kidslt6 kidsge6
+
+Probit estimates                                  Number of obs   =        753
+                                                  LR chi2(9)      =     207.10
+                                                  Prob > chi2     =     0.0000
+Log likelihood = -411.32238                       Pseudo R2       =     0.2011
+
+------------------------------------------------------------------------------
+        inlf |      Coef.   Std. Err.      z    P>|z|     [95% Conf. Interval]
+-------------+----------------------------------------------------------------
+    nwifeinc |  -.0074294   .0048787    -1.52   0.128    -.0169915    .0021327
+    motheduc |   .0295321   .0185718     1.59   0.112     -.006868    .0659322
+    fatheduc |   .0133487   .0178491     0.75   0.455    -.0216349    .0483324
+     huseduc |   .0161391    .019595     0.82   0.410    -.0222664    .0545446
+       exper |   .1285092   .0185226     6.94   0.000     .0922056    .1648129
+     expersq |  -.0019474   .0005955    -3.27   0.001    -.0031146   -.0007803
+         age |  -.0527657   .0085423    -6.18   0.000    -.0695082   -.0360231
+     kidslt6 |  -.8149255   .1160833    -7.02   0.000    -1.042445   -.5874063
+     kidsge6 |   .0241511   .0432253     0.56   0.576     -.060569    .1088712
+       _cons |   1.146672   .4932706     2.32   0.020     .1798798    2.113465
+------------------------------------------------------------------------------
+=#
+```
+
+```{julia}
+probit_17_7 = stata_probit(
+    mroz,
+    @formula(inlf ~ nwifeinc + motheduc + fatheduc + huseduc + exper +
+                    expersq + age + kidslt6 + kidsge6));
+```
+
+All ten coefficients match the published table to six significant digits, as do
+$N = 753$, LR $\chi^2(9) = 207.10$, log-likelihood $-411.3224$ and
+pseudo-$R^2 = 0.2011$. The standard errors are 1–3% larger than Stata's
+(`nwifeinc` 0.0050157 vs 0.0048787) because `StatEcon`'s probit variance is the
+expected-information matrix from `GLM.jl`'s IRLS, while Stata's `probit` reports
+the observed-information inverse. That is a genuine, documented difference in
+`vce` convention, not a fitting error — the log-likelihood is identical.
+
+## IV with the Mills ratio added (Procedure 17.2)
+
+```{julia}
+#=
+predict xb, xb
+gen lambda = normden(xb)/norm(xb)
+ivreg lwage (educ =nwifeinc motheduc fatheduc huseduc age kidslt6 kidsge6 ) exper expersq lambda
+
+Instrumental variables (2SLS) regression
+
+      Source |       SS       df       MS              Number of obs =     428
+-------------+------------------------------           F(  4,   423) =    9.44
+       Model |  34.2001949     4  8.55004873           Prob > F      =  0.0000
+    Residual |  189.127246   423  .447109329           R-squared     =  0.1531
+-------------+------------------------------           Adj R-squared =  0.1451
+       Total |  223.327441   427  .523015084           Root MSE      =  .66866
+
+------------------------------------------------------------------------------
+       lwage |      Coef.   Std. Err.      t    P>|t|     [95% Conf. Interval]
+-------------+----------------------------------------------------------------
+        educ |   .0877631   .0214236     4.10   0.000     .0456531    .1298732
+       exper |   .0457425   .0165895     2.76   0.006     .0131345    .0783505
+     expersq |  -.0009128   .0004467    -2.04   0.042    -.0017909   -.0000347
+      lambda |   .0404355   .1334279     0.30   0.762    -.2218287    .3026997
+       _cons |  -.3249134   .3334547    -0.97   0.330    -.9803479    .3305212
+------------------------------------------------------------------------------
+Instrumented:  educ
+Instruments:   exper expersq lambda nwifeinc motheduc fatheduc huseduc age
+               kidslt6 kidsge6
+------------------------------------------------------------------------------
+=#
+```
+
+```{julia}
+# predict xb, xb   /   gen lambda = normden(xb)/norm(xb)
+xb_177        = probit_17_7.X_glm * probit_17_7.β_glm
+mroz.lambda17 = Distributions.pdf.(Normal(), xb_177) ./
+                Distributions.cdf.(Normal(), xb_177)
+
+selected = mroz[.!ismissing.(mroz.lwage), :]
+
+iv_17_7 = stata_ivregress_2sls(
+    selected, :lwage,
+    :educ => [:nwifeinc, :motheduc, :fatheduc, :huseduc, :age, :kidslt6, :kidsge6],
+    [:exper, :expersq, :lambda17];
+    robust = false, first = false);
+```
+
+The 2SLS estimates reproduce the published table exactly: `educ` 0.0877632
+(Stata 0.0877631) with SE 0.0214236, `exper` 0.0457425 (0.0165895),
+`expersq` −0.0009128 (0.0004467), `lambda` 0.0404361 (Stata 0.0404355) with SE
+0.1334279, `_cons` −0.3249143 (Stata −0.3249134), $N = 428$, $R^2 = 0.1531$,
+Root MSE 0.6687 (Stata .66866).
+
+The return to schooling falls from the OLS 0.1075 to 0.0878 once `educ` is
+instrumented, and the selection term remains insignificant, so — as Wooldridge
+concludes — the endogeneity of schooling, not sample selection, is what matters
+in these data.
+
+The only presentational difference is that `stata_ivregress_2sls` reports the
+large-sample $z$ statistic and a `Wald chi2` header, whereas Stata's older
+`ivreg` reports $t$ with $F(4,423)$. The coefficients and standard errors are
+identical; only the reference distribution for the p-values differs.
+
+# Comparison table: Stata vs Julia
+
+```{julia}
+b_ols  = StatsBase.coef(ols_17_6)
+b_aux  = StatsBase.coef(aux)
+b_pr   = probit_17_7.β                # Stata display order, _cons last
+b_iv   = StatsBase.coef(iv_17_7.iv)
+nm_iv  = string.(StatsBase.coefnames(iv_17_7.iv))
+gv(nms, b, s) = b[findfirst(==(s), nms)]
+
+comparison = DataFrames.DataFrame(
+    example = ["17.6 OLS","17.6 OLS","17.6 OLS","17.6 OLS",
+               "17.6 Heckit-1","17.6 Heckit-1","17.6 Heckit-1","17.6 Heckit-1",
+               "17.6 Heckit-1","17.6 Heckit-1",
+               "17.6 Heckit-2","17.6 Heckit-2","17.6 Heckit-2","17.6 Heckit-2",
+               "17.6 aux reg","17.6 aux reg",
+               "17.7 probit","17.7 probit","17.7 probit",
+               "17.7 ivreg","17.7 ivreg","17.7 ivreg","17.7 ivreg"],
+    quantity = ["educ","exper","expersq","_cons",
+                "educ","exper","expersq","lambda","rho","sigma",
+                "educ","nwifeinc","lambda","rho",
+                "educ","R-squared",
+                "exper","kidslt6","log-lik",
+                "educ","lambda","_cons","R-squared"],
+    stata = [0.1074896, 0.0415665, -0.0008112, -0.5220406,
+             0.1090655, 0.0438873, -0.0008591, 0.0322619, 0.04861, 0.66362875,
+             0.1187171, 0.0038434, 0.2884635, 0.41830,
+             -0.0652865, 0.9620,
+             0.1285092, -0.8149255, -411.32238,
+             0.0877631, 0.0404355, -0.3249134, 0.1531],
+    julia = [b_ols[2], b_ols[3], b_ols[4], b_ols[1],
+             heck1.β_outcome[1], heck1.β_outcome[2], heck1.β_outcome[3],
+             heck1.β_lambda, heck1.rho, heck1.sigma,
+             heck2.β_outcome[1], heck2.β_outcome[4], heck2.β_lambda, heck2.rho,
+             b_aux[3], StatsBase.r2(aux),
+             b_pr[5], b_pr[8], probit_17_7.ll,
+             gv(nm_iv, b_iv, "educ"), gv(nm_iv, b_iv, "lambda17"),
+             gv(nm_iv, b_iv, "(Intercept)"), StatsBase.r2(iv_17_7.iv)])
+comparison.match = [abs(s - j) <= 1e-3 * max(1.0e-3, abs(s)) for (s, j) in
+                    zip(comparison.stata, comparison.julia)]
+comparison
+```
+
+Every reported coefficient agrees with Stata to at least four significant
+digits. The only systematic disagreements in this chapter are in *standard
+errors of probit-based blocks* (the selection equation of `heckman, twostep`
+and the standalone `probit` of Example 17.7), which stem from
+expected- vs observed-information variance estimators.

@@ -1,0 +1,402 @@
+---
+title: "Wooldridge EACSPD -- Ch. 6: Additional single-equation topics (via StatEcon)"
+Authors:
+- Jeffrey M. Wooldridge
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+**Source.** Stata examples reproduced from
+[UCLA OARC — EACSPD Chapter 6](https://stats.oarc.ucla.edu/stata/examples/eacspd/econometric-analysis-of-cross-section-and-panel-data-by-jeffrey-m-wooldridgechapter-6-additional-single-equation-topics/).
+
+**Book.** Wooldridge, J. M., *Econometric Analysis of Cross Section and Panel Data*,
+MIT Press. Chapter 6: *Additional Single-Equation Topics*.
+
+# Julia setup
+
+```{julia}
+using StatEcon
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+
+# Artifacts this notebook produces go to `output/`.
+const OUT = "output"
+isdir(OUT) || mkpath(OUT)
+outpath(f) = joinpath(OUT, f)
+```
+
+```{julia}
+mroz   = DataFrames.DataFrame(dataset("mroz"))     # 753 x 22
+card   = DataFrames.DataFrame(dataset("card"))     # 3010 x 34
+nls80  = DataFrames.DataFrame(dataset("nls80"))    # 935 x 17
+injury = DataFrames.DataFrame(dataset("injury"))   # 7150 x 30
+size(mroz), size(card), size(nls80), size(injury)
+```
+
+Stata's `predict r, res` after a `regress` — residuals aligned to the rows of
+the original data frame, `missing` wherever the fit dropped the observation.
+
+```{julia}
+predict_res(m, df, y) = df[!, y] .- FixedEffectModels.predict(m, df)
+```
+
+# Example 6.1 on page 120 (mroz.dta) — the control-function / Hausman test
+
+```{julia}
+#=
+use mroz, clear
+
+reg educ exper expersq motheduc fatheduc huseduc if lwage ~=.
+=#
+mroz_w = mroz[.!ismissing.(mroz.lwage), :]   # the "if lwage ~=." sample, N = 428
+
+fs61 = stata_regress(mroz_w; y = :educ,
+                     x = [:exper, :expersq, :motheduc, :fatheduc, :huseduc])
+```
+
+```{julia}
+#=
+predict resids, res
+reg lwage exper expersq educ resids
+=#
+mroz_w.resids = predict_res(fs61, mroz_w, :educ)
+
+cf61 = stata_regress(mroz_w; y = :lwage, x = [:exper, :expersq, :educ, :resids])
+```
+
+The first stage reproduces exactly, and the control-function regression matches
+the published table digit for digit: `educ = .0803918 (.0216362)` — numerically
+the 2SLS estimate of Example 5.3 — with the endogeneity term
+`resids = .047189 (.0285519)`, `t = 1.65`, `p = 0.099`. Marginal evidence of
+endogeneity of schooling, exactly as Stata reports.
+
+# Example 6.2 on page 121 (card.dta) — interaction with an endogenous regressor
+
+```{julia}
+#=
+use card, clear
+gen black_educ=black*educ
+reg lwage educ black_educ black exper expersq smsa smsa66 south reg661 reg662 reg663 reg664 reg665 ///
+	reg666 reg667 reg668
+=#
+card.black_educ   = card.black .* card.educ
+card.black_nearc4 = card.black .* card.nearc4
+
+ols62 = stata_regress(card; y = :lwage,
+    x = [:educ, :black_educ, :black, :exper, :expersq, :smsa, :smsa66, :south,
+         :reg661, :reg662, :reg663, :reg664, :reg665, :reg666, :reg667, :reg668])
+```
+
+```{julia}
+#=
+gen black_nearc4 = black*nearc4
+reg educ exper expersq black smsa smsa66 south reg661 reg662 reg663 reg664 reg665 reg666 reg667 ///
+      reg668 nearc4 black_nearc4
+=#
+fs62a = stata_regress(card; y = :educ,
+    x = [:exper, :expersq, :black, :smsa, :smsa66, :south,
+         :reg661, :reg662, :reg663, :reg664, :reg665, :reg666, :reg667, :reg668,
+         :nearc4, :black_nearc4])
+card.er = predict_res(fs62a, card, :educ)
+```
+
+```{julia}
+#=
+predict er, res
+reg black_educ exper expersq black smsa smsa66 south reg661 reg662 reg663 reg664 reg665 reg666 reg667 ///
+	reg668 nearc4 black_nearc4
+=#
+fs62b = stata_regress(card; y = :black_educ,
+    x = [:exper, :expersq, :black, :smsa, :smsa66, :south,
+         :reg661, :reg662, :reg663, :reg664, :reg665, :reg666, :reg667, :reg668,
+         :nearc4, :black_nearc4])
+card.br = predict_res(fs62b, card, :black_educ)
+```
+
+```{julia}
+#=
+predict br, res
+reg lwage educ black_educ black exper expersq smsa smsa66 south reg661 reg662 reg663 reg664 reg665 ///
+	reg666 reg667 reg668 er br
+=#
+cf62 = stata_regress(card; y = :lwage,
+    x = [:educ, :black_educ, :black, :exper, :expersq, :smsa, :smsa66, :south,
+         :reg661, :reg662, :reg663, :reg664, :reg665, :reg666, :reg667, :reg668,
+         :er, :br])
+```
+
+```{julia}
+#=
+test er br
+=#
+stata_test(cf62, ["er", "br"])
+```
+
+```{julia}
+#=
+ivreg lwage (educ black_educ = nearc4 black_nearc4 ) black exper expersq smsa smsa66 south reg661 ///
+	reg662 reg663 reg664 reg665 reg666 reg667 reg668
+=#
+iv62 = stata_ivregress_2sls(card, :lwage,
+    [:educ, :black_educ] => [:nearc4, :black_nearc4],
+    [:black, :exper, :expersq, :smsa, :smsa66, :south,
+     :reg661, :reg662, :reg663, :reg664, :reg665, :reg666, :reg667, :reg668];
+    robust = false, first = false)
+```
+
+All five regressions reproduce the published tables exactly. Highlights: OLS
+gives `educ = .0707788 (.0037548)` and `black_educ = .0178595 (.006271)`; the
+control-function regression and 2SLS give the *same* point estimates
+`educ = .1273557` and `black_educ = .0109036` (as they must), and the joint test
+of the two control functions gives `F(2, 2991) = 0.54`, `Prob > F = 0.5814` —
+no evidence of endogeneity. The only difference between the two IV routes is the
+standard errors: the control-function SEs are the (invalid) OLS ones
+(`.0547317`) while 2SLS reports the correct ones (`.0569582`) — both match
+Stata.
+
+# Example 6.3 on page 123 (mroz.dta) — overidentification tests
+
+The UCLA page uses `ivreg2`, whose default is the **asymptotic** variance
+(divide by `N`, not `N-K`) and *z* statistics. `stata_ivregress_2sls` applies
+the small-sample correction, so its SEs are `sqrt(N/(N-K))` times `ivreg2`'s.
+Both are shown below.
+
+```{julia}
+#=
+ivreg2 lwage  exper expersq  (educ= motheduc fatheduc huseduc)
+=#
+iv63 = stata_ivregress_2sls(mroz, :lwage,
+    :educ => [:motheduc, :fatheduc, :huseduc], [:exper, :expersq];
+    robust = false, first = false)
+```
+
+```{julia}
+# `ivreg2`'s asymptotic (no small-sample-corrected) standard errors:
+# multiply the small-sample SEs by sqrt((N-K)/N).
+d63 = DataFrames.dropmissing(mroz[:, [:lwage, :educ, :exper, :expersq,
+                                      :motheduc, :fatheduc, :huseduc]])
+n63 = DataFrames.nrow(d63)
+X63 = hcat(ones(n63), Float64.(d63.educ), Float64.(d63.exper), Float64.(d63.expersq))
+Z63 = hcat(ones(n63), Float64.(d63.exper), Float64.(d63.expersq),
+           Float64.(d63.motheduc), Float64.(d63.fatheduc), Float64.(d63.huseduc))
+y63 = Float64.(d63.lwage)
+Pz63 = Z63 * ((Z63' * Z63) \ Z63')
+b63  = (X63' * Pz63 * X63) \ (X63' * Pz63 * y63)
+u63  = y63 .- X63 * b63
+V63  = ((u63' * u63) / n63) * LinearAlgebra.inv(X63' * Pz63 * X63)
+se63 = sqrt.(LinearAlgebra.diag(V63))
+
+println("ivreg2-style (asymptotic) coefficients and standard errors")
+for (nm, b, s) in zip(["_cons", "educ", "exper", "expersq"], b63, se63)
+    Printf.@printf("  %-8s %12.7f %12.7f\n", nm, b, s)
+end
+```
+
+```{julia}
+#=
+Sargan statistic (overidentification test of all instruments):           1.115
+                                                   Chi-sq(2) P-val =   0.57263
+=#
+stata_estat_overid_2sls(mroz; depvar = :lwage, exog_vars = [:exper, :expersq],
+    endog = :educ, instruments = [:motheduc, :fatheduc, :huseduc])
+```
+
+```{julia}
+#=
+ivreg2 lwage  exper expersq  (educ= motheduc fatheduc huseduc) , robust
+=#
+iv63r = stata_ivregress_2sls(mroz, :lwage,
+    :educ => [:motheduc, :fatheduc, :huseduc], [:exper, :expersq];
+    robust = true, first = false)
+```
+
+```{julia}
+#=
+Hansen J statistic (overidentification test of all instruments):         1.042
+                                                   Chi-sq(2) P-val =   0.59389
+=#
+estat_overid(mroz, :lwage, :educ, [:motheduc, :fatheduc, :huseduc], [:exper, :expersq])
+```
+
+Coefficients match exactly. The **Sargan** statistic is `1.11504`,
+`p = 0.5726` versus Stata's `1.115` / `0.57263`, and the robust **Hansen J** is
+`1.04213`, `p = 0.5939` versus Stata's `1.042` / `0.59389` — both exact.
+Standard errors: the hand-computed asymptotic SEs above
+(`educ .0216720`, `exper .0132027`, `expersq .0003943`, `_cons .2840591`)
+reproduce `ivreg2`'s published numbers exactly; `stata_ivregress_2sls` reports
+the small-sample-corrected versions (`.021774`, `.0132649`, `.0003962`,
+`.2853959`), which are `sqrt(428/424) = 1.004705` times as large. The same
+factor relates the robust SEs (`stata_ivregress_2sls` `.0217033` vs `ivreg2`
+`.0216016` for `educ`).
+
+# Example 6.4 on page 125 (nls80.dta) — a RESET-type functional-form test
+
+```{julia}
+#=
+use nls80, clear
+
+reg lwage exper tenure married south urban black educ
+=#
+ols64 = stata_regress(nls80; y = :lwage,
+                      x = [:exper, :tenure, :married, :south, :urban, :black, :educ])
+```
+
+```{julia}
+#=
+predict resid, res
+predict yhat
+(option xb assumed; fitted values)
+
+gen y2=yhat^2
+gen y3=yhat^3
+gen y4=yhat^4
+reg resid exper tenure married south urban black educ y2 y3
+=#
+nls80.resid = predict_res(ols64, nls80, :lwage)
+nls80.yhat  = FixedEffectModels.predict(ols64, nls80)
+nls80.y2 = nls80.yhat .^ 2
+nls80.y3 = nls80.yhat .^ 3
+nls80.y4 = nls80.yhat .^ 4
+
+aux64 = stata_regress(nls80; y = :resid,
+    x = [:exper, :tenure, :married, :south, :urban, :black, :educ, :y2, :y3])
+```
+
+```{julia}
+#=
+di 935*.0004
+.374
+
+di chi2tail(2, .374)
+.82944374
+=#
+R2_64 = StatsBase.r2(aux64)
+LM64  = StatsBase.nobs(aux64) * R2_64
+Printf.@printf("Julia  : R2 = %.8f,  n*R2 = %.5f,  p = %.6f\n",
+               R2_64, LM64, 1 - cdf(Chisq(2), LM64))
+# Stata's exact R2 = ModelSS/TotalSS = .043635869 / 123.818521
+R2_stata = 0.043635869 / 123.818521
+Printf.@printf("Stata  : R2 = %.8f,  n*R2 = %.5f,  p = %.6f\n",
+               R2_stata, 935 * R2_stata, 1 - cdf(Chisq(2), 935 * R2_stata))
+Printf.@printf("Stata printed (rounded R2 = .0004): 935*.0004 = %.3f, p = %.8f\n",
+               935 * 0.0004, 1 - cdf(Chisq(2), 0.374))
+```
+
+The baseline OLS regression matches exactly. The **auxiliary regression does not
+match to the printed digits**, and this is genuine, not a translation error.
+By construction the OLS residual is orthogonal to all seven regressors, and
+`y2`, `y3` are smooth functions of a linear combination of those same
+regressors, so the auxiliary design matrix is numerically near-singular: the
+whole fitted vector lies in one nearly-degenerate direction whose *scale* is set
+by floating-point noise. Julia's coefficients are a uniform ~0.12% rescaling of
+Stata's (e.g. `exper`: Stata `-.7632267`, Julia `-.7622995`, ratio 1.00122;
+`y2`: Stata `8.092523`, Julia `8.0827357`, ratio 1.00121), and every *t*
+statistic in both outputs is the same `-0.55` / `0.55`. The *test* is unaffected:
+Stata's exact `R²` (`.043635869/123.818521 = .00035242`) gives `n·R² = 0.3295`,
+`p = 0.849`; Julia gives `n·R² = 0.3289`, `p = 0.848`. Stata's displayed
+`di 935*.0004 = .374`, `p = .8294` uses the four-decimal rounded `R²`, which is
+why the page's p-value differs from both exact computations.
+
+# Example 6.5 on page 131 (injury.dta) — difference-in-differences
+
+```{julia}
+#=
+use injury, clear
+
+gen afchnge_highearn = afchnge*highearn
+reg ldurat afchnge highearn afchnge_highearn if ky==1
+=#
+injury.afchnge_highearn = injury.afchnge .* injury.highearn
+ky = injury[injury.ky .== 1, :]
+
+did65 = stata_regress(ky; y = :ldurat,
+                      x = [:afchnge, :highearn, :afchnge_highearn])
+```
+
+Exact reproduction (N = 5626, `F(3, 5622) = 39.54`, `R² = 0.0207`,
+`Root MSE = 1.2692`). The difference-in-differences estimate is
+`afchnge_highearn = .1906012 (.0685089)`, `t = 2.78`, `p = 0.005`: raising the
+cap on weekly earnings for workers' compensation increased time out of work for
+high earners by roughly 19 log points.
+
+# Verification summary
+
+| Example | Quantity | Stata | Julia | Match |
+|---|---|---|---|---|
+| 6.1 first stage | `huseduc` | .3752548 / .0296347 | .3752548 / .0296347 | yes |
+| 6.1 first stage | R² | 0.4286 | 0.4286 | yes |
+| 6.1 control fn | `educ` | .0803918 / .0216362 | .0803918 / .0216362 | yes |
+| 6.1 control fn | `resids` | .047189 / .0285519 | .047189 / .0285519 | yes |
+| 6.1 control fn | R² / Root MSE | 0.1622 / .66506 | 0.1622 / .66506 | yes |
+| 6.2 OLS | `educ` | .0707788 / .0037548 | .0707788 / .0037548 | yes |
+| 6.2 OLS | `black_educ` | .0178595 / .006271 | .0178595 / .006271 | yes |
+| 6.2 OLS | `black` | -.4191076 / .0794021 | -.4191076 / .0794021 | yes |
+| 6.2 first stage `educ` | `nearc4` | .3191761 / .0978211 | .3191761 / .0978211 | yes |
+| 6.2 first stage `educ` | `black_nearc4` | .0029741 / .1767953 | .0029741 / .1767953 | yes |
+| 6.2 first stage `black_educ` | `black_nearc4` | .874705 / .1047846 | .874705 / .1047846 | yes |
+| 6.2 control fn | `educ` | .1273557 / .0547317 | .1273557 / .0547317 | yes |
+| 6.2 control fn | `er`, `br` | -.0568274, .0070106 | -.0568274, .0070106 | yes |
+| 6.2 | `test er br` | F(2,2991)=0.54, p=0.5814 | F=0.5425, p=0.5814 | yes |
+| 6.2 2SLS | `educ` | .1273557 / .0569582 | .1273557 / .0569582 | yes |
+| 6.2 2SLS | `black_educ` | .0109036 / .0403571 | .0109036 / .0403571 | yes |
+| 6.2 2SLS | R² / Root MSE | 0.2435 / .38702 | 0.2435 / .3870 | yes |
+| 6.3 `ivreg2` | `educ` coef | .0803918 | .0803918 | yes |
+| 6.3 `ivreg2` | `educ` SE (asymptotic) | .021672 | .0216720 (hand-computed) | yes |
+| 6.3 `ivreg2` | `educ` SE via StatEcon | .021672 | .0217740 | **no** — small-sample factor sqrt(428/424) |
+| 6.3 `ivreg2` | `_cons` SE (asymptotic) | .2840591 | .2840591 (hand-computed) | yes |
+| 6.3 | Sargan χ²(2) / p | 1.115 / 0.57263 | 1.11504 / 0.57263 | yes |
+| 6.3 robust | `educ` SE | .0216016 | .0217033 | **no** — same sqrt(428/424) factor |
+| 6.3 robust | Hansen J χ²(2) / p | 1.042 / 0.59389 | 1.04213 / 0.59389 | yes |
+| 6.4 OLS | `educ` | .0654307 / .0062504 | .0654307 / .0062504 | yes |
+| 6.4 aux. | `exper` | -.7632267 / 1.397385 | -.7622995 / 1.3971773 | **no** — see note below |
+| 6.4 aux. | `y2` | 8.092523 / 14.74836 | 8.0827357 / 14.7461658 | **no** — see note below |
+| 6.4 aux. | `y3` | -.4012701 / .7281559 | -.4007868 / .7280471 | **no** — see note below |
+| 6.4 aux. | all *t* statistics | ±0.55 | ±0.55 | yes |
+| 6.4 aux. | exact R² | .00035242 | .00035173 | ~ (5th decimal) |
+| 6.4 | LM test conclusion | χ²(2) ≈ 0.33–0.37, p ≈ 0.83–0.85 | 0.3289, p = 0.848 | yes (qualitative) |
+| 6.5 | `afchnge` | .0076573 / .0447173 | .0076573 / .0447173 | yes |
+| 6.5 | `highearn` | .2564785 / .0474464 | .2564785 / .0474464 | yes |
+| 6.5 | `afchnge_highearn` | .1906012 / .0685089 | .1906012 / .0685089 | yes |
+| 6.5 | `_cons` | 1.125615 / .0307368 | 1.1256154 / .0307368 | yes |
+| 6.5 | N / R² / Root MSE | 5626 / 0.0207 / 1.2692 | 5626 / 0.0207 / 1.2692 | yes |
+
+## Mismatches and their explanations
+
+1. **Example 6.3, standard errors from `stata_ivregress_2sls`.** The page uses
+   `ivreg2`, which by default divides the residual sum of squares by `N`;
+   `stata_ivregress_2sls` (like `regress`/`ivregress`) divides by `N - K`.
+   The ratio is exactly `sqrt(428/424) = 1.0047053`, verified numerically
+   in the notebook — the notebook also hand-computes the `ivreg2` variance and
+   recovers all four published SEs to seven decimals.
+
+2. **Example 6.4, the auxiliary regression coefficients.** The regression is
+   numerically ill-conditioned: the dependent variable is the OLS residual,
+   which is exactly orthogonal to all seven regressors, and `y2`/`y3` are
+   polynomial transforms of the same linear index. Julia's whole coefficient
+   vector is a 1.0012 rescaling of Stata's, i.e. the two solvers land on
+   slightly different points along one nearly-degenerate direction. All *t*
+   statistics agree (±0.55), the exact `R²` values agree to five decimals
+   (.00035242 vs .00035173), and the LM test reaches the same conclusion. This
+   is a floating-point conditioning difference between Stata's and
+   `FixedEffectModels`'s least-squares solvers, not a specification difference.
+
+Nothing on the Chapter 6 page was left untranslated.

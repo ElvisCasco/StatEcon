@@ -1,0 +1,252 @@
+---
+title: "Wooldridge EACSPD -- Ch. 7: Estimating systems of equations by OLS and GLS (via StatEcon)"
+Authors:
+- Jeffrey M. Wooldridge
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+Stata examples reproduced from [UCLA OARC — EACSPD Chapter 7](https://stats.oarc.ucla.edu/stata/examples/eacspd/econometric-analysis-of-cross-section-and-panel-data-by-jeffrey-m-wooldridgechapter-7-estimating-systems-of-equations-by-ols-and-gls/).
+
+Source text: Wooldridge, J. M., *Econometric Analysis of Cross Section and Panel Data*, 2nd ed., MIT Press.
+
+# Julia setup
+
+```{julia}
+using StatEcon
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+
+# Artifacts this notebook produces go to `output/`.
+const OUT = "output"
+isdir(OUT) || mkpath(OUT)
+outpath(f) = joinpath(OUT, f)
+```
+
+The chapter uses three bundled EACSPD data sets, loaded **by name**:
+
+```{julia}
+fringe  = dataset("fringe")     # 616 x 39
+jtrain1 = dataset("jtrain1")    # 471 x 30
+gpa     = dataset("gpa")        # 732 x 26
+size(fringe), size(jtrain1), size(gpa)
+```
+
+## Example 7.3 (fringe.dta) — SUR of earnings and benefits
+
+Original Stata code:
+
+```{julia}
+#=
+use http://www.stata.com/data/jwooldridge/eacsap/fringe
+sureg (hrearn educ exper expersq tenure tenuresq union south nrtheast nrthcen married white male) ///
+      (hrbens educ exper expersq tenure tenuresq union south nrtheast nrthcen married white male)
+=#
+```
+
+Julia translation with `stata_sureg`:
+
+```{julia}
+X73 = [:educ, :exper, :expersq, :tenure, :tenuresq, :union,
+       :south, :nrtheast, :nrthcen, :married, :white, :male]
+
+sur73 = stata_sureg(fringe, :hrearn => X73, :hrbens => X73)
+```
+
+**Comparison with the published Stata output.** Exact agreement to all printed
+digits, in both equations and in the summary block. Stata reports
+`hrearn`: RMSE 4.3089, R² 0.2051; `hrbens`: RMSE 0.51526, R² 0.3987 — the same
+values shown above. Spot checks: `educ` in the earnings equation
+0.4588139 (SE 0.068393) vs Julia 0.4588139 (0.0683930); `union` in the benefits
+equation 0.3659085 (SE 0.0482482) vs Julia 0.3659085 (0.0482482); `_cons` in the
+earnings equation −2.632127 (SE 1.215291) vs Julia −2.6321267 (1.2152912).
+
+A joint Wald test across both equations is available through
+`stata_test_sureg` (this is `test` after `sureg`, not shown on the UCLA page):
+
+```{julia}
+sur73_fit = stata_sureg_fit(fringe, :hrearn => X73, :hrbens => X73)
+stata_test_sureg(sur73_fit, ["[hrearn]union", "[hrbens]union"])
+```
+
+## Example 7.7 (jtrain1.dta) — pooled OLS and FGLS for the scrap-rate equation
+
+Original Stata code:
+
+```{julia}
+#=
+use http://www.stata.com/data/jwooldridge/eacsap/jtrain1, clear
+reg lscrap d89 d88 grant grant_1
+xtgls lscrap d89 d88 grant grant_1, i(fcode)
+=#
+```
+
+### Pooled OLS
+
+```{julia}
+jt77 = DataFrames.dropmissing(jtrain1,
+        [:lscrap, :d89, :d88, :grant, :grant_1, :fcode, :year])
+DataFrames.nrow(jt77)
+```
+
+```{julia}
+ols77 = stata_regress(jt77; y = :lscrap, x = [:d89, :d88, :grant, :grant_1])
+```
+
+**Comparison.** Exact match with Stata: N = 162, F(4, 157) = 0.69,
+Prob > F = 0.5989, R² = 0.0173, Root MSE = 1.4922, and every coefficient /
+standard error (`d89` −0.4965236, 0.3379281; `d88` −0.2393704, 0.3108639;
+`grant` 0.2000197, 0.3382846; `grant_1` 0.0489357, 0.4360663;
+`_cons` 0.5974341, 0.203063).
+
+### FGLS (`xtgls`, homoskedastic panels, no autocorrelation)
+
+```{julia}
+gls77 = stata_xtgls(jt77, :lscrap, [:d89, :d88, :grant, :grant_1];
+                    panelvar = :fcode, timevar = :year,
+                    panels = :iid, corr = :independent)
+```
+
+**Comparison.** The point estimates are identical to Stata's (with
+`panels(iid) corr(independent)` FGLS *is* OLS), but the standard errors differ:
+Stata prints 0.3326723 for `d89` where `stata_xtgls` prints 0.3379281.
+Stata's `xtgls` estimates the disturbance variance with the **ML divisor
+`N`**, while `stata_xtgls` uses the small-sample divisor `N − k`. The ratio is
+exactly `sqrt((N-k)/N) = sqrt(157/162) = 0.98442`. Applying that factor
+reproduces Stata's table digit-for-digit:
+
+```{julia}
+let n = 162, k = 5
+    fac  = sqrt((n - k) / n)
+    se_s = gls77.se .* fac
+    z    = gls77.β ./ se_s
+    p    = 2 .* (1 .- Distributions.cdf.(Normal(), abs.(z)))
+    Printf.@printf("%-10s %12s %12s %8s %7s\n",
+                   "lscrap", "Coef.", "Std. err.", "z", "P>|z|")
+    for i in eachindex(gls77.β)
+        Printf.@printf("%-10s %12.7f %12.7f %8.2f %7.3f\n",
+                       gls77.coefnames[i], gls77.β[i], se_s[i], z[i], p[i])
+    end
+end
+```
+
+Stata: `d89` 0.3326723, `d88` 0.306029, `grant` 0.3330233, `grant_1` 0.4292842,
+`_cons` 0.1999048 — matched by the rescaled column above.
+
+## Examples 7.8 and 7.9 (gpa.dta) — term GPA, FGLS and a serial-correlation test
+
+Original Stata code:
+
+```{julia}
+#=
+use http://www.stata.com/data/jwooldridge/eacsap/gpa, clear
+reg trmgpa spring cumgpa crsgpa frstsem season sat verbmath hsperc hssize black female
+xtgls trmgpa spring cumgpa crsgpa frstsem season sat verbmath hsperc hssize black female, i(id)
+predict res, res
+sort id term
+by id: gen res1 = res[_n-1]
+reg trmgpa cumgpa crsgpa season sat verbmath hsperc hssize black female res1
+=#
+```
+
+### Pooled OLS (Example 7.8)
+
+```{julia}
+X78 = [:spring, :cumgpa, :crsgpa, :frstsem, :season, :sat,
+       :verbmath, :hsperc, :hssize, :black, :female]
+
+gpa78 = DataFrames.dropmissing(gpa, vcat([:trmgpa, :id, :term], X78))
+DataFrames.sort!(gpa78, [:id, :term])
+DataFrames.nrow(gpa78)
+```
+
+```{julia}
+ols78 = stata_regress(gpa78; y = :trmgpa, x = X78)
+```
+
+**Comparison.** Exact match: N = 732, F(11, 720) = 70.64, R² = 0.5191,
+Root MSE = 0.52986; `cumgpa` 0.3146158 (0.0404916), `crsgpa` 0.9840371
+(0.0960343), `sat` 0.0014097 (0.0001464), `female` 0.2855528 (0.0509641),
+`_cons` −2.067599 (0.3381007).
+
+### FGLS (`xtgls`)
+
+```{julia}
+gls78 = stata_xtgls(gpa78, :trmgpa, X78;
+                    panelvar = :id, timevar = :term,
+                    panels = :iid, corr = :independent)
+```
+
+**Comparison.** Same picture as Example 7.7: coefficients identical to Stata,
+standard errors larger by the factor `sqrt(N/(N-k)) = sqrt(732/720)`. Rescaled:
+
+```{julia}
+let n = 732, k = 12
+    fac  = sqrt((n - k) / n)
+    se_s = gls78.se .* fac
+    z    = gls78.β ./ se_s
+    p    = 2 .* (1 .- Distributions.cdf.(Normal(), abs.(z)))
+    Printf.@printf("%-10s %12s %12s %8s %7s\n",
+                   "trmgpa", "Coef.", "Std. err.", "z", "P>|z|")
+    for i in eachindex(gls78.β)
+        Printf.@printf("%-10s %12.7f %12.7f %8.2f %7.3f\n",
+                       gls78.coefnames[i], gls78.β[i], se_s[i], z[i], p[i])
+    end
+end
+```
+
+Stata reports `spring` 0.0460987, `cumgpa` 0.0401583, `crsgpa` 0.0952439,
+`sat` 0.0001452, `black` 0.0538875, `_cons` 0.3353179 — reproduced to 6
+significant digits by the rescaled column (residual differences are in the
+7th digit only).
+
+### Example 7.9 — test for serial correlation via the lagged OLS residual
+
+`predict res, res` then `by id: gen res1 = res[_n-1]` builds the within-student
+lag; in Julia this is a group-wise shift.
+
+```{julia}
+gpa78.res = StatsBase.residuals(ols78, gpa78)
+
+gpa78.res1 = Vector{Union{Missing,Float64}}(missing, DataFrames.nrow(gpa78))
+for g in DataFrames.groupby(gpa78, :id)
+    for i in 2:DataFrames.nrow(g)
+        g.res1[i] = g.res[i - 1]
+    end
+end
+
+gpa79 = DataFrames.dropmissing(gpa78, :res1)
+DataFrames.nrow(gpa79)
+```
+
+```{julia}
+X79  = [:cumgpa, :crsgpa, :season, :sat, :verbmath,
+        :hsperc, :hssize, :black, :female, :res1]
+ols79 = stata_regress(gpa79; y = :trmgpa, x = X79)
+```
+
+**Comparison.** Exact match with Stata: N = 366, F(10, 355) = 56.83,
+R² = 0.6155, Root MSE = 0.48541, and in particular the coefficient of interest
+`res1` = 0.1941929 with SE 0.0612068, t = 3.17, p = 0.002 — identical to the
+published table. The other slopes also agree to every printed digit
+(`cumgpa` 0.3488556/0.0720263, `crsgpa` 1.00062/0.117679,
+`_cons` −2.266297/0.4246611).

@@ -1,0 +1,337 @@
+---
+title: "Wooldridge EACSPD -- Ch. 16: Corner solution outcomes and censored regression models (via StatEcon)"
+Authors:
+- Jeffrey M. Wooldridge
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 5
+    toc-expand: true
+    toc-title: Contents
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+execute:
+  enabled: true
+jupyter: julia-1.12
+---
+
+Stata examples reproduced from [UCLA OARC — EACSPD Chapter 16](https://stats.oarc.ucla.edu/stata/examples/eacspd/econometric-analysis-of-cross-section-and-panel-data-by-jeffrey-m-wooldridgechapter-16-corner-solution-outcomes-and-censored-regression-models/).
+
+Textbook: Wooldridge, J. M., *Econometric Analysis of Cross Section and Panel Data*, MIT Press.
+
+# Julia setup
+
+```{julia}
+using StatEcon
+using DataFrames, ReadStatTables, CSV
+using Statistics, StatsBase, LinearAlgebra, Printf, Random
+using FixedEffectModels, StatsModels, GLM
+using FixedEffectModels: Vcov
+using CairoMakie
+CairoMakie.activate!(type = "png")
+using Optim, ForwardDiff
+import Distributions
+using Distributions: cdf, pdf, quantile, Normal, TDist, FDist, Chisq
+
+# Artifacts this notebook produces go to `output/`.
+const OUT = "output"
+isdir(OUT) || mkpath(OUT)
+outpath(f) = joinpath(OUT, f)
+```
+
+# Data
+
+```{julia}
+mroz = DataFrames.DataFrame(dataset("mroz"))
+size(mroz)
+```
+
+## Example 16.3 (mroz.dta)
+
+Annual hours worked is a corner-solution outcome: 325 of the 753 married women
+report zero hours. The example (p. 527) contrasts OLS with the Tobit MLE,
+constructs a Tobit R-squared from the conditional-mean prediction
+`E[y | x] = Φ(xβ/σ)·xβ + σ·φ(xβ/σ)`, and finally compares two nested Tobit
+specifications with `fitstat`.
+
+```{julia}
+#=
+use mroz, clear
+
+reg hours nwifeinc educ exper expersq age kidslt6 kidsge6
+
+      Source |       SS       df       MS              Number of obs =     753
+-------------+------------------------------           F(  7,   745) =   38.50
+       Model |   151647606     7  21663943.7           Prob > F      =  0.0000
+    Residual |   419262118   745  562767.943           R-squared     =  0.2656
+-------------+------------------------------           Adj R-squared =  0.2587
+       Total |   570909724   752   759188.463           Root MSE      =  750.18
+
+------------------------------------------------------------------------------
+       hours |      Coef.   Std. Err.      t    P>|t|     [95% Conf. Interval]
+-------------+----------------------------------------------------------------
+    nwifeinc |  -3.446636      2.544    -1.35   0.176
+        educ |   28.76112   12.95459     2.22   0.027
+       exper |   65.67251   9.962983     6.59   0.000
+     expersq |  -.7004939   .3245501    -2.16   0.031
+         age |  -30.51163   4.363868    -6.99   0.000
+     kidslt6 |  -442.0899    58.8466    -7.51   0.000
+     kidsge6 |  -32.77923   23.17622    -1.41   0.158
+       _cons |   1330.482   270.7846     4.91   0.000
+------------------------------------------------------------------------------
+
+tobit hours nwifeinc educ exper expersq age kidslt6 kidsge6, ll(0)
+
+Tobit estimates                                   Number of obs   =        753
+                                                  LR chi2(7)      =     271.59
+                                                  Prob > chi2     =     0.0000
+Log likelihood = -3819.0946                       Pseudo R2       =     0.0343
+
+------------------------------------------------------------------------------
+       hours |      Coef.   Std. Err.      t    P>|t|     [95% Conf. Interval]
+-------------+----------------------------------------------------------------
+    nwifeinc |  -8.814243   4.459096    -1.98   0.048
+        educ |   80.64561   21.58322     3.74   0.000
+       exper |   131.5643   17.27938     7.61   0.000
+     expersq |  -1.864158   .5376615    -3.47   0.001
+         age |  -54.40501   7.418496    -7.33   0.000
+     kidslt6 |  -894.0217   111.8779    -7.99   0.000
+     kidsge6 |    -16.218   38.64136    -0.42   0.675
+       _cons |   965.3053   446.4358     2.16   0.031
+-------------+----------------------------------------------------------------
+         _se |   1122.022   41.57903                   (Ancillary parameter)
+------------------------------------------------------------------------------
+
+  Obs. summary:        325  left-censored observations at hours<=0
+                       428     uncensored observations
+
+* get the R-squared for tobit model
+matrix b = e(b)
+local se = el(b,1, 9)
+di `se'
+1122.0217
+
+predict xb, xb
+gen yhat = norm(xb/`se')*xb + `se'*normden(xb/`se')
+reg hours yhat
+
+      Source |       SS       df       MS              Number of obs =     753
+-------------+------------------------------           F(  1,   751) =  283.78
+                                                       Prob > F      =  0.0000
+                                                       R-squared     =  0.2742
+                                                       Root MSE      =  742.78
+
+------------------------------------------------------------------------------
+       hours |      Coef.   Std. Err.      t    P>|t|     [95% Conf. Interval]
+-------------+----------------------------------------------------------------
+        yhat |   .9634449   .0571918    16.85   0.000
+       _cons |   45.52784   49.34596     0.92   0.356
+------------------------------------------------------------------------------
+
+* comparing two tobit models
+tobit hours nwifeinc educ exper expersq age kidslt6 kidsge6, ll(0)
+fitstat, saving(m0)
+
+Log-Lik Intercept Only:      -3954.892     Log-Lik Full Model:      -3819.095
+D(744):                       7638.189     LR(7):                     271.594
+                                           Prob > LR:                   0.000
+McFadden's R2:                   0.034     McFadden's Adj R2:           0.032
+Maximum Likelihood R2:           0.303     Cragg & Uhler's R2:          0.303
+McKelvey and Zavoina's R2:       0.357
+Variance of y*:            1956786.696     Variance of error:     1258932.624
+AIC:                            10.168     AIC*n:                    7656.189
+BIC:                          2709.885     BIC':                     -225.226
+
+tobit hours nwifeinc educ exper expersq age kidslt6 kidsge6  unem city, ll(0)
+
+Tobit estimates                                   Number of obs   =        753
+                                                  LR chi2(9)      =     274.01
+                                                  Prob > chi2     =     0.0000
+Log likelihood = -3817.8867                       Pseudo R2       =     0.0346
+
+------------------------------------------------------------------------------
+       hours |      Coef.   Std. Err.
+-------------+----------------------------------------------------------------
+    nwifeinc |  -8.700003   4.544473
+        educ |   83.11418   21.68775
+       exper |   133.4305   17.31206
+     expersq |  -1.934666   .5393865
+         age |  -53.13497   7.468394
+     kidslt6 |  -887.5036   111.6144
+     kidsge6 |  -13.28932   38.60969
+        unem |   -23.3407   15.06687
+        city |   11.36026   99.61766
+       _cons |   1060.127   449.8033
+-------------+----------------------------------------------------------------
+         _se |   1119.474                                (Ancillary parameter)
+------------------------------------------------------------------------------
+
+fitstat, using(m0)
+
+                                Current        Saved       Difference
+Log-Lik Intercept Only:         -3954.892     -3954.892        0.000
+Log-Lik Full Model:             -3817.887     -3819.095        1.208
+D:                            7635.773(742) 7638.189(744)    2.416(2)
+LR:                            274.010(9)    271.594(7)      2.416(2)
+Prob > LR:                       0.000         0.000          0.299
+McFadden's R2:                   0.035         0.034          0.000
+McFadden's Adj R2:               0.032         0.032         -0.000
+Maximum Likelihood R2:           0.305         0.303          0.002
+Cragg & Uhler's R2:              0.305         0.303          0.002
+McKelvey and Zavoina's R2:       0.359         0.357          0.003
+AIC:                            10.170        10.168          0.002
+BIC:                          2720.717      2709.885         10.833
+
+Difference of 10.833 in BIC' provides very strong support for saved model.
+=#
+```
+
+### OLS on hours
+
+```{julia}
+XH = [:nwifeinc, :educ, :exper, :expersq, :age, :kidslt6, :kidsge6]
+hours_ols = stata_regress(mroz; y = :hours, x = XH)
+```
+
+**Comparison.** Every coefficient and standard error reproduces the published
+output exactly (`nwifeinc` −3.446636 / 2.544 … `_cons` 1330.482 / 270.7846),
+together with `Number of obs = 753`, `F(7,745) = 38.50`, `R-squared = 0.2656`
+and `Root MSE = 750.18`.
+
+### Tobit, `ll(0)`
+
+```{julia}
+tb = stata_tobit(mroz, :hours, XH; ll = 0.0, vce = :oim)
+```
+
+```{julia}
+Printf.@printf("_se (sigma)      = %.7g   (Std. Err. %.7g)\n", tb.sigma, tb.se_σ)
+Printf.@printf("Log likelihood   = %.4f\n", tb.ll)
+Printf.@printf("left-censored    = %d\nuncensored       = %d\n",
+               sum(Float64.(mroz.hours) .<= 0), sum(Float64.(mroz.hours) .> 0))
+```
+
+The header statistics Stata prints (`LR chi2(7)` and pseudo R²) need the
+intercept-only Tobit, which we fit here as well:
+
+```{julia}
+tb_null = stata_tobit(mroz, :hours, Symbol[]; ll = 0.0, quiet = true)
+LR7 = 2 * (tb.ll - tb_null.ll)
+Printf.@printf("Log-Lik Intercept Only = %.4f\n", tb_null.ll)
+Printf.@printf("LR chi2(7)             = %.2f\n", LR7)
+Printf.@printf("Prob > chi2            = %.4f\n",
+               1 - Distributions.cdf(Distributions.Chisq(7), LR7))
+Printf.@printf("Pseudo R2              = %.4f\n", 1 - tb.ll / tb_null.ll)
+```
+
+**Comparison.** Coefficients match Stata to seven significant digits
+(`nwifeinc` −8.814243, `educ` 80.64561, `exper` 131.5643, `expersq` −1.864158,
+`age` −54.40501, `kidslt6` −894.0217, `kidsge6` −16.218, `_cons` 965.3053),
+σ̂ = 1122.022 with SE 41.57905 (Stata 41.57903), log-likelihood −3819.0946,
+`LR chi2(7) = 271.59`, pseudo R² 0.0343, and the 325 / 428 censoring split.
+The standard errors differ only in the sixth significant digit (e.g. `nwifeinc`
+4.459053 vs Stata's 4.459096) because `stata_tobit` forms the observed
+information from a finite-difference Hessian rather than Stata's analytic one.
+
+### Tobit R-squared
+
+```{julia}
+Φ(z) = Distributions.cdf(Distributions.Normal(), z)
+φ(z) = Distributions.pdf(Distributions.Normal(), z)
+
+xb  = tb.X * tb.β
+σ̂   = tb.sigma
+Printf.@printf("di `se' = %.4f\n", σ̂)
+
+tobit_fit = DataFrames.DataFrame(
+    hours = Float64.(mroz.hours),
+    yhat  = Φ.(xb ./ σ̂) .* xb .+ σ̂ .* φ.(xb ./ σ̂))
+
+r2_reg = stata_regress(tobit_fit; y = :hours, x = [:yhat])
+```
+
+**Comparison.** `di \`se'` gives 1122.0217 as in Stata. The auxiliary
+regression reproduces `R-squared = 0.2742`, `F(1,751) = 283.78`,
+`Root MSE = 742.78`, `yhat` = .9634450 (Stata .9634449) with SE .0571918, and
+`_cons` = 45.52784 with SE 49.34596. So the Tobit conditional mean explains
+27.4% of the variation in hours, against the OLS 26.6%.
+
+### Comparing the two Tobit models
+
+```{julia}
+tb2 = stata_tobit(mroz, :hours, vcat(XH, [:unem, :city]); ll = 0.0, vce = :oim)
+Printf.@printf("\n_se (sigma) = %.7g    Log likelihood = %.4f\n", tb2.sigma, tb2.ll)
+```
+
+```{julia}
+lrt = stata_lrtest(tb2.ll, tb.ll, 2)
+```
+
+`fitstat` reimplemented for the two nested Tobits (Long & Freese's definitions):
+
+```{julia}
+function tobit_fitstat(res, ll0, N)
+    kpar = length(res.β) + 1                   # β (incl. _cons) plus σ
+    kx   = length(res.β) - 1                   # slopes only
+    D    = -2 * res.ll
+    LR   = 2 * (res.ll - ll0)
+    xbv  = res.X * res.β
+    varxb = Statistics.var(xbv)                # Stata's fitstat uses the N-1 variance
+    vare  = res.sigma^2
+    (; ll0, ll = res.ll, D, dfD = N - kpar, LR, dfLR = kx,
+       pLR   = 1 - Distributions.cdf(Distributions.Chisq(kx), LR),
+       mcf   = 1 - res.ll / ll0,
+       mcfa  = 1 - (res.ll - kpar) / ll0,
+       mlr2  = 1 - exp(2 * (ll0 - res.ll) / N),
+       cu    = (1 - exp(2 * (ll0 - res.ll) / N)) / (1 - exp(2 * ll0 / N)),
+       mz    = varxb / (varxb + vare),
+       varys = varxb + vare, vare,
+       aic   = (D + 2 * kpar) / N, aicn = D + 2 * kpar,
+       bic   = D - (N - kpar) * log(N), bicp = -LR + kx * log(N))
+end
+
+N   = tb.n
+fs0 = tobit_fitstat(tb,  tb_null.ll, N)
+fs1 = tobit_fitstat(tb2, tb_null.ll, N)
+
+Printf.@printf("%-30s%13s%13s%13s\n", "", "Current", "Saved", "Difference")
+Printf.@printf("%-30s%13.3f%13.3f%13.3f\n", "Log-Lik Intercept Only:", fs1.ll0, fs0.ll0, fs1.ll0 - fs0.ll0)
+Printf.@printf("%-30s%13.3f%13.3f%13.3f\n", "Log-Lik Full Model:", fs1.ll, fs0.ll, fs1.ll - fs0.ll)
+Printf.@printf("%-30s%9.3f(%d)%9.3f(%d)%9.3f(%d)\n", "D:", fs1.D, fs1.dfD, fs0.D, fs0.dfD,
+               fs0.D - fs1.D, fs0.dfD - fs1.dfD)
+Printf.@printf("%-30s%9.3f(%d)%11.3f(%d)%11.3f(%d)\n", "LR:", fs1.LR, fs1.dfLR, fs0.LR, fs0.dfLR,
+               fs1.LR - fs0.LR, fs1.dfLR - fs0.dfLR)
+Printf.@printf("%-30s%13.3f%13.3f%13.3f\n", "Prob > LR:", fs1.pLR, fs0.pLR, lrt.p)
+Printf.@printf("%-30s%13.3f%13.3f%13.3f\n", "McFadden's R2:", fs1.mcf, fs0.mcf, fs1.mcf - fs0.mcf)
+Printf.@printf("%-30s%13.3f%13.3f%13.3f\n", "McFadden's Adj R2:", fs1.mcfa, fs0.mcfa, fs1.mcfa - fs0.mcfa)
+Printf.@printf("%-30s%13.3f%13.3f%13.3f\n", "Maximum Likelihood R2:", fs1.mlr2, fs0.mlr2, fs1.mlr2 - fs0.mlr2)
+Printf.@printf("%-30s%13.3f%13.3f%13.3f\n", "Cragg & Uhler's R2:", fs1.cu, fs0.cu, fs1.cu - fs0.cu)
+Printf.@printf("%-30s%13.3f%13.3f%13.3f\n", "McKelvey and Zavoina's R2:", fs1.mz, fs0.mz, fs1.mz - fs0.mz)
+Printf.@printf("%-30s%13.3f%13.3f%13.3f\n", "Variance of y*:", fs1.varys, fs0.varys, fs1.varys - fs0.varys)
+Printf.@printf("%-30s%13.3f%13.3f%13.3f\n", "Variance of error:", fs1.vare, fs0.vare, fs1.vare - fs0.vare)
+Printf.@printf("%-30s%13.3f%13.3f%13.3f\n", "AIC:", fs1.aic, fs0.aic, fs1.aic - fs0.aic)
+Printf.@printf("%-30s%13.3f%13.3f%13.3f\n", "BIC:", fs1.bic, fs0.bic, fs1.bic - fs0.bic)
+Printf.@printf("%-30s%13.3f%13.3f%13.3f\n", "BIC':", fs1.bicp, fs0.bicp, fs1.bicp - fs0.bicp)
+```
+
+**Comparison.** The larger Tobit reproduces Stata's coefficients to six or seven
+significant digits (`unem` −23.34072 vs −23.3407, `city` 11.36005 vs 11.36026,
+`_cons` 1060.113 vs 1060.127), σ̂ = 1119.474 and log-likelihood −3817.8867 —
+all matching. Standard errors again differ only in the last printed digits,
+except `city`, where the FD-Hessian OIM gives 100.6341 against Stata's 99.61766
+(≈1% apart); `city` is the flattest direction of the likelihood
+(t ≈ 0.11), so it is the coefficient most sensitive to the numerical Hessian.
+
+The likelihood-ratio comparison matches the published `fitstat` block:
+log-likelihood difference 1.208, `LR difference = 2.416` on 2 d.f.,
+`Prob > LR: 0.299`, and a BIC difference of **10.833** in favour of the saved
+(smaller) model. `unem` and `city` do not belong in the equation. The
+reconstructed `fitstat` panel reproduces every published line, including
+`Variance of y*` (1956786.689 here vs 1956786.696 in Stata — a last-digit
+consequence of σ̂ agreeing only to ~9 digits), `Variance of error`
+(1258932.622 vs 1258932.624),
+`McKelvey and Zavoina's R2 = 0.357/0.359`, `AIC = 10.168/10.170`,
+`BIC = 2709.885/2720.717` and `BIC' = -225.226`.
