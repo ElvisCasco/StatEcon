@@ -686,91 +686,23 @@ pen_ols = stata_regress(pension; y = :pctstck, x = XP)
 
 ### Ordered probit
 
-`StatEcon` ships `stata_ologit` (ordered **logit**) but has no `oprobit`
-equivalent, so the ordered-probit MLE is coded here directly with `Optim` +
-`ForwardDiff`, using the same monotone cut-point parameterisation
-(τ₁ = θ₁, τⱼ = τⱼ₋₁ + exp θⱼ) and a finite-difference observed-information VCE
-with a delta-method correction back to the τ scale — i.e. exactly Stata's
-`vce(oim)`.
+`StatEcon`'s `stata_oprobit` fits the ordered-probit MLE (Stata `oprobit`),
+using the same monotone cut-point parameterisation (τ₁ = θ₁, τⱼ = τⱼ₋₁ + exp θⱼ)
+and a finite-difference observed-information VCE with a delta-method correction
+back to the τ scale — i.e. exactly Stata's `vce(oim)`. It is `stata_ologit` with
+the logistic link replaced by the standard-normal CDF.
 
 ```{julia}
-pen_est = DataFrames.dropmissing(pension[:, vcat(:pctstck, XP)])
-y_raw = Float64.(pen_est.pctstck)
-cats  = sort(unique(y_raw)); J = length(cats)
-y_idx = [findfirst(==(v), cats) for v in y_raw]
-Xop   = hcat([Float64.(pen_est[!, r]) for r in XP]...)
-N, k  = size(Xop); nparam = k + J - 1
+op = stata_oprobit(pension, :pctstck, XP)   # StatEcon ships this now
+
+# variables the classification table below reuses
+β̂, τ̂ = op.β, op.τ
+Xop   = op.X
 Φ(z)  = Distributions.cdf(Distributions.Normal(), z)
-
-function op_unpack(θ)
-    β = θ[1:k]
-    τ = Vector{eltype(θ)}(undef, J - 1); τ[1] = θ[k + 1]
-    for j in 2:(J - 1); τ[j] = τ[j - 1] + exp(θ[k + j]); end
-    (β, τ)
-end
-
-function op_negll(θ)
-    β, τ = op_unpack(θ); η = Xop * β; s = zero(eltype(θ))
-    for i in 1:N
-        j  = y_idx[i]
-        lo = j == 1 ? zero(eltype(θ)) : Φ(τ[j - 1] - η[i])
-        hi = j == J ? one(eltype(θ))  : Φ(τ[j]     - η[i])
-        s += log(max(hi - lo, 1e-300))
-    end
-    -s
-end
-
-θ0 = zeros(nparam)
-θ0[k + 1] = Distributions.quantile(Distributions.Normal(), sum(y_idx .<= 1) / N)
-θ0[k + 2] = log(max(Distributions.quantile(Distributions.Normal(),
-                                           sum(y_idx .<= 2) / N) - θ0[k + 1], 0.01))
-op_g!(G, x) = ForwardDiff.gradient!(G, op_negll, x)
-op_fit = Optim.optimize(op_negll, op_g!, θ0, Optim.LBFGS(),
-                        Optim.Options(g_tol = 1e-10, iterations = 2000))
-θ̂  = Optim.minimizer(op_fit); ll = -Optim.minimum(op_fit)
-β̂, τ̂ = op_unpack(θ̂)
-
-H  = ForwardDiff.hessian(op_negll, θ̂)
-Jc = Matrix{Float64}(LinearAlgebra.I, nparam, nparam)
-Jc[k + 2, k + 1] = 1.0; Jc[k + 2, k + 2] = exp(θ̂[k + 2])
-Vop = Jc * LinearAlgebra.inv(H) * Jc'
-se  = sqrt.(LinearAlgebra.diag(Vop))
-
-# null (cut-points only) log-likelihood, for LR chi2 / pseudo R2
-function op_negll0(t)
-    τ0 = [t[1], t[1] + exp(t[2])]; s = 0.0
-    for i in 1:N
-        j  = y_idx[i]
-        lo = j == 1 ? 0.0 : Φ(τ0[j - 1]); hi = j == J ? 1.0 : Φ(τ0[j])
-        s += log(max(hi - lo, 1e-300))
-    end
-    -s
-end
-op_g0!(G, x) = ForwardDiff.gradient!(G, op_negll0, x)
-ll0 = -Optim.minimum(Optim.optimize(op_negll0, op_g0!, θ0[k+1:end],
-                                    Optim.LBFGS(), Optim.Options(g_tol = 1e-10)))
-LR  = 2 * (ll - ll0)
-
-println()
-Printf.@printf("%-50s%-16s= %8d\n", "Ordered probit estimates", "Number of obs", N)
-Printf.@printf("%50s%-16s= %8.2f\n", "", "LR chi2($k)", LR)
-Printf.@printf("%50s%-16s= %8.4f\n", "", "Prob > chi2",
-               1 - Distributions.cdf(Distributions.Chisq(k), LR))
-Printf.@printf("Log likelihood = %.4f%22s%-16s= %8.4f\n", ll, "", "Pseudo R2", 1 - ll / ll0)
-println("-"^78)
-Printf.@printf("%12s | %11s %10s %7s %7s\n", "pctstck", "Coef.", "Std. Err.", "z", "P>|z|")
-println("-"^13, "+", "-"^64)
-for (i, v) in enumerate(XP)
-    z = β̂[i] / se[i]
-    Printf.@printf("%12s | %11.7f %10.7f %7.2f %7.3f\n", v, β̂[i], se[i], z,
-                   2 * (1 - Distributions.cdf(Distributions.Normal(), abs(z))))
-end
-println("-"^13, "+", "-"^64)
-for j in 1:(J - 1)
-    Printf.@printf("%12s | %11.6f %10.6f%s\n", "_cut$j", τ̂[j], se[k + j],
-                   "   (Ancillary parameters)")
-end
-println("-"^78)
+pen_est = DataFrames.dropmissing(pension[:, vcat(:pctstck, XP)])
+cats  = sort(unique(Float64.(pen_est.pctstck)))
+y_idx = [findfirst(==(v), cats) for v in Float64.(pen_est.pctstck)]
+N     = length(y_idx)
 ```
 
 ### Predicted class vs. actual (`tab pclass pctstck`)
@@ -799,16 +731,15 @@ Printf.@printf("di %d/%d = %.8f\n", ctab[3,3], sum(ctab[:,3]), ctab[3,3]/sum(cta
 
 **Comparison.** The OLS regression matches Stata to all printed digits
 (`F(14,179) = 1.42`, `R-squared = 0.0998`, `Root MSE = 39.134`, and every
-coefficient/SE). The hand-coded ordered probit reproduces the published
+coefficient/SE). `stata_oprobit` reproduces the published
 `oprobit` output exactly: all fourteen coefficients and standard errors, both
 cut-points (−3.087373 / 1.623765 and −2.053553 / 1.618611), the log-likelihood
 −201.9865, `LR chi2(14) = 20.77` and pseudo R² 0.0489. The classification table
 is identical (33/21/11, 25/31/25, 6/20/22) and so are the four displayed ratios:
 .44329897, .515625, .43055556, .37931034.
 
-Note for reproducers: `stata_ologit` is not a substitute here simply because it
-fits the ordered **logit** link, whereas the published table is `oprobit`.
-(`stata_ologit` itself works fine on three-or-more-category outcomes and
-reports a genuine log-likelihood, `LR chi2` and pseudo R² — earlier releases had
-a cut-point warm-start `DomainError` and zeroed LR/pseudo-R² statistics, both of
-which have since been fixed.)
+Note: use `stata_oprobit` here rather than `stata_ologit` — the published table
+is `oprobit`, and `stata_ologit` fits the ordered **logit** link. (`stata_ologit`
+works fine on three-or-more-category outcomes and reports a genuine
+log-likelihood, `LR chi2` and pseudo R² — earlier releases had a cut-point
+warm-start `DomainError` and zeroed LR/pseudo-R² statistics, both since fixed.)
