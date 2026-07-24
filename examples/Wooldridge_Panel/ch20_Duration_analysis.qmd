@@ -24,15 +24,15 @@ Source text: Wooldridge, J. M., *Econometric Analysis of Cross Section and Panel
 Data*, MIT Press — Chapter 20, "Duration Analysis". The data file is the one
 shipped with the book's own Stata distribution and is bundled with `StatEcon`.
 
-> **`StatEcon` coverage note.** Stata's survival commands `stset` and
-> `streg ..., dist(weibull)` have **no direct `StatEcon` equivalent** — there
-> is no `stata_streg` in `names(StatEcon)`. The Weibull duration model below is
-> therefore a **hand-rolled maximum-likelihood fit**: the log-likelihood is
-> written out explicitly and maximised with `Optim` using a `ForwardDiff`
-> gradient, and the standard errors come from the `ForwardDiff` Hessian. It is
-> *not* a `StatEcon` command, and this notebook says so plainly rather than
-> pretending otherwise. Everything else on the page (the `stset` bookkeeping)
-> is reproduced with plain `DataFrames` arithmetic.
+> **`StatEcon` coverage note.** `StatEcon` ships `stata_streg`, which fits the
+> Weibull (and exponential) duration model by maximum likelihood in Stata's
+> proportional-hazards (log relative-hazard) parameterisation — `Optim` with a
+> `ForwardDiff` gradient, standard errors from the `ForwardDiff` Hessian — and
+> prints the `streg ..., dist(weibull) [nohr]` table (coefficients, `/ln_p`,
+> `p`, `1/p`, and the LR χ²). The log likelihood follows Stata's convention, so
+> it matches the published output directly. Stata's `stset` bookkeeping (the
+> failure indicator `d = 1{cens == 0}`) is done with plain `DataFrames`
+> arithmetic below.
 
 # Julia setup
 
@@ -165,7 +165,7 @@ Log likelihood  =   -1633.0325                     Prob > chi2     =    0.0000
 =#
 ```
 
-### The hand-rolled Weibull log-likelihood
+### The Weibull model via `stata_streg`
 
 Stata's `streg, dist(weibull) nohr` fits the log relative-hazard (proportional
 hazards) parameterisation
@@ -178,107 +178,22 @@ $$
 
 so with failure indicator $d_i$ the contribution of observation $i$ is
 $d_i\log h(t_i) + \log S(t_i)$. Stata parameterises the shape as
-$p = \exp(\ln p)$ and reports `/ln_p`, so that is what is optimised here.
+$p = \exp(\ln p)$ and reports `/ln_p`, which is exactly what `stata_streg` optimises.
 
 ```{julia}
 xs20 = [:workprg, :priors, :tserved, :felon, :alcohol, :drugs,
         :black, :married, :educ, :age]
+t20 = Float64.(recid.durat)          # analysis time  (reused by the cells below)
+d20 = Float64.(recid.d)              # failure indicator = 1{cens == 0}
 
-X20 = hcat(Matrix{Float64}(recid[:, xs20]), ones(DataFrames.nrow(recid)))
-t20 = Float64.(recid.durat)
-d20 = Float64.(recid.d)
+# `stata_streg` fits the Weibull duration model in Stata's proportional-hazards
+# convention and prints the full `streg ..., dist(weibull) nohr` table
+# (coefficients, /ln_p, p, 1/p and the LR χ²). It returns the fit, so the
+# comparison cells below can reuse it.
+w20 = stata_streg(recid, :durat, :d, xs20; dist = :weibull, nohr = true)
 
-# Stata's streg likelihood is written for ln(t), i.e. it omits the −log t
-# Jacobian term. Keeping the same convention makes `ll` directly comparable
-# with the published log likelihood.
-function weibull_nll(θ)
-    β  = @view θ[1:end-1]
-    lp = θ[end]
-    p  = exp(lp)
-    xb = X20 * β
-    s  = zero(eltype(θ))
-    @inbounds for i in eachindex(t20)
-        s += d20[i] * (lp + p * log(t20[i]) + xb[i]) - t20[i]^p * exp(xb[i])
-    end
-    return -s
-end
-
-# NOTE: the `autodiff = :forward` kwarg is broken in the installed Optim, so
-# the gradient is supplied explicitly through the 5-argument `optimize`.
-weibull_g!(g, x) = ForwardDiff.gradient!(g, weibull_nll, x)
-
-θ0 = zeros(size(X20, 2) + 1)
-θ0[end-1] = -3.0                     # sensible start for the intercept
-
-opt20 = Optim.optimize(weibull_nll, weibull_g!, θ0, Optim.LBFGS(),
-                       Optim.Options(g_tol = 1e-12, iterations = 5_000))
-θ̂20 = Optim.minimizer(opt20)
-V20  = LinearAlgebra.inv(ForwardDiff.hessian(weibull_nll, θ̂20))
-se20 = sqrt.(LinearAlgebra.diag(V20))
-ll20 = -Optim.minimum(opt20)
-Optim.converged(opt20), ll20
-```
-
-```{julia}
-# Constant-only model, for Stata's LR chi2(10).
-X20_0 = reshape(ones(DataFrames.nrow(recid)), :, 1)
-function weibull_nll0(θ)
-    lp = θ[2]; p = exp(lp); b = θ[1]
-    s = zero(eltype(θ))
-    @inbounds for i in eachindex(t20)
-        s += d20[i] * (lp + p * log(t20[i]) + b) - t20[i]^p * exp(b)
-    end
-    return -s
-end
-weibull_g0!(g, x) = ForwardDiff.gradient!(g, weibull_nll0, x)
-opt20_0 = Optim.optimize(weibull_nll0, weibull_g0!, [-3.0, 0.0], Optim.LBFGS(),
-                         Optim.Options(g_tol = 1e-12, iterations = 5_000))
-ll20_0 = -Optim.minimum(opt20_0)
-LR20   = 2 * (ll20 - ll20_0)
-ll20_0, LR20
-```
-
-```{julia}
-# Print the fit in Stata's `streg ..., nohr` layout.
-names20 = vcat(string.(xs20), "_cons")
-lvl     = 0.95
-zc      = Distributions.quantile(Normal(), 1 - (1 - lvl) / 2)
-
-println("Weibull regression -- log relative-hazard form\n")
-Printf.@printf("No. of subjects = %12d                     Number of obs   = %9d\n",
-               DataFrames.nrow(recid), DataFrames.nrow(recid))
-Printf.@printf("No. of failures = %12d\n", Int(sum(d20)))
-Printf.@printf("Time at risk    = %12d\n", Int(sum(t20)))
-Printf.@printf("%51s LR chi2(%d)     = %9.2f\n", "", length(xs20), LR20)
-Printf.@printf("Log likelihood  = %12.4f                     Prob > chi2     = %9.4f\n",
-               ll20, 1 - Distributions.cdf(Chisq(length(xs20)), LR20))
-println()
-println("-"^78)
-Printf.@printf("%12s | %10s %10s %7s %6s  %10s %10s\n",
-               "_t", "Coef.", "Std. Err.", "z", "P>|z|", "[95% Conf.", "Interval]")
-println("-"^13 * "+" * "-"^64)
-for i in eachindex(names20)
-    z = θ̂20[i] / se20[i]
-    Printf.@printf("%12s | %10.7f %10.7f %7.2f %6.3f  %10.7f %10.7f\n",
-                   names20[i], θ̂20[i], se20[i], z,
-                   2 * (1 - Distributions.cdf(Normal(), abs(z))),
-                   θ̂20[i] - zc * se20[i], θ̂20[i] + zc * se20[i])
-end
-println("-"^13 * "+" * "-"^64)
-let lnp = θ̂20[end], s = se20[end], z = θ̂20[end] / se20[end]
-    Printf.@printf("%12s | %10.7f %10.7f %7.2f %6.3f  %10.7f %10.7f\n",
-                   "/ln_p", lnp, s, z,
-                   2 * (1 - Distributions.cdf(Normal(), abs(z))),
-                   lnp - zc * s, lnp + zc * s)
-    println("-"^13 * "+" * "-"^64)
-    p  = exp(lnp)
-    Printf.@printf("%12s | %10.7f %10.7f %7s %6s  %10.7f %10.7f\n",
-                   "p", p, p * s, "", "", exp(lnp - zc * s), exp(lnp + zc * s))
-    Printf.@printf("%12s | %10.7f %10.7f %7s %6s  %10.7f %10.7f\n",
-                   "1/p", 1 / p, s / p, "", "",
-                   exp(-(lnp + zc * s)), exp(-(lnp - zc * s)))
-end
-println("-"^78)
+θ̂20 = w20.β; se20 = w20.se; ll20 = w20.ll; LR20 = w20.LR
+names20 = w20.coefnames
 ```
 
 ### How the hand-rolled fit compares with `streg`

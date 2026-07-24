@@ -403,4 +403,23 @@ df = DataFrame(
         end) === nothing
     end
 
+    @testset "stata_streg reproduces Stata (Wooldridge Ex. 20.5, Weibull)" begin
+        recid = DataFrame(dataset("wooldridge/recid"))
+        recid.d = 1 .- recid.cens
+        xs = [:workprg, :priors, :tserved, :felon, :alcohol, :drugs,
+              :black, :married, :educ, :age]
+        w = redirect_stdout(devnull) do
+            stata_streg(recid, :durat, :d, xs; dist = :weibull, nohr = true)
+        end
+        @test w.n == 1445
+        @test w.nfail == 552
+        @test isapprox(w.ll,  -1633.0325; atol = 1e-3)
+        @test isapprox(w.LR,     165.48;  atol = 1e-2)
+        @test isapprox(w.lnp,  -0.2158398; atol = 1e-5)   # /ln_p
+        @test isapprox(w.p,     0.8058644; atol = 1e-5)
+        @test w.coefnames[end] == "_cons"                 # β = [covars…, _cons, lnp]
+        @test isapprox(w.β[findfirst(==("priors"), w.coefnames)], 0.0887867; atol = 1e-5)
+        @test isapprox(w.β[findfirst(==("_cons"),  w.coefnames)], -3.402094; atol = 1e-4)
+    end
+
 end
