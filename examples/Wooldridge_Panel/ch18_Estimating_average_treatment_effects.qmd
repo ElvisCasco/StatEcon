@@ -366,9 +366,9 @@ iv_raw = stata_ivregress_2sls(
 Exact match on every coefficient and standard error (`educ7` $-1.1306797$
 against Stata's $-1.13068$, SE $0.6192352$), plus $R^2 = 0.5651$ and Root MSE
 $= 1.4665$. Instrumenting the treatment dummy nearly triples the estimated
-effect of schooling on fertility, but it is only marginally significant. The
-only display difference is that `stata_ivregress_2sls` reports large-sample
-$z$/Wald statistics where the old `ivreg` reported $t$/$F$.
+effect of schooling on fertility, but it is only marginally significant.
+`stata_ivregress_2sls` prints Stata's legacy `ivreg` layout — $t$ ratios, $F$,
+and $t$-based confidence intervals — so the displayed table matches directly.
 
 ## Procedure 18.1: the fitted probability as the instrument
 

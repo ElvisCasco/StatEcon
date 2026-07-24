@@ -161,14 +161,12 @@ errors reproduce Stata exactly:
 | `LD.lcrmrte` | .212428 (.4973782) | .2124280 (.4973782) |
 | `_cons` | .0646336 (.0404458) | .0646336 (.0404458) |
 
-Root MSE `.26502` also matches. The only display difference is the test
-metric: Stata's old `ivreg` reports a small-sample `F(1, 88) = 0.18 / p = 0.6704`
-with `t` ratios, while `stata_ivregress_2sls` follows the modern
-`ivregress 2sls` convention and reports `Wald chi2(1) = 0.18 / p = 0.6693` with
-`z` ratios. Same statistic, different reference distribution, hence the p-value
-in the third decimal. Stata's R-squared is reported as missing (`.`) because the
-model sum of squares is negative; `FixedEffectModels` prints the (negative)
-value −0.2134 instead.
+Root MSE `.26502` also matches, and `stata_ivregress_2sls` prints Stata's legacy
+`ivreg` layout, so the model `F(1, 88) = 0.18 / p = 0.6704`, the `t` ratios, and
+the `t`-based confidence intervals reproduce the published output. The one
+remaining difference is cosmetic: Stata reports R-squared as missing (`.`)
+because the model sum of squares is negative, whereas `FixedEffectModels` prints
+the (negative) value −0.2134.
 
 ### First-stage regression (Stata `reg`)
 

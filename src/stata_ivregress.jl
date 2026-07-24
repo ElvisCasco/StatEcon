@@ -109,6 +109,10 @@ function stata_ivregress_2sls(df, y, endog_iv::Pair, exog = Symbol[];
                               level = level, robust = robust)
     end
 
+    # 2SLS second stage in Stata's legacy `ivreg` ANOVA layout: a
+    # Source/SS/df/MS block, a Wald F over the model coefficients, and the
+    # Instrumented:/Instruments: footer. Mirrors stata_regress's plain-OLS
+    # rendering so IV output matches the package's own regress output.
     _print_second(m, depname, endog_nms) = begin
         β    = StatsBase.coef(m); V = StatsBase.vcov(m)
         se   = sqrt.(max.(LinearAlgebra.diag(V), 0.0))
@@ -116,34 +120,100 @@ function stata_ivregress_2sls(df, y, endog_iv::Pair, exog = Symbol[];
         n    = Int(StatsBase.nobs(m))
         k    = length(β)
         df_r = Int(StatsBase.dof_residual(m))
-        rss  = StatsBase.deviance(m)
+        rss  = m.rss
         r2v  = StatsBase.r2(m)
         rmse = sqrt(rss / df_r)
         cons_idx = findfirst(==("_cons"), nm)
         slope    = cons_idx === nothing ? collect(1:k) : setdiff(1:k, [cons_idx])
         q        = length(slope)
+        # Model F is a Wald test on the slope coefficients (as in Stata's ivreg),
+        # not the ANOVA MS ratio, which is invalid under IV.
         Wstat    = β[slope]' * LinearAlgebra.inv(V[slope, slope]) * β[slope]
-        pW       = 1 - Distributions.cdf(Distributions.Chisq(q), Wstat)
-        Printf.@printf("%-50s%-16s= %10s\n",
-                       "Instrumental-variables 2SLS regression",
-                       "Number of obs", _ivr_fmtn(n))
-        Printf.@printf("%-50s%-16s= %10.2f\n", "", "Wald chi2($q)", Wstat)
-        Printf.@printf("%-50s%-16s= %10.4f\n", "", "Prob > chi2",   pW)
-        Printf.@printf("%-50s%-16s= %10.4f\n", "", "R-squared",     r2v)
-        Printf.@printf("%-50s%-16s= %10.4f\n", "", "Root MSE",      rmse)
+        Fstat    = Wstat / q
+        pF       = 1 - Distributions.cdf(Distributions.FDist(q, df_r), Fstat)
+        # ANOVA decomposition: rss are the actual residuals (y − Xβ, actual X);
+        # tss = Σ(y−ȳ)² recovered from r2; mss = tss − rss.
+        tss   = rss / max(1 - r2v, eps())
+        mss   = tss - rss
+        dfT   = n - 1
+        adjR2 = 1 - (1 - r2v) * dfT / df_r
+
+        println("Instrumental variables (2SLS) regression")
         println()
+
+        rblk = [("Number of obs", Printf.@sprintf("%d", n)),
+                (Printf.@sprintf("F(%3d, %5d)", q, df_r), Printf.@sprintf("%.2f", Fstat)),
+                ("Prob > F",      Printf.@sprintf("%.4f", pF)),
+                ("R-squared",     Printf.@sprintf("%.4f", r2v)),
+                ("Adj R-squared", Printf.@sprintf("%.4f", adjR2)),
+                ("Root MSE",      _sr_num(rmse, 5))]
+        lw  = maximum(length(h[1]) for h in rblk)
+        vw  = maximum(length(h[2]) for h in rblk)
+        rt(i) = rpad(rblk[i][1], lw) * " = " * lpad(rblk[i][2], vw)
+        sep = "-"^13 * "+" * "-"^30
+        Printf.@printf("%12s |%12s%6s%12s   %s\n", "Source", "SS", "df", "MS", rt(1))
+        println(sep, "   ", rt(2))
+        Printf.@printf("%12s |%12s%6d%12s   %s\n",
+                       "Model", _sr_num(mss, 9), q, _sr_num(mss / q, 9), rt(3))
+        Printf.@printf("%12s |%12s%6d%12s   %s\n",
+                       "Residual", _sr_num(rss, 9), df_r, _sr_num(rss / df_r, 9), rt(4))
+        println(sep, "   ", rt(5))
+        Printf.@printf("%12s |%12s%6d%12s   %s\n",
+                       "Total", _sr_num(tss, 9), dfT, _sr_num(tss / dfT, 9), rt(6))
+        println()
+
         endog_pos = Int[]
         for ev in endog_nms
             i = findfirst(==(string(ev)), nm)
             i !== nothing && push!(endog_pos, i)
         end
-        rest = setdiff(slope, endog_pos)
-        order = cons_idx === nothing ?
-                vcat(endog_pos, rest) :
-                vcat(endog_pos, rest, cons_idx)
-        _ivr_print_coef_block(depname, nm, β, se, order;
-                              mode = :z, df_r = df_r,
-                              level = level, robust = robust)
+        rest  = setdiff(slope, endog_pos)
+        order = cons_idx === nothing ? vcat(endog_pos, rest) :
+                                       vcat(endog_pos, rest, cons_idx)
+
+        crit  = Distributions.quantile(Distributions.TDist(df_r), 1 - (1 - level) / 2)
+        stat  = β ./ se
+        pvals = 2 .* (1 .- Distributions.cdf.(Distributions.TDist(df_r), abs.(stat)))
+        lo    = β .- crit .* se
+        hi    = β .+ crit .* se
+
+        labels = nm[order]
+        ests = [_sr_coef(β[i])  for i in order]; ses = [_sr_coef(se[i]) for i in order]
+        tvs  = [Printf.@sprintf("%.2f", stat[i])  for i in order]
+        pvs  = [Printf.@sprintf("%.3f", pvals[i]) for i in order]
+        los  = [_sr_coef(lo[i]) for i in order];  his = [_sr_coef(hi[i]) for i in order]
+
+        namew = max(maximum(length, labels), length(depname), 8)
+        c1 = max(maximum(length, ests), length("Coefficient"))
+        c2 = max(maximum(length, ses),  length("std. err."))
+        c3 = max(maximum(length, tvs),  4)
+        c4 = max(maximum(length, pvs),  5)
+        c5 = max(maximum(length, los),  length("[95% conf."))
+        c6 = max(maximum(length, his),  length("interval]"))
+        right = c1 + c2 + c3 + c4 + c5 + c6 + 12
+        fullw = namew + 2 + right
+        rule() = println("-"^fullw)
+        dash() = println("-"^(namew + 1) * "+" * "-"^right)
+
+        rule()
+        if robust
+            println(" "^(namew + 1) * "| " * " "^c1 * "   " * lpad("Robust", c2))
+        end
+        println(lpad(depname, namew) * " | " * lpad("Coefficient", c1) * "  " *
+                lpad("std. err.", c2) * "  " * lpad("t", c3) * "  " *
+                lpad("P>|t|", c4) * "   " * lpad("[$(lvl)% conf.", c5) * "  " *
+                lpad("interval]", c6))
+        dash()
+        for i in eachindex(labels)
+            println(lpad(labels[i], namew) * " | " * lpad(ests[i], c1) * "  " *
+                    lpad(ses[i], c2) * "  " * lpad(tvs[i], c3) * "  " *
+                    lpad(pvs[i], c4) * "   " * lpad(los[i], c5) * "  " * lpad(his[i], c6))
+        end
+        rule()
+
+        println("Instrumented:  " * join(string.(endog), " "))
+        println("Instruments:   " * join(unique(string.(vcat(exog_v, iv))), " "))
+        rule()
     end
 
     # First-stage regressions
@@ -169,9 +239,6 @@ function stata_ivregress_2sls(df, y, endog_iv::Pair, exog = Symbol[];
     f_iv       = Base.eval(@__MODULE__, Meta.parse(fmla_str))
     m_iv       = FixedEffectModels.reg(df, f_iv, vcov)
     _print_second(m_iv, string(ys), endog)
-    Printf.@printf("Endogenous: %s\n", join(string.(endog), " "))
-    Printf.@printf("Exogenous:  %s\n",
-                   join(string.(vcat(exog_v, iv)), " "))
     return (; first_stage = first_stage_models, iv = m_iv)
 end
 

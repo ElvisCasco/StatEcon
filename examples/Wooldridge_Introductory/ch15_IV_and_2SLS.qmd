@@ -586,12 +586,10 @@ The differenced sample (`N = 45`) and both estimates reproduce Stata exactly.
 
 Every 2SLS/IV point estimate, first-stage coefficient, OLS coefficient, standard
 error, and joint `test` F-statistic reproduces the book's `ivreg`/`reg` output.
-The one systematic presentational difference is the reference distribution:
-`stata_ivregress_2sls` reports *z* statistics with a Wald *χ²(k)* (following
-`ivregress 2sls`) where legacy `ivreg` reports *t* statistics with `F(k, N−K)`;
-the standard errors are identical and `χ²(k) = k · F`, so p-values agree to
-rounding and confidence limits differ only by the normal-vs-*t* critical value in
-the fourth decimal. Control-function `educ` coefficients equal their 2SLS
+`stata_ivregress_2sls` prints Stata's legacy `ivreg` layout — the Source/SS/df/MS
+block, *t* statistics with `F(k, N−K)`, and *t*-based confidence intervals — so
+the displayed table matches the book directly. Control-function `educ`
+coefficients equal their 2SLS
 counterparts exactly, and the first-stage estimation sample (full vs
 working-women) is handled explicitly so Examples 15.5 and 15.7 match their
 respective Stata `first` outputs.

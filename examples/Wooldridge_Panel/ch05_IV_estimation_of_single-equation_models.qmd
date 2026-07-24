@@ -111,9 +111,9 @@ ols53 = stata_regress(mroz; y = :lwage, x = [:exper, :expersq, :educ])
 `expersq = -.0008628 (.0003962)`, `_cons = -.1868572 (.2853959)`,
 with `R² = 0.1495` and `Root MSE = .6693`. The IV return to schooling
 (.0804) is well below the OLS estimate (.1075) — the OLS regression above also
-matches Stata exactly. The only display difference is the *z*/χ² framing noted
-above (`Wald chi2(3) = 34.57` versus Stata's `F(3, 424) = 11.52`; note
-`34.57/3 = 11.52`).
+matches Stata exactly. `stata_ivregress_2sls` prints Stata's legacy `ivreg`
+layout, so the Source/SS/df/MS block, `F(3, 424) = 11.52`, and the *t*-based
+confidence intervals reproduce the published output line for line.
 
 # Example 5.4 on page 99 (mroz.dta)
 
@@ -192,10 +192,7 @@ coefficient down to an insignificant .025, exactly as reported.
 | 5.5 2SLS | R² / Root MSE | 0.1900 / .38067 | 0.1900 / .3807 | yes |
 
 All point estimates and standard errors on the UCLA Chapter 5 page reproduce
-exactly. The single systematic presentational difference: Stata's legacy `ivreg`
-reports `t` statistics with `F(k, N-K)`, whereas `stata_ivregress_2sls` follows
-`ivregress 2sls` and reports `z` statistics with `Wald chi2(k)`
-(`chi2 = k * F`). Confidence intervals therefore use normal rather than
-*t* critical values, which shifts the reported limits in the fourth decimal
-(e.g. 5.3 `educ` CI: Stata `[.0375934, .1231901]` vs Julia
-`[.0377156, .1230680]`). The standard errors themselves are identical.
+exactly, and `stata_ivregress_2sls` prints Stata's legacy `ivreg` layout — the
+Source/SS/df/MS block, `F(k, N-K)`, `t` statistics, `t`-based confidence
+intervals, and the `Instrumented:`/`Instruments:` footer — so the full table
+matches (e.g. 5.3 `educ` CI: `[.0375934, .1231901]`, identical to Stata).
