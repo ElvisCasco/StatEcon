@@ -63,129 +63,24 @@ use mroz, clear
 
 reg hours nwifeinc educ exper expersq age kidslt6 kidsge6
 
-      Source |       SS       df       MS              Number of obs =     753
--------------+------------------------------           F(  7,   745) =   38.50
-       Model |   151647606     7  21663943.7           Prob > F      =  0.0000
-    Residual |   419262118   745  562767.943           R-squared     =  0.2656
--------------+------------------------------           Adj R-squared =  0.2587
-       Total |   570909724   752   759188.463           Root MSE      =  750.18
-
-------------------------------------------------------------------------------
-       hours |      Coef.   Std. Err.      t    P>|t|     [95% Conf. Interval]
--------------+----------------------------------------------------------------
-    nwifeinc |  -3.446636      2.544    -1.35   0.176
-        educ |   28.76112   12.95459     2.22   0.027
-       exper |   65.67251   9.962983     6.59   0.000
-     expersq |  -.7004939   .3245501    -2.16   0.031
-         age |  -30.51163   4.363868    -6.99   0.000
-     kidslt6 |  -442.0899    58.8466    -7.51   0.000
-     kidsge6 |  -32.77923   23.17622    -1.41   0.158
-       _cons |   1330.482   270.7846     4.91   0.000
-------------------------------------------------------------------------------
-
 tobit hours nwifeinc educ exper expersq age kidslt6 kidsge6, ll(0)
-
-Tobit estimates                                   Number of obs   =        753
-                                                  LR chi2(7)      =     271.59
-                                                  Prob > chi2     =     0.0000
-Log likelihood = -3819.0946                       Pseudo R2       =     0.0343
-
-------------------------------------------------------------------------------
-       hours |      Coef.   Std. Err.      t    P>|t|     [95% Conf. Interval]
--------------+----------------------------------------------------------------
-    nwifeinc |  -8.814243   4.459096    -1.98   0.048
-        educ |   80.64561   21.58322     3.74   0.000
-       exper |   131.5643   17.27938     7.61   0.000
-     expersq |  -1.864158   .5376615    -3.47   0.001
-         age |  -54.40501   7.418496    -7.33   0.000
-     kidslt6 |  -894.0217   111.8779    -7.99   0.000
-     kidsge6 |    -16.218   38.64136    -0.42   0.675
-       _cons |   965.3053   446.4358     2.16   0.031
--------------+----------------------------------------------------------------
-         _se |   1122.022   41.57903                   (Ancillary parameter)
-------------------------------------------------------------------------------
-
-  Obs. summary:        325  left-censored observations at hours<=0
-                       428     uncensored observations
 
 * get the R-squared for tobit model
 matrix b = e(b)
 local se = el(b,1, 9)
 di `se'
-1122.0217
 
 predict xb, xb
 gen yhat = norm(xb/`se')*xb + `se'*normden(xb/`se')
 reg hours yhat
 
-      Source |       SS       df       MS              Number of obs =     753
--------------+------------------------------           F(  1,   751) =  283.78
-                                                       Prob > F      =  0.0000
-                                                       R-squared     =  0.2742
-                                                       Root MSE      =  742.78
-
-------------------------------------------------------------------------------
-       hours |      Coef.   Std. Err.      t    P>|t|     [95% Conf. Interval]
--------------+----------------------------------------------------------------
-        yhat |   .9634449   .0571918    16.85   0.000
-       _cons |   45.52784   49.34596     0.92   0.356
-------------------------------------------------------------------------------
-
 * comparing two tobit models
 tobit hours nwifeinc educ exper expersq age kidslt6 kidsge6, ll(0)
 fitstat, saving(m0)
 
-Log-Lik Intercept Only:      -3954.892     Log-Lik Full Model:      -3819.095
-D(744):                       7638.189     LR(7):                     271.594
-                                           Prob > LR:                   0.000
-McFadden's R2:                   0.034     McFadden's Adj R2:           0.032
-Maximum Likelihood R2:           0.303     Cragg & Uhler's R2:          0.303
-McKelvey and Zavoina's R2:       0.357
-Variance of y*:            1956786.696     Variance of error:     1258932.624
-AIC:                            10.168     AIC*n:                    7656.189
-BIC:                          2709.885     BIC':                     -225.226
-
 tobit hours nwifeinc educ exper expersq age kidslt6 kidsge6  unem city, ll(0)
 
-Tobit estimates                                   Number of obs   =        753
-                                                  LR chi2(9)      =     274.01
-                                                  Prob > chi2     =     0.0000
-Log likelihood = -3817.8867                       Pseudo R2       =     0.0346
-
-------------------------------------------------------------------------------
-       hours |      Coef.   Std. Err.
--------------+----------------------------------------------------------------
-    nwifeinc |  -8.700003   4.544473
-        educ |   83.11418   21.68775
-       exper |   133.4305   17.31206
-     expersq |  -1.934666   .5393865
-         age |  -53.13497   7.468394
-     kidslt6 |  -887.5036   111.6144
-     kidsge6 |  -13.28932   38.60969
-        unem |   -23.3407   15.06687
-        city |   11.36026   99.61766
-       _cons |   1060.127   449.8033
--------------+----------------------------------------------------------------
-         _se |   1119.474                                (Ancillary parameter)
-------------------------------------------------------------------------------
-
 fitstat, using(m0)
-
-                                Current        Saved       Difference
-Log-Lik Intercept Only:         -3954.892     -3954.892        0.000
-Log-Lik Full Model:             -3817.887     -3819.095        1.208
-D:                            7635.773(742) 7638.189(744)    2.416(2)
-LR:                            274.010(9)    271.594(7)      2.416(2)
-Prob > LR:                       0.000         0.000          0.299
-McFadden's R2:                   0.035         0.034          0.000
-McFadden's Adj R2:               0.032         0.032         -0.000
-Maximum Likelihood R2:           0.305         0.303          0.002
-Cragg & Uhler's R2:              0.305         0.303          0.002
-McKelvey and Zavoina's R2:       0.359         0.357          0.003
-AIC:                            10.170        10.168          0.002
-BIC:                          2720.717      2709.885         10.833
-
-Difference of 10.833 in BIC' provides very strong support for saved model.
 =#
 ```
 

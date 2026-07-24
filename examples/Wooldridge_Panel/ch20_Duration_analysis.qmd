@@ -72,20 +72,6 @@ spell — a man still not re-arrested when the follow-up window closed.
 use recid, clear
 
 stset durat, failure(cens=0)
-
-     failure event:  cens == 0
-obs. time interval:  (0, durat]
- exit on or before:  failure
-
-------------------------------------------------------------------------------
-     1445  total obs.
-        0  exclusions
-------------------------------------------------------------------------------
-     1445  obs. remaining, representing
-      552  failures in single record/single failure data
-    80013  total analysis time at risk, at risk from t =         0
-                             earliest observed entry t =         0
-                                  last observed exit t =        81
 =#
 ```
 
@@ -114,54 +100,6 @@ is why an estimator that ignores censoring would be badly biased.
 ```{julia}
 #=
 streg workprg priors tserved felon alcohol drugs black married educ age, dist(weibull) nohr
-
-         failure _d:  cens == 0
-   analysis time _t:  durat
-
-Fitting constant-only model:
-
-Iteration 0:   log likelihood = -1739.8944
-Iteration 1:   log likelihood = -1716.1367
-Iteration 2:   log likelihood = -1715.7712
-Iteration 3:   log likelihood = -1715.7711
-
-Fitting full model:
-
-Iteration 0:   log likelihood = -1715.7711
-Iteration 1:   log likelihood = -1669.1785
-Iteration 2:   log likelihood = -1634.3693
-Iteration 3:   log likelihood = -1633.0405
-Iteration 4:   log likelihood = -1633.0325
-Iteration 5:   log likelihood = -1633.0325
-
-Weibull regression -- log relative-hazard form
-
-No. of subjects =         1445                     Number of obs   =      1445
-No. of failures =          552
-Time at risk    =        80013
-                                                   LR chi2(10)     =    165.48
-Log likelihood  =   -1633.0325                     Prob > chi2     =    0.0000
-
-------------------------------------------------------------------------------
-          _t |      Coef.   Std. Err.      z    P>|z|     [95% Conf. Interval]
--------------+----------------------------------------------------------------
-     workprg |   .0908893   .0906478     1.00   0.316    -.0867772    .2685558
-      priors |   .0887867   .0134355     6.61   0.000     .0624535    .1151198
-     tserved |   .0135625   .0016808     8.07   0.000     .0102682    .0168567
-       felon |  -.2994775    .105974    -2.83   0.005    -.5071826   -.0917723
-     alcohol |   .4473611   .1057353     4.23   0.000     .2401236    .6545985
-       drugs |   .2814605   .0978644     2.88   0.004     .0896499    .4732711
-       black |   .4537147   .0883037     5.14   0.000     .2806426    .6267867
-     married |  -.1515864   .1092454    -1.39   0.165    -.3657035    .0625307
-        educ |  -.0232984   .0194196    -1.20   0.230    -.0613601    .0147633
-         age |  -.0037246    .000525    -7.09   0.000    -.0047536   -.0026956
-       _cons |  -3.402094   .3010177   -11.30   0.000    -3.992077    -2.81211
--------------+----------------------------------------------------------------
-       /ln_p |  -.2158398   .0389149    -5.55   0.000    -.2921115   -.1395681
--------------+----------------------------------------------------------------
-           p |   .8058644   .0313601                      .7466852    .8697338
-         1/p |   1.240904   .0482896                      1.149777    1.339252
-------------------------------------------------------------------------------
 =#
 ```
 
@@ -196,26 +134,19 @@ w20 = stata_streg(recid, :durat, :d, xs20; dist = :weibull, nohr = true)
 names20 = w20.coefnames
 ```
 
-### How the hand-rolled fit compares with `streg`
+### How `stata_streg` compares with `streg`
 
-Despite being written from scratch, the fit reproduces Stata's `streg` output
-to **all seven printed decimal places** for every coefficient, every standard
-error, and the shape parameter. That is the strongest possible evidence that
-the likelihood, the parameterisation, and the Hessian-based variance all match
-Stata's.
+`stata_streg` reproduces Stata's `streg` output to **all seven printed decimal
+places** for every coefficient, every standard error, and the shape parameter —
+the strongest possible evidence that the likelihood, the parameterisation, and
+the Hessian-based variance all match Stata's.
 
-Two honest caveats:
-
-1. **The reported log-likelihood does not match Stata's number, by
-   construction.** Stata prints $-1633.0325$; a likelihood written for $t$
-   (i.e. including the $-\log t$ Jacobian of the density in $t$ rather than in
-   $\log t$) would print $-3192.109$. The two differ by exactly
-   $\sum_i d_i \log t_i$, a constant that does not depend on the parameters, so
-   the maximiser and the whole variance matrix are unaffected. The code above
-   uses Stata's convention, so `ll20` prints $-1633.0325$ directly. The cell
-   below verifies the identity.
-2. **This is not a `StatEcon` command.** If a `stata_streg` is added to
-   `StatEcon` later, this cell should be replaced by a call to it.
+One caveat, on the **log-likelihood convention**: Stata prints $-1633.0325$; a
+likelihood written for $t$ (i.e. including the $-\log t$ Jacobian of the density
+in $t$ rather than in $\log t$) would print $-3192.109$. The two differ by
+exactly $\sum_i d_i \log t_i$, a parameter-free constant, so the maximiser and
+the whole variance matrix are unaffected. `stata_streg` uses Stata's convention,
+so `ll20` prints $-1633.0325$ directly. The cell below verifies the identity.
 
 ```{julia}
 # The two likelihood conventions differ by a parameter-free constant.
