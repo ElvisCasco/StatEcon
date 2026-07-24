@@ -270,51 +270,17 @@ Printf.@printf("\n_se (sigma) = %.7g    Log likelihood = %.4f\n", tb2.sigma, tb2
 lrt = stata_lrtest(tb2.ll, tb.ll, 2)
 ```
 
-`fitstat` reimplemented for the two nested Tobits (Long & Freese's definitions):
+`fitstat` (Long & Freese) is provided by StatEcon (src/econ_helpers.jl):
+`stata_fitstat` computes the fit statistics for a fitted tobit against the
+intercept-only log-likelihood, and `fitstat_table` prints the
+Current / Saved / Difference comparison (Stata's `fitstat, saving(m0)` then
+`fitstat, dif(m0)`). For the tobit the latent error variance is σ̂², the default.
 
 ```{julia}
-function tobit_fitstat(res, ll0, N)
-    kpar = length(res.β) + 1                   # β (incl. _cons) plus σ
-    kx   = length(res.β) - 1                   # slopes only
-    D    = -2 * res.ll
-    LR   = 2 * (res.ll - ll0)
-    xbv  = res.X * res.β
-    varxb = Statistics.var(xbv)                # Stata's fitstat uses the N-1 variance
-    vare  = res.sigma^2
-    (; ll0, ll = res.ll, D, dfD = N - kpar, LR, dfLR = kx,
-       pLR   = 1 - Distributions.cdf(Distributions.Chisq(kx), LR),
-       mcf   = 1 - res.ll / ll0,
-       mcfa  = 1 - (res.ll - kpar) / ll0,
-       mlr2  = 1 - exp(2 * (ll0 - res.ll) / N),
-       cu    = (1 - exp(2 * (ll0 - res.ll) / N)) / (1 - exp(2 * ll0 / N)),
-       mz    = varxb / (varxb + vare),
-       varys = varxb + vare, vare,
-       aic   = (D + 2 * kpar) / N, aicn = D + 2 * kpar,
-       bic   = D - (N - kpar) * log(N), bicp = -LR + kx * log(N))
-end
-
 N   = tb.n
-fs0 = tobit_fitstat(tb,  tb_null.ll, N)
-fs1 = tobit_fitstat(tb2, tb_null.ll, N)
-
-Printf.@printf("%-30s%13s%13s%13s\n", "", "Current", "Saved", "Difference")
-Printf.@printf("%-30s%13.3f%13.3f%13.3f\n", "Log-Lik Intercept Only:", fs1.ll0, fs0.ll0, fs1.ll0 - fs0.ll0)
-Printf.@printf("%-30s%13.3f%13.3f%13.3f\n", "Log-Lik Full Model:", fs1.ll, fs0.ll, fs1.ll - fs0.ll)
-Printf.@printf("%-30s%9.3f(%d)%9.3f(%d)%9.3f(%d)\n", "D:", fs1.D, fs1.dfD, fs0.D, fs0.dfD,
-               fs0.D - fs1.D, fs0.dfD - fs1.dfD)
-Printf.@printf("%-30s%9.3f(%d)%11.3f(%d)%11.3f(%d)\n", "LR:", fs1.LR, fs1.dfLR, fs0.LR, fs0.dfLR,
-               fs1.LR - fs0.LR, fs1.dfLR - fs0.dfLR)
-Printf.@printf("%-30s%13.3f%13.3f%13.3f\n", "Prob > LR:", fs1.pLR, fs0.pLR, lrt.p)
-Printf.@printf("%-30s%13.3f%13.3f%13.3f\n", "McFadden's R2:", fs1.mcf, fs0.mcf, fs1.mcf - fs0.mcf)
-Printf.@printf("%-30s%13.3f%13.3f%13.3f\n", "McFadden's Adj R2:", fs1.mcfa, fs0.mcfa, fs1.mcfa - fs0.mcfa)
-Printf.@printf("%-30s%13.3f%13.3f%13.3f\n", "Maximum Likelihood R2:", fs1.mlr2, fs0.mlr2, fs1.mlr2 - fs0.mlr2)
-Printf.@printf("%-30s%13.3f%13.3f%13.3f\n", "Cragg & Uhler's R2:", fs1.cu, fs0.cu, fs1.cu - fs0.cu)
-Printf.@printf("%-30s%13.3f%13.3f%13.3f\n", "McKelvey and Zavoina's R2:", fs1.mz, fs0.mz, fs1.mz - fs0.mz)
-Printf.@printf("%-30s%13.3f%13.3f%13.3f\n", "Variance of y*:", fs1.varys, fs0.varys, fs1.varys - fs0.varys)
-Printf.@printf("%-30s%13.3f%13.3f%13.3f\n", "Variance of error:", fs1.vare, fs0.vare, fs1.vare - fs0.vare)
-Printf.@printf("%-30s%13.3f%13.3f%13.3f\n", "AIC:", fs1.aic, fs0.aic, fs1.aic - fs0.aic)
-Printf.@printf("%-30s%13.3f%13.3f%13.3f\n", "BIC:", fs1.bic, fs0.bic, fs1.bic - fs0.bic)
-Printf.@printf("%-30s%13.3f%13.3f%13.3f\n", "BIC':", fs1.bicp, fs0.bicp, fs1.bicp - fs0.bicp)
+fs0 = stata_fitstat(tb,  tb_null.ll, N)   # saved model (m0)
+fs1 = stata_fitstat(tb2, tb_null.ll, N)   # current model
+fitstat_table(fs1, fs0; prob_lr_dif = lrt.p)
 ```
 
 **Comparison.** The larger Tobit reproduces Stata's coefficients to six or seven

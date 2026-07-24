@@ -378,4 +378,29 @@ df = DataFrame(
         @test all(isapprox.(sum(r.P, dims = 2), 1.0; atol = 1e-10))  # rows are proper distributions
     end
 
+    @testset "stata_fitstat / fitstat_table (fit statistics)" begin
+        X = Float64[1 0.5; 1 1.0; 1 1.5; 1 2.0; 1 2.5; 1 3.0]
+        res = (; β = [0.5, 1.5], ll = -40.0, X = X, sigma = 2.0)
+        N = 6; ll0 = -55.0
+        fs = stata_fitstat(res, ll0, N)
+        @test fs.D    ≈ 80.0                        # -2·ll
+        @test fs.LR   ≈ 30.0                        # 2·(ll − ll0)
+        @test fs.dfLR == 1                          # length(β) − 1
+        @test fs.dfD  == N - (length(res.β) + 1)    # N − (slopes+cons+σ)
+        @test fs.vare ≈ 4.0                         # σ²
+        xb = res.X * res.β
+        @test fs.mz  ≈ Statistics.var(xb) / (Statistics.var(xb) + 4.0)
+        @test fs.mcf ≈ 1 - (-40.0) / (-55.0)
+        @test fs.aicn ≈ 80.0 + 2 * 3
+        # n_aux / error_var overrides (e.g. probit: no σ parameter, unit error var)
+        fsp = stata_fitstat(res, ll0, N; n_aux = 0, error_var = 1.0)
+        @test fsp.dfD == N - length(res.β)
+        @test fsp.vare ≈ 1.0
+        # fitstat_table prints and returns nothing
+        fs2 = stata_fitstat((; β = [0.4, 1.6], ll = -38.0, X = X, sigma = 2.1), ll0, N)
+        @test (redirect_stdout(devnull) do
+            fitstat_table(fs2, fs; prob_lr_dif = 0.3)
+        end) === nothing
+    end
+
 end

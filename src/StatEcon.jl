@@ -266,7 +266,7 @@ export dataset, datasets, datapath, datadir,
        # reproducible post-estimation & time-series helpers (econ_helpers.jl)
        lincom, stdbeta, predict_ci, sigma2_of,
        newey_west, cochrane_orcutt, bpagan_lm, sargan, ivreg2_table,
-       ordered_classtable
+       ordered_classtable, stata_fitstat, fitstat_table
 
 # Compile the hot paths at precompile time instead of on first use in a notebook.
 @setup_workload begin

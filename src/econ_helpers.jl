@@ -295,3 +295,78 @@ function ordered_classtable(β, τ, X, y_idx, cats;
     end
     return (; pclass, ctab, P, correct)
 end
+
+"""
+    stata_fitstat(res, ll0, N; n_aux=1, error_var=res.sigma^2) -> NamedTuple
+
+Post-estimation fit statistics for a latent-normal MLE model — Long & Freese's
+`fitstat` after `tobit` / `intreg` and similar censored- or interval-normal
+models. `res` is the fitted result (needs `res.β`, `res.ll`, and `res.X`), `ll0`
+the intercept-only log-likelihood, and `N` the number of observations.
+
+`n_aux` is the number of ancillary parameters counted alongside the regression
+coefficients (default `1`, the error scale σ); `error_var` is the latent error
+variance used by the McKelvey–Zavoina R² and the "variance of y*/error" rows
+(default `res.sigma²`, i.e. tobit — pass `1.0` for probit, `π²/3` for logit).
+
+The likelihood-based statistics (`D`, `LR`, McFadden, adjusted McFadden,
+Cox–Snell `mlr2`, Cragg–Uhler `cu`, `aic`, `bic`, `bic'`) are general to any MLE;
+only `mz`/`varys`/`vare` assume the latent-normal interpretation. Returns a
+NamedTuple with fields consumed by [`fitstat_table`](@ref).
+"""
+function stata_fitstat(res, ll0, N; n_aux::Int = 1,
+                       error_var::Real = res.sigma^2)
+    kpar = length(res.β) + n_aux               # slopes + intercept + ancillary (σ)
+    kx   = length(res.β) - 1                    # slopes only
+    D    = -2 * res.ll
+    LR   = 2 * (res.ll - ll0)
+    xbv  = res.X * res.β
+    varxb = Statistics.var(xbv)                 # Stata's fitstat uses the N-1 variance
+    vare  = error_var
+    (; ll0, ll = res.ll, D, dfD = N - kpar, LR, dfLR = kx,
+       pLR   = 1 - Distributions.cdf(Distributions.Chisq(kx), LR),
+       mcf   = 1 - res.ll / ll0,
+       mcfa  = 1 - (res.ll - kpar) / ll0,
+       mlr2  = 1 - exp(2 * (ll0 - res.ll) / N),
+       cu    = (1 - exp(2 * (ll0 - res.ll) / N)) / (1 - exp(2 * ll0 / N)),
+       mz    = varxb / (varxb + vare),
+       varys = varxb + vare, vare,
+       aic   = (D + 2 * kpar) / N, aicn = D + 2 * kpar,
+       bic   = D - (N - kpar) * log(N), bicp = -LR + kx * log(N))
+end
+
+"""
+    fitstat_table(current, saved; prob_lr_dif=nothing)
+
+Print Long & Freese's `fitstat, dif()` Current / Saved / Difference comparison
+of two [`stata_fitstat`](@ref) results (`current` is the model just fit, `saved`
+the stored one). Every row's Difference is `current − saved`, except the deviance
+`D` (Stata reports `saved − current`) and `Prob > LR`, whose Difference is the
+p-value of the direct likelihood-ratio test between the two models — pass it as
+`prob_lr_dif` (e.g. `stata_lrtest(...).p`); if omitted, `current.pLR − saved.pLR`
+is shown.
+"""
+function fitstat_table(current, saved; prob_lr_dif = nothing)
+    c = current; s = saved
+    r3(lbl, cv, sv) = Printf.@printf("%-30s%13.3f%13.3f%13.3f\n", lbl, cv, sv, cv - sv)
+    Printf.@printf("%-30s%13s%13s%13s\n", "", "Current", "Saved", "Difference")
+    r3("Log-Lik Intercept Only:", c.ll0, s.ll0)
+    r3("Log-Lik Full Model:",     c.ll,  s.ll)
+    Printf.@printf("%-30s%9.3f(%d)%9.3f(%d)%9.3f(%d)\n", "D:",
+                   c.D, c.dfD, s.D, s.dfD, s.D - c.D, s.dfD - c.dfD)
+    Printf.@printf("%-30s%9.3f(%d)%11.3f(%d)%11.3f(%d)\n", "LR:",
+                   c.LR, c.dfLR, s.LR, s.dfLR, c.LR - s.LR, c.dfLR - s.dfLR)
+    Printf.@printf("%-30s%13.3f%13.3f%13.3f\n", "Prob > LR:", c.pLR, s.pLR,
+                   prob_lr_dif === nothing ? c.pLR - s.pLR : prob_lr_dif)
+    r3("McFadden's R2:",             c.mcf,   s.mcf)
+    r3("McFadden's Adj R2:",         c.mcfa,  s.mcfa)
+    r3("Maximum Likelihood R2:",     c.mlr2,  s.mlr2)
+    r3("Cragg & Uhler's R2:",        c.cu,    s.cu)
+    r3("McKelvey and Zavoina's R2:", c.mz,    s.mz)
+    r3("Variance of y*:",            c.varys, s.varys)
+    r3("Variance of error:",         c.vare,  s.vare)
+    r3("AIC:",                       c.aic,   s.aic)
+    r3("BIC:",                       c.bic,   s.bic)
+    r3("BIC':",                      c.bicp,  s.bicp)
+    return nothing
+end
