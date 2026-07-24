@@ -206,6 +206,7 @@ include("stata_xtnbreg_fe.jl")
 include("stata_xttobit_re.jl")
 include("stata_xtmelogit.jl")
 include("stata_estimates_table_se.jl")
+include("econ_helpers.jl")
 
 export dataset, datasets, datapath, datadir,
        stata_regress, stata_regress_cluster,
@@ -261,7 +262,11 @@ export dataset, datasets, datapath, datadir,
        stata_xtlogit_pa, stata_xtlogit_re, stata_xtlogit_fe,
        stata_xtpoisson_pa, stata_xtpoisson_re, stata_xtpoisson_re_normal,
        stata_xtnbreg_pa, stata_xtnbreg_re, stata_xtnbreg_fe,
-       stata_xttobit_re, stata_xtmelogit, stata_estimates_table_se
+       stata_xttobit_re, stata_xtmelogit, stata_estimates_table_se,
+       # reproducible post-estimation & time-series helpers (econ_helpers.jl)
+       lincom, stdbeta, predict_ci, sigma2_of,
+       newey_west, cochrane_orcutt, bpagan_lm, sargan, ivreg2_table,
+       ordered_classtable
 
 # Compile the hot paths at precompile time instead of on first use in a notebook.
 @setup_workload begin

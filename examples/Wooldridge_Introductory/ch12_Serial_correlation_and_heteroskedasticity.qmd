@@ -62,57 +62,10 @@ lag1(v) = [missing; v[1:end-1]]          # one-period lag for a contiguous, sort
 # Durbin–Watson statistic from a time-ordered residual vector.
 dwstat(e) = sum((e[2:end] .- e[1:end-1]).^2) / sum(e.^2)
 
-# Newey–West HAC standard errors (Bartlett kernel, `L` lags), with Stata's
-# n/(n-k) small-sample adjustment — reproduces `newey y x, lag(L)`.
-function newey_west(df, y, xs, L)
-    X = _desX(df, xs); yy = Float64.(df[!, y])
-    n, k = size(X); bread = inv(X'X)
-    b = bread * (X'yy); e = yy .- X * b
-    S = zeros(k, k)
-    for t in 1:n
-        S .+= e[t]^2 * (X[t, :] * X[t, :]')
-    end
-    for l in 1:L
-        w = 1 - l / (L + 1); G = zeros(k, k)
-        for t in (l + 1):n
-            G .+= e[t] * e[t - l] * (X[t, :] * X[t - l, :]' + X[t - l, :] * X[t, :]')
-        end
-        S .+= w * G
-    end
-    V  = (n / (n - k)) * bread * S * bread
-    se = sqrt.(diag(V))
-    (b = b, se = se, t = b ./ se, n = n, k = k)
-end
-
-# Iterated Cochrane–Orcutt AR(1) regression — reproduces `prais y x, corc`.
-function cochrane_orcutt(df, y, xs; tol = 1e-6, maxit = 200)
-    X = _desX(df, xs); yy = Float64.(df[!, y]); n, k = size(X)
-    b = (X'X) \ (X'yy); rho = 0.0
-    for _ in 1:maxit
-        e = yy .- X * b
-        rnew = sum(e[2:end] .* e[1:end-1]) / sum(e[1:end-1].^2)
-        yt = yy[2:end] .- rnew .* yy[1:end-1]
-        Xt = X[2:end, :] .- rnew .* X[1:end-1, :]
-        b  = (Xt'Xt) \ (Xt'yt)
-        abs(rnew - rho) < tol && (rho = rnew; break)
-        rho = rnew
-    end
-    yt = yy[2:end] .- rho .* yy[1:end-1]
-    Xt = X[2:end, :] .- rho .* X[1:end-1, :]
-    nt = length(yt); bt = (Xt'Xt) \ (Xt'yt); et = yt .- Xt * bt
-    s2 = sum(et.^2) / (nt - k); se = sqrt.(diag(s2 * inv(Xt'Xt)))
-    e0 = yy .- X * ((X'X) \ (X'yy))
-    (b = bt, se = se, t = bt ./ se, rho = rho, n = nt, k = k,
-     dw_orig = dwstat(e0), dw_trans = dwstat(et))
-end
-
-# Breusch–Pagan (1979) LM statistic — reproduces the user-written `bpagan`.
-function bpagan_lm(df, y, xs, zs)
-    X = _desX(df, xs); yy = Float64.(df[!, y]); n = size(X, 1)
-    e = yy .- X * ((X'X) \ (X'yy)); g = e.^2 ./ (sum(e.^2) / n)
-    Z = _desX(df, zs); gh = Z * ((Z'Z) \ (Z'g))
-    sum((gh .- mean(g)).^2) / 2
-end
+# `newey_west` (`newey y x, lag(L)`), `cochrane_orcutt` (`prais y x, corc`) and
+# `bpagan_lm` (Breusch–Pagan 1979 LM) are provided by StatEcon
+# (src/econ_helpers.jl) and are in scope here via `using StatEcon`. They expect
+# complete-case, time-sorted rows, exactly as built below.
 
 # Print a coefficient table (names, coef, se, t) Stata-style.
 function print_coeftable(names, b, se; title = "")

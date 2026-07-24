@@ -65,50 +65,14 @@ whereas StatEcon's `stata_ivregress_2sls` (built on `FixedEffectModels`) uses
 the small-sample divisor `N − K`. Coefficients are unaffected; standard errors
 differ by exactly `sqrt((N-K)/N)`. The helper below rescales a fitted 2SLS
 model to the `ivreg2` convention so the published numbers can be checked
-digit-for-digit.
-
-```{julia}
-function ivreg2_table(m; dep::AbstractString = "y")
-    β  = StatsBase.coef(m)
-    n  = Int(StatsBase.nobs(m))
-    k  = length(β)
-    se = sqrt.(LinearAlgebra.diag(StatsBase.vcov(m))) .* sqrt((n - k) / n)
-    z  = β ./ se
-    p  = 2 .* (1 .- Distributions.cdf.(Normal(), abs.(z)))
-    nm = replace.(string.(StatsBase.coefnames(m)), "(Intercept)" => "_cons")
-    Printf.@printf("%-10s %13s %12s %8s %8s\n", dep, "Coef.", "Std. Err.", "z", "P>|z|")
-    println(repeat("-", 55))
-    for i in eachindex(β)
-        Printf.@printf("%-10s %13.6g %12.6g %8.2f %8.3f\n", nm[i], β[i], se[i], z[i], p[i])
-    end
-    return (; β, se, z, p, names = nm)
-end
-```
+digit-for-digit. `ivreg2_table(m; dep)` is provided by StatEcon
+(src/econ_helpers.jl) and is in scope here via `using StatEcon`.
 
 `ivreg2` also prints a **Sargan** overidentification statistic. StatEcon ships
 `stata_estat_overid_2sls` for the single-endogenous-regressor case; Example 9.6
-has two endogenous regressors, so the small helper below computes the same
-`n·R²` statistic for the general case.
-
-```{julia}
-function sargan(df, y, endog, exog, ivs)
-    n  = DataFrames.nrow(df)
-    Z  = hcat(ones(n), [Float64.(df[!, v]) for v in vcat(exog, ivs)]...)
-    Xe = hcat([Float64.(df[!, v]) for v in endog]...)
-    X  = hcat(ones(n), Z * (Z \ Xe), [Float64.(df[!, v]) for v in exog]...)
-    Xr = hcat(ones(n), [Float64.(df[!, v]) for v in vcat(endog, exog)]...)
-    yv = Float64.(df[!, y])
-    u  = yv .- Xr * (X \ yv)
-    r  = u .- Z * (Z \ u)
-    R2 = 1 - sum(abs2, r) / sum(abs2, u)
-    chi2 = n * R2
-    dfree = length(ivs) - length(endog)
-    pv = 1 - Distributions.cdf(Chisq(dfree), chi2)
-    Printf.@printf("Sargan statistic (overidentification test of all instruments): %8.3f\n", chi2)
-    Printf.@printf("                                        Chi-sq(%d) P-val = %9.5f\n", dfree, pv)
-    return (; chi2, df = dfree, p = pv)
-end
-```
+has two endogenous regressors, so StatEcon's `sargan(df, y, endog, exog, ivs)`
+(src/econ_helpers.jl) computes the same `n·R²` statistic for the general case,
+in scope here via `using StatEcon`.
 
 ## Example 9.5 (mroz.dta) — labor supply and the wage offer
 

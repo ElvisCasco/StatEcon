@@ -695,38 +695,22 @@ the logistic link replaced by the standard-normal CDF.
 ```{julia}
 op = stata_oprobit(pension, :pctstck, XP)   # StatEcon ships this now
 
-# variables the classification table below reuses
-β̂, τ̂ = op.β, op.τ
-Xop   = op.X
-Φ(z)  = Distributions.cdf(Distributions.Normal(), z)
+# the estimation sample, its distinct outcome values, and each row's category index
 pen_est = DataFrames.dropmissing(pension[:, vcat(:pctstck, XP)])
 cats  = sort(unique(Float64.(pen_est.pctstck)))
 y_idx = [findfirst(==(v), cats) for v in Float64.(pen_est.pctstck)]
-N     = length(y_idx)
 ```
 
 ### Predicted class vs. actual (`tab pclass pctstck`)
 
 ```{julia}
-η   = Xop * β̂
-Pop = hcat(Φ.(τ̂[1] .- η),
-           Φ.(τ̂[2] .- η) .- Φ.(τ̂[1] .- η),
-           1 .- Φ.(τ̂[2] .- η))
-pclass = [argmax(view(Pop, i, :)) for i in 1:N]
-
-ctab = [sum((pclass .== a) .& (y_idx .== b)) for a in 1:3, b in 1:3]
-Printf.@printf("    pclass |%9d %9d %9d |    Total\n", 0, 50, 100)
-for a in 1:3
-    Printf.@printf("%10d |%9d %9d %9d | %8d\n", a,
-                   ctab[a, 1], ctab[a, 2], ctab[a, 3], sum(ctab[a, :]))
-end
-Printf.@printf("     Total |%9d %9d %9d | %8d\n",
-               sum(ctab[:, 1]), sum(ctab[:, 2]), sum(ctab[:, 3]), sum(ctab))
-Printf.@printf("\ndi (%d+%d+%d)/%d = %.8f\n", ctab[1,1], ctab[2,2], ctab[3,3], N,
-               (ctab[1,1] + ctab[2,2] + ctab[3,3]) / N)
-Printf.@printf("di %d/%d = %.8f\n", ctab[1,1], sum(ctab[:,1]), ctab[1,1]/sum(ctab[:,1]))
-Printf.@printf("di %d/%d = %.8f\n", ctab[2,2], sum(ctab[:,2]), ctab[2,2]/sum(ctab[:,2]))
-Printf.@printf("di %d/%d = %.8f\n", ctab[3,3], sum(ctab[:,3]), ctab[3,3]/sum(ctab[:,3]))
+# `ordered_classtable` (StatEcon, src/econ_helpers.jl) forms the predicted
+# category probabilities from the ordered-probit index `X·β` and cut points `τ`,
+# assigns each observation to its most likely category, and cross-tabulates the
+# predicted class against actual `pctstck` — Stata's
+# `tab pclass pctstck if e(sample)`. The default link is the standard normal
+# (ordered probit); pass `link = z -> 1/(1 + exp(-z))` after an ordered logit.
+ordered_classtable(op.β, op.τ, op.X, y_idx, cats);
 ```
 
 **Comparison.** The OLS regression matches Stata to all printed digits

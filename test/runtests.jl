@@ -300,4 +300,82 @@ df = DataFrame(
         @test isapprox(r.pseudo_r2,    0.0489; atol = 1e-3)
     end
 
+    @testset "econ_helpers (lincom/predict_ci/sigma2_of/sargan/…)" begin
+        w1 = DataFrame(dataset("wage1"))
+        m  = redirect_stdout(devnull) do
+            stata_regress(w1; y = :wage, x = [:female, :educ, :exper, :tenure])
+        end
+        cn = string.(FixedEffectModels.coefnames(m))
+        b  = FixedEffectModels.coef(m); V = FixedEffectModels.vcov(m)
+        ife = findfirst(==("female"), cn); icn = findfirst(==("(Intercept)"), cn)
+
+        # lincom: unit weight on one coefficient reproduces its own est & se
+        r = redirect_stdout(devnull) do; lincom(m, ["female" => 1.0]); end
+        @test isapprox(r.est, b[ife];            atol = 1e-10)
+        @test isapprox(r.se,  sqrt(V[ife, ife]); atol = 1e-10)
+        r2 = redirect_stdout(devnull) do
+            lincom(m, ["female" => 1.0, "(Intercept)" => 1.0])
+        end
+        @test isapprox(r2.est, b[ife] + b[icn];  atol = 1e-10)
+
+        # predict_ci: xb == coef·x0 and se == sqrt(x0' V x0)
+        x0 = zeros(length(b)); x0[icn] = 1.0; x0[ife] = 1.0
+        pc = redirect_stdout(devnull) do; predict_ci(m, x0); end
+        @test isapprox(pc.xb, b[icn] + b[ife];   atol = 1e-10)
+        @test isapprox(pc.se, sqrt(x0' * V * x0); atol = 1e-10)
+
+        # sigma2_of == RSS / dof_residual
+        @test isapprox(sigma2_of(m, w1, :wage),
+                       m.rss / FixedEffectModels.dof_residual(m); rtol = 1e-8)
+
+        # stdbeta returns the fitted model
+        mb = redirect_stdout(devnull) do; stdbeta(w1, :wage, [:female, :educ]); end
+        @test mb isa FixedEffectModels.FixedEffectModel
+
+        # IV helpers on mroz
+        mz = dropmissing(DataFrame(dataset("wooldridge/mroz")),
+             [:hours, :lwage, :educ, :age, :kidslt6, :kidsge6, :nwifeinc, :exper, :expersq])
+        iv = redirect_stdout(devnull) do
+            stata_ivregress_2sls(mz, :hours, :lwage => [:exper, :expersq],
+                [:educ, :age, :kidslt6, :kidsge6, :nwifeinc]; robust = false, first = false)
+        end
+        n = Int(FixedEffectModels.nobs(iv.iv)); k = length(FixedEffectModels.coef(iv.iv))
+        se_small = [sqrt(FixedEffectModels.vcov(iv.iv)[i, i]) for i in 1:k]
+        tb = redirect_stdout(devnull) do; ivreg2_table(iv.iv; dep = "hours"); end
+        # ivreg2_table rescales to large-sample (N divisor) SEs
+        @test all(isapprox.(tb.se, se_small .* sqrt((n - k) / n); rtol = 1e-8))
+
+        sg = redirect_stdout(devnull) do
+            sargan(mz, :hours, [:lwage],
+                   [:educ, :age, :kidslt6, :kidsge6, :nwifeinc], [:exper, :expersq])
+        end
+        @test sg.df == 1
+        @test isfinite(sg.chi2) && 0 <= sg.p <= 1
+
+        # time-series helpers run and return finite values on a sorted series
+        d = DataFrame(x = collect(1.0:40.0)); d.y = 2 .+ 0.5 .* d.x .+ 0.4 .* sin.(1:40)
+        nw = newey_west(d, :y, [:x], 2)
+        @test length(nw.b) == 2 && all(isfinite, nw.se)
+        co = redirect_stdout(devnull) do; cochrane_orcutt(d, :y, [:x]); end
+        @test isfinite(co.rho) && all(isfinite, co.b)
+        @test isfinite(bpagan_lm(d, :y, [:x], [:x]))
+    end
+
+    @testset "ordered_classtable reproduces tab pclass (Wooldridge Ex. 15.5)" begin
+        XP = [:choice, :age, :educ, :female, :black, :married, :finc25, :finc35,
+              :finc50, :finc75, :finc100, :finc101, :wealth89, :prftshr]
+        pension = dataset("pension")
+        op = redirect_stdout(devnull) do; stata_oprobit(pension, :pctstck, XP); end
+        pen = dropmissing(DataFrame(pension)[:, vcat(:pctstck, XP)])
+        cats  = sort(unique(Float64.(pen.pctstck)))
+        y_idx = [findfirst(==(v), cats) for v in Float64.(pen.pctstck)]
+        r = redirect_stdout(devnull) do
+            ordered_classtable(op.β, op.τ, op.X, y_idx, cats)
+        end
+        @test r.ctab == [33 21 11; 25 31 25; 6 20 22]      # Stata `tab pclass pctstck`
+        @test sum(r.ctab) == 194
+        @test isapprox(r.correct, (33 + 31 + 22) / 194; atol = 1e-8)
+        @test all(isapprox.(sum(r.P, dims = 2), 1.0; atol = 1e-10))  # rows are proper distributions
+    end
+
 end

@@ -45,36 +45,9 @@ bvec(m)    = StatsBase.coef(m)
 Vmat(m)    = StatsBase.vcov(m)
 bget(m, s) = bvec(m)[findfirst(==(s), cn(m))]
 
-# Stata's `, beta`: b_j * sd(x_j)/sd(y) over the estimation sample.
-function stdbeta(df, y, xs)
-    sy = Statistics.std(df[!, y])
-    m  = stata_regress(df; y = y, x = xs)
-    for x in xs
-        b = bget(m, string(x))
-        Printf.@printf("  %-10s beta = % .7g\n", x, b * Statistics.std(df[!, x]) / sy)
-    end
-    return m
-end
-
-# Point prediction and its SE for a new x0 (coefficient order, intercept first).
-# forecast=true adds sigma^2 (Stata's stdf); otherwise mean-prediction SE (stdp).
-function predict_ci(m, x0; forecast = false, sigma2 = nothing)
-    b = bvec(m); V = Vmat(m)
-    xb   = LinearAlgebra.dot(b, x0)
-    varp = LinearAlgebra.dot(x0, V * x0)
-    forecast && (varp += sigma2)
-    sd = sqrt(varp)
-    Printf.@printf("  xb = %.7g   se = %.7g\n  95%% CI = [%.7g, %.7g]\n",
-                   xb, sd, xb - 1.96sd, xb + 1.96sd)
-    return (xb = xb, se = sd)
-end
-
-# Residual variance sigma^2 = RSS / dof_residual (Stata's Residual MS).
-function sigma2_of(m, df, y)
-    r = df[!, y] .- FixedEffectModels.predict(m, df)
-    rr = collect(skipmissing(r))
-    sum(abs2, rr) / StatsBase.dof_residual(m)
-end
+# `stdbeta` (Stata `, beta`), `predict_ci` (`predict, stdp`/`stdf`) and
+# `sigma2_of` (residual variance) are provided by StatEcon — see
+# src/econ_helpers.jl — and are in scope here via `using StatEcon`.
 ```
 
 ## Example 6.1: Effect of Pollution on Housing Prices

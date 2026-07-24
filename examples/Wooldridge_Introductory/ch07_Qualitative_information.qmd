@@ -43,25 +43,9 @@ bvec(m)    = StatsBase.coef(m)
 Vmat(m)    = StatsBase.vcov(m)
 bget(m, s) = bvec(m)[findfirst(==(s), cn(m))]
 
-# lincom(m, ["v1"=>w1, "v2"=>w2, ...]; c = constant)
-function lincom(m, terms; c = 0.0)
-    names = cn(m); b = bvec(m); V = Vmat(m)
-    w = zeros(length(b))
-    for (nm, wt) in terms
-        i = findfirst(==(nm), names)
-        i === nothing && error("no coefficient named $nm")
-        w[i] += wt
-    end
-    est = LinearAlgebra.dot(w, b) + c
-    se  = sqrt(LinearAlgebra.dot(w, V * w))
-    df  = StatsBase.dof_residual(m)
-    t   = est / se
-    p   = 2 * (1 - Distributions.cdf(Distributions.TDist(df), abs(t)))
-    tc  = Distributions.quantile(Distributions.TDist(df), 0.975)
-    Printf.@printf("  estimate = %.7g   se = %.7g\n  t = %.2f   p = %.3f   95%% CI = [%.7g, %.7g]\n",
-                   est, se, t, p, est - tc * se, est + tc * se)
-    return (est = est, se = se, t = t, p = p)
-end
+# `lincom(m, ["v1"=>w1, ...]; c)` — a t-based linear combination of
+# coefficients — is provided by StatEcon (src/econ_helpers.jl) and is in
+# scope here via `using StatEcon`. Reference the constant as "(Intercept)".
 ```
 
 ## Example 7.1: Hourly Wage Equation
