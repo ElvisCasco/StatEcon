@@ -61,9 +61,9 @@ directly below:
   `stata_label_list`, `stata_tabulate_two_way`, `stata_estimates_table_compare`
 
 Each estimator's `predict`-style probability routine is a private helper and
-is called module-qualified: `StatEcon._c15_mnl_probs`,
-`StatEcon._c15_ologit_probs`, `StatEcon._c15_nlogit_probs`,
-`StatEcon._c15_clogit_probs`, `StatEcon._c15_biprobit_probs`. The canonical
+is called module-qualified: `StatEcon._mnl_probs`,
+`StatEcon._ologit_probs`, `StatEcon._nlogit_probs`,
+`StatEcon._clogit_probs`, `StatEcon._biprobit_probs`. The canonical
 `stata_summarize`, `stata_tabulate`, `stata_correlate`, and `stata_probit`
 (already in `StatEcon`) are reused unchanged.
 
@@ -359,9 +359,9 @@ predict pmlogit1 pmlogit2 pmlogit3 pmlogit4, pr
 summarize pmlogit* dbeach dpier dprivate dcharter, separator(4)
 =#
 
-# `StatEcon._c15_mnl_probs` (chunk 1) evaluates the fitted MNL probabilities
+# `StatEcon._mnl_probs` (chunk 1) evaluates the fitted MNL probabilities
 # P(y = j | x) for each outcome j — Stata's `predict pmlogit*, pr`.
-P_mnl = StatEcon._c15_mnl_probs(β_mnl, X15, J)
+P_mnl = StatEcon._mnl_probs(β_mnl, X15, J)
 df15c.pmlogit1 = P_mnl[:, 1]
 df15c.pmlogit2 = P_mnl[:, 2]
 df15c.pmlogit3 = P_mnl[:, 3]
@@ -522,7 +522,7 @@ asclogit d p q, case(id) alternatives(fishmode) casevars(income) basealternative
 # with `beach` pinning α_beach = γ_beach = 0. The returned NamedTuple
 # binds `β_cl` (the concatenated parameter vector `[β_p; β_q;
 # α_pier,α_private,α_charter; γ_pier,γ_private,γ_charter]`) so the
-# downstream §15.5.7 / §15.5.8 chunks can call `StatEcon._c15_clogit_probs(β_cl, …)`
+# downstream §15.5.7 / §15.5.8 chunks can call `StatEcon._clogit_probs(β_cl, …)`
 # directly.
 asclogit_res = stata_asclogit(df15long;
     case_var      = :id,
@@ -569,13 +569,13 @@ table fishmode, statistic(mean d) statistic(mean pasclogit) statistic(sd pasclog
 =#
 
 # `predict pasclogit, pr` after `asclogit` is the same per-(case,
-# alternative) softmax that `StatEcon._c15_clogit_probs` (chunk 1) implements:
+# alternative) softmax that `StatEcon._clogit_probs` (chunk 1) implements:
 # stable softmax over each case's J utilities given `β_cl`. The Stata
 # `table` then aggregates by `fishmode` — mean(d) recovers the
 # empirical share per alternative, and mean(pasclogit) /
 # sd(pasclogit) summarise the fitted probabilities. Both go through
 # `stata_table` (chunk 1) for a Stata-formatted block.
-df15long.pasclogit = StatEcon._c15_clogit_probs(β_cl, df15long)
+df15long.pasclogit = StatEcon._clogit_probs(β_cl, df15long)
 stata_table(df15long, :fishmode,
     [(:mean, :d), (:mean, :pasclogit), (:sd, :pasclogit)]);
 ```
@@ -636,7 +636,7 @@ restore
 df15long_p = copy(df15long)
 δ = Statistics.std(df15long_p.p) / 1000
 df15long_p.p[df15long_p.fishmode .== "beach"] .+= δ
-df15long_p.pnew    = StatEcon._c15_clogit_probs(β_cl, df15long_p)
+df15long_p.pnew    = StatEcon._clogit_probs(β_cl, df15long_p)
 df15long_p.dpdbeach = (df15long_p.pnew .- df15long_p.pasclogit) ./ δ
 stata_table(df15long_p, :fishmode,
     [(:mean, :dpdbeach), (:sd, :dpdbeach), (:count, :dpdbeach)]);
@@ -772,13 +772,13 @@ tabulate fishmode, summarize(plevel2)
 # Three Stata commands in one chunk:
 #   • `estimates store NL` → bind `NL = nlogit_res` for downstream
 #     `hausman MNL NL` (IIA test) and re-use.
-#   • `predict plevel1 plevel2, pr` → `StatEcon._c15_nlogit_probs` (chunk 1) returns
+#   • `predict plevel1 plevel2, pr` → `StatEcon._nlogit_probs` (chunk 1) returns
 #     the within-nest conditional (level-1) and the nest-level
 #     marginal (level-2) probabilities, plus the joint.
 #   • `tabulate fishmode, summarize(plevel2)` → `stata_table` with
 #     mean / SD / N of `plevel2` by `fishmode`.
 NL = nlogit_res
-plv = StatEcon._c15_nlogit_probs(NL, df15long; case_var = :id, alt_var = :fishmode)
+plv = StatEcon._nlogit_probs(NL, df15long; case_var = :id, alt_var = :fishmode)
 df15long.plevel1 = plv.plevel1   # P(nest)         — top level
 df15long.plevel2 = plv.plevel2   # P(alternative)  — joint, bottom level
 
@@ -826,13 +826,13 @@ restore
 # Same manual-FD recipe used after `asclogit`, applied to the nested
 # logit fit `NL`. `preserve`/`restore` is mimicked by working on a
 # `copy(df15long)`. We bump only the beach rows' `p` by δ = SD(p)/1000,
-# recompute the joint alternative probability via `StatEcon._c15_nlogit_probs`
+# recompute the joint alternative probability via `StatEcon._nlogit_probs`
 # (Stata's `plevel2` = bottom-level joint), form (pnew2 − plevel2)/δ,
 # and summarize by fishmode.
 df15long_nl = copy(df15long)
 δ_nl = Statistics.std(df15long_nl.p) / 1000
 df15long_nl.p[df15long_nl.fishmode .== "beach"] .+= δ_nl
-plv_new = StatEcon._c15_nlogit_probs(NL, df15long_nl; case_var = :id, alt_var = :fishmode)
+plv_new = StatEcon._nlogit_probs(NL, df15long_nl; case_var = :id, alt_var = :fishmode)
 df15long_nl.pnew2    = plv_new.plevel2
 df15long_nl.dpdbeach = (df15long_nl.pnew2 .- df15long.plevel2) ./ δ_nl
 stata_table(df15long_nl, :fishmode,
@@ -1135,7 +1135,7 @@ ologit hlthstat age linc ndisease, nolog
 # τ_1 = θ_{cut,1}, τ_j = τ_{j−1} + exp(θ_{cut,j}) so the optimiser
 # never crosses cut-point ordering; SEs for τ are delta-method
 # corrected. Returns β / τ / X / J / dfc and likelihood diagnostics
-# for downstream `StatEcon._c15_ologit_probs` and marginal-effects chunks.
+# for downstream `StatEcon._ologit_probs` and marginal-effects chunks.
 ologit_res = stata_ologit(df18_y2, :hlthstat, [:age, :linc, :ndisease])
 β_ol   = ologit_res.β
 τ_ol   = ologit_res.τ
@@ -1159,12 +1159,12 @@ predict p1ologit p2ologit p3ologit, pr
 summarize hlthpf hlthg hlthe p1ologit p2ologit p3ologit, separator(0)
 =#
 
-# `StatEcon._c15_ologit_probs` (chunk 1) is the ordered-logit `predict, pr`:
+# `StatEcon._ologit_probs` (chunk 1) is the ordered-logit `predict, pr`:
 # P[:, j] = Λ(τ_j − Xβ) − Λ(τ_{j-1} − Xβ) with end-point handling.
 # Stata's `separator(0)` only suppresses the every-5-rows dashed
 # line in long summarize tables — `stata_summarize` (chunk 1) never
 # emits that separator, so the option is a no-op.
-P_ol = StatEcon._c15_ologit_probs(β_ol, τ_ol, X_ol, J_o)
+P_ol = StatEcon._ologit_probs(β_ol, τ_ol, X_ol, J_o)
 df18_ol.p1ologit = P_ol[:, 1]
 df18_ol.p2ologit = P_ol[:, 2]
 df18_ol.p3ologit = P_ol[:, 3]
@@ -1193,6 +1193,22 @@ margins, dydx(*) predict(outcome(3)) atmean noatlegend
 # the column means of `res.X`, with delta-method SE from a central-FD
 # Jacobian against `res.V` (which jointly covers β and τ).
 stata_margins_dydx_ologit(ologit_res; outcome = 3, at = :mean);
+```
+
+### Predicted class vs. actual (`tab pclass hlthstat`)
+
+StatEcon's `ordered_classtable` assigns each person to the most likely health
+status under the fitted ordered logit and cross-tabulates the predicted class
+against the actual `hlthstat` — Stata's `tab pclass hlthstat`. Passing the
+logistic `link` makes its predicted probabilities identical to the
+`_ologit_probs` used above, so the `argmax` classes are consistent; the
+overall correctly-classified fraction and per-class diagonal ratios follow.
+
+```{julia}
+cats_ol = sort(unique(Int.(df18_ol.hlthstat)))
+yidx_ol = [findfirst(==(v), cats_ol) for v in Int.(df18_ol.hlthstat)]
+ordered_classtable(β_ol, τ_ol, X_ol, yidx_ol, cats_ol;
+                   link = z -> 1 / (1 + exp(-z)));
 ```
 
 ### 15.9.6 Other ordered models
@@ -1266,14 +1282,14 @@ predict biprob00, p00
 summarize hlthe dmdu biprob1 biprob2 biprob11 biprob10 biprob01 biprob00
 =#
 
-# `StatEcon._c15_biprobit_probs` (chunk 1) returns the two marginals and the four
+# `StatEcon._biprobit_probs` (chunk 1) returns the two marginals and the four
 # joint cells of the 2×2 outcome table, computed via the same
 # equi-correlation 1-D Gauss–Hermite scheme that `stata_biprobit`
 # used at fit time. Attach the six columns to `df18_y2` and feed
 # the eight variables (two indicators + six predictions) to
 # `stata_summarize`. As a saturated MLE sanity check:
 # mean(biprob1) ≈ mean(hlthe), mean(biprob2) ≈ mean(dmdu).
-plv = StatEcon._c15_biprobit_probs(biprobit_res, df18_y2)
+plv = StatEcon._biprobit_probs(biprobit_res, df18_y2)
 df18_y2.biprob1  = plv.pmarg1
 df18_y2.biprob2  = plv.pmarg2
 df18_y2.biprob11 = plv.p11

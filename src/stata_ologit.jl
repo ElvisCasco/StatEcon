@@ -236,13 +236,13 @@ function stata_ologit(df::DataFrames.AbstractDataFrame, depvar::Symbol,
 end
 
 """
-    _c15_ologit_probs(β, τ, X, J) -> Matrix
+    _ologit_probs(β, τ, X, J) -> Matrix
 
 Ordered-logit `predict, pr`: `P[i, j] = Λ(τ_j − xᵢ'β) − Λ(τ_{j-1} − xᵢ'β)`
 with `τ_0 = −∞`, `τ_J = +∞`. `β`, `τ`, `X`, `J` come from a `stata_ologit`
 fit; returns the `n × J` matrix of predicted category probabilities.
 """
-function _c15_ologit_probs(β, τ, X, J)
+function _ologit_probs(β, τ, X, J)
     n = size(X, 1)
     P = zeros(n, J)
     Λ(z) = 1 / (1 + exp(-z))

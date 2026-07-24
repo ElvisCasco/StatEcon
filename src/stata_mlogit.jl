@@ -231,7 +231,7 @@ function stata_mlogit(df::DataFrames.AbstractDataFrame, depvar::Symbol,
 end
 
 """
-    _c15_mnl_probs(B, X, J) -> Matrix
+    _mnl_probs(B, X, J) -> Matrix
 
 Stata `predict, pr` for multinomial logit. Closed-form softmax with
 the base outcome's log-odds pinned at 0:
@@ -245,7 +245,7 @@ which already includes the intercept column). Always assumes the
 *first* category is the base — matches the chunk-1 mlogit fit that
 sets `baseoutcome = cats[1]`.
 """
-function _c15_mnl_probs(B, X, J)
+function _mnl_probs(B, X, J)
     eta = X * B
     den = 1.0 .+ sum(exp.(eta); dims = 2)
     P   = zeros(size(X, 1), J)
@@ -369,8 +369,8 @@ function stata_margins_mlogit(res; outcome,
     end
     target_label = res.cat_labels[tgt_pos]
 
-    # Predicted probabilities (chunk-1 _c15_mnl_probs).
-    P = _c15_mnl_probs(res.B, res.X, J)
+    # Predicted probabilities (chunk-1 _mnl_probs).
+    P = _mnl_probs(res.B, res.X, J)
     N = size(P, 1)
 
     # Sample-average margin.

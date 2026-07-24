@@ -26,7 +26,7 @@ Hessian).
 Returns a NamedTuple with `β_alt`, `α` (Dict alt ⇒ α_j), `γ` (Dict
 alt ⇒ Vector{γ_jv} matching `case_vars`), `β_cl` (the concatenated
 parameter vector in `[alt_specific…; α_nonbase…; γ_v1_nonbase…;
-γ_v2_nonbase…; …]` layout, used by `_c15_clogit_probs` and friends), `V`,
+γ_v2_nonbase…; …]` layout, used by `_clogit_probs` and friends), `V`,
 `se`, `ll`, `Wald`, `Wald_p`, `n_obs`, `n_cases`, `J`, `nonbase`,
 `alts`.
 """
@@ -550,7 +550,7 @@ function stata_estat_mfx_asclogit(res, df_long;
 end
 
 """
-    _c15_clogit_probs(params, df_long, base="beach") -> Vector
+    _clogit_probs(params, df_long, base="beach") -> Vector
 
 Stata `predict, pr` after `asclogit`. Given the concatenated `β_cl`
 parameter vector returned by `stata_asclogit` (layout: `[β_p; β_q;
@@ -559,7 +559,7 @@ parameter vector returned by `stata_asclogit` (layout: `[β_p; β_q;
 predicted choice probability with a stable softmax over each case's
 J utilities. Returns a vector aligned with `df_long`'s row order.
 """
-function _c15_clogit_probs(params, df_long, base = "beach")
+function _clogit_probs(params, df_long, base = "beach")
     alts = unique(df_long.fishmode)
     nonbase = filter(!=(base), alts)
     β_p = params[1]; β_q = params[2]

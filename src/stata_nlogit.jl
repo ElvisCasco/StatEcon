@@ -455,7 +455,7 @@ function stata_nlogit(df_long::DataFrames.AbstractDataFrame;
 end
 
 """
-    _c15_nlogit_probs(res, df_long; case_var, alt_var) -> NamedTuple
+    _nlogit_probs(res, df_long; case_var, alt_var) -> NamedTuple
 
 Stata `predict plevel1 plevel2, pr` after `nlogit` (RUM-consistent
 form). Stata numbers the tree from the top down — level 1 is the
@@ -478,7 +478,7 @@ across cases — and matches the empirical share within rounding.
 reconstructs the alt → nest map from `res.nests`. `case_var` and
 `alt_var` must match the long-form column names used at fit time.
 """
-function _c15_nlogit_probs(res, df_long::DataFrames.AbstractDataFrame;
+function _nlogit_probs(res, df_long::DataFrames.AbstractDataFrame;
                       case_var::Symbol, alt_var::Symbol)
     # Reconstruct alt → nest index (1..K) from `res.nests`.
     nest_of_alt = Dict{String,Int}()

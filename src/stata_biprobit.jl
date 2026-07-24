@@ -216,7 +216,7 @@ function stata_biprobit(df::DataFrames.AbstractDataFrame,
 end
 
 """
-    _c15_biprobit_probs(res, df; integration_pts=24) -> NamedTuple
+    _biprobit_probs(res, df; integration_pts=24) -> NamedTuple
 
 Stata `predict, pmarg1`/`pmarg2`/`p11`/`p10`/`p01`/`p00` after
 `biprobit`. Returns the two marginals and the four joint probabilities
@@ -230,7 +230,7 @@ Output NamedTuple fields:
 * `p11`, `p10`, `p01`, `p00` = Φ_2(±X β_1, ±X β_2; ±ρ) (the four
   cells of the 2×2 joint probability table).
 """
-function _c15_biprobit_probs(res, df::DataFrames.AbstractDataFrame;
+function _biprobit_probs(res, df::DataFrames.AbstractDataFrame;
                         integration_pts::Int = 24)
     function _gauss_hermite(n_pts::Int)
         a = zeros(n_pts)

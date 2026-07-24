@@ -511,7 +511,7 @@ ml = stata_mlogit(keane87, :status, [:educ, :exper, :expersq, :black];
 ### Predicted status and the hit rate
 
 ```{julia}
-P    = StatEcon._c15_mnl_probs(ml.B, ml.X, ml.J)
+P    = StatEcon._mnl_probs(ml.B, ml.X, ml.J)
 pred = [argmax(view(P, i, :)) for i in 1:size(P, 1)]
 ytru = Int.(ml.dfc.status)
 
